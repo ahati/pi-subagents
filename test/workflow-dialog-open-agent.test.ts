@@ -127,9 +127,11 @@ describe("the inspector opens a workflow agent's conversation", () => {
     dialog.handleInput?.("c");
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
 
-    // A second overlay, on the viewer's own terms — not the dialog reused.
+    // A second overlay, on the panel's own terms — not the dialog reused. The
+    // conversation now opens as the agent hub's windowed panel (which embeds
+    // the conversation viewer), not a bare ConversationViewer.
     expect(ui.overlays[1].options.overlay).toBe(true);
-    expect(ui.overlays[1].instance.constructor.name).toBe("ConversationViewer");
+    expect(ui.overlays[1].instance.constructor.name).toBe("AgentHub");
     // ...with the dialog hidden underneath it: the two frames size themselves
     // to different content, so the taller one's edges would show around the
     // shorter.

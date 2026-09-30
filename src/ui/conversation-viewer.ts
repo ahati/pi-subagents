@@ -22,6 +22,37 @@ const MIN_VIEWPORT = 3;
 export const VIEWPORT_HEIGHT_PCT = 70;
 
 /**
+ * Optional behavior overrides for a viewer embedded in a larger surface (the
+ * agent hub). All fields optional; a standalone viewer (the windowed overlay)
+ * constructs with none of them and behaves exactly as before.
+ */
+export interface ConversationViewerOptions {
+  /**
+   * Height ceiling as a percentage of the terminal, shared by the overlay's
+   * `maxHeight` and the internal viewport cap. A function is re-read on every
+   * render, so a host that resizes itself (the hub's popup ↔ full-screen
+   * toggle) can change the viewer's viewport live. Defaults to
+   * `VIEWPORT_HEIGHT_PCT`.
+   */
+  maxHeightPct?: number | (() => number);
+  /**
+   * When set, Esc/Ctrl+C/Q return to the parent surface by calling this instead
+   * of resolving `done` (which would close the whole overlay). The quit keys
+   * become "back" keys; the parent decides how to actually close.
+   */
+  onBack?: () => void;
+  /** Footer text for the back key when `onBack` is set. A function is re-read
+   *  on every render. Defaults to `"Esc back"`. */
+  backHint?: string | (() => string);
+  /**
+   * Called for every key the viewer itself does not handle (after the composer,
+   * which always wins while open). Return `true` to consume the key — this is
+   * how the hub binds `f` without forking the viewer's key map.
+   */
+  onUnhandledKey?: (data: string) => boolean;
+}
+
+/**
  * Cap on a single tool result or bash output before the viewer elides the rest.
  *
  * The cap is not cosmetic — it bounds render cost. `buildContentLines()` runs on
@@ -36,6 +67,43 @@ export const RESULT_MAX_CHARS = 16_000;
 
 /** Cycle order for the viewer's `m` key. */
 const MARKDOWN_MODES: readonly ViewerMarkdownMode[] = ["off", "assistant", "all"];
+
+/** Detailed-log sizing: result preview lines, error preview lines, thinking preview lines. */
+const RESULT_PREVIEW_LINES = 4;
+const ERROR_PREVIEW_LINES = 10;
+const THINKING_PREVIEW_LINES = 6;
+
+/**
+ * Tool-argument keys worth showing on a call line, most identifying first —
+ * the command run, the path touched, the pattern searched. Anything stringy
+ * beyond these falls back to the first string value present.
+ */
+const CALL_ARG_KEYS = [
+  "command", "path", "file_path", "filePath", "pattern", "query", "url",
+  "skill", "name", "description", "prompt",
+] as const;
+
+/** `ls -la\nsrc` → `ls -la src`, truncated to a call-line-friendly length. */
+function oneLine(text: string, max = 60): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
+/** The one argument that says what this call does, for the `⏺ name(...)` line. */
+function describeToolArgs(args: unknown): string {
+  if (args == null) return "";
+  if (typeof args !== "object") return oneLine(String(args));
+  const obj = args as Record<string, unknown>;
+  for (const key of CALL_ARG_KEYS) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim()) return oneLine(v);
+    if (typeof v === "number" || typeof v === "boolean") return `${key}: ${v}`;
+  }
+  for (const v of Object.values(obj)) {
+    if (typeof v === "string" && v.trim()) return oneLine(v);
+  }
+  return "";
+}
 
 /** Footer labels — short, because the idle footer is already full at 80 columns. */
 const MARKDOWN_MODE_LABELS: Record<ViewerMarkdownMode, string> = {
@@ -190,6 +258,8 @@ export class ConversationViewer implements Component {
      * the same thing. Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
+    /** Embedded-mode overrides — see `ConversationViewerOptions`. */
+    private options?: ConversationViewerOptions,
   ) {
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
@@ -208,7 +278,21 @@ export class ConversationViewer implements Component {
       return;
     }
 
+    // Host-surface keys (the hub's `f` toggle). Consumed before the viewer's
+    // own bindings so the host never fights them; the composer above still wins
+    // while it is open, so typing "f" into a steer message types an "f".
+    if (this.options?.onUnhandledKey?.(data)) {
+      this.tui.requestRender();
+      return;
+    }
+
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
+      // Embedded in a parent surface (agent hub): the quit keys go "back" and
+      // the parent keeps the overlay open. Standalone: they close it.
+      if (this.options?.onBack) {
+        this.options.onBack();
+        return;
+      }
       this.closed = true;
       this.done(undefined);
       return;
@@ -366,7 +450,7 @@ export class ConversationViewer implements Component {
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
       actions.push(th.fg("dim", `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`));
-      const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+      const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓ · ${this.backHintText()}`);
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
       // it's the first thing dropped so it never crowds out the hints.
@@ -395,6 +479,13 @@ export class ConversationViewer implements Component {
   /** The mode in force: an `m` press, else the setting, else the default. */
   private markdownMode(): ViewerMarkdownMode {
     return this.markdownModeOverride ?? this.viewerMarkdown?.() ?? "assistant";
+  }
+
+  /** Footer text for the quit/back key. */
+  private backHintText(): string {
+    if (!this.options?.onBack) return "Esc close";
+    const hint = this.options.backHint;
+    return (typeof hint === "function" ? hint() : hint) ?? "Esc back";
   }
 
   /** Wrap `text` literally — the pre-Markdown path, and the fallback from it. */
@@ -485,8 +576,11 @@ export class ConversationViewer implements Component {
 
   private viewportHeight(): number {
     // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
-    // more lines than the overlay shows and clip the footer.
-    const maxRows = Math.floor((this.tui.terminal.rows * VIEWPORT_HEIGHT_PCT) / 100);
+    // more lines than the overlay shows and clip the footer. A function option
+    // is re-read per render so a resizing host drags the viewport along.
+    const opt = this.options?.maxHeightPct;
+    const pct = typeof opt === "function" ? opt() : opt ?? VIEWPORT_HEIGHT_PCT;
+    const maxRows = Math.floor((this.tui.terminal.rows * pct) / 100);
     return Math.max(MIN_VIEWPORT, maxRows - this.chromeLines());
   }
 
@@ -506,6 +600,84 @@ export class ConversationViewer implements Component {
     return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
   }
 
+  // ---- Detailed-log rendering (omp-style) ----
+
+  /** Tool call line: `⏺ name(key-args)` — the call is the anchor of its log entry. */
+  private toolCallLines(call: { name?: string; toolName?: string; arguments?: unknown; input?: unknown }, width: number): string[] {
+    const th = this.theme;
+    const name = call.name ?? call.toolName ?? "unknown";
+    const args = describeToolArgs(call.arguments ?? call.input);
+    const head = `${th.fg("accent", "⏺")} ${th.bold(name)}${args ? th.fg("dim", `(${args})`) : ""}`;
+    return [truncateToWidth(head, width)];
+  }
+
+  /**
+   * Result rendered under its call: `✓`/`✗` plus a preview. `assistant` mode
+   * (the default) shows the first lines and an elision note; `all` shows the
+   * full result as Markdown; `off` shows it raw — the old escape hatches keep
+   * working, just per-call instead of per-block.
+   */
+  private toolResultLines(msg: any, width: number): string[] {
+    const th = this.theme;
+    const isError = !!msg.isError;
+    const raw = extractText(msg.content).trim();
+    const indent = "    ";
+    const bodyWidth = Math.max(1, width - indent.length - 2);
+
+    if (isError) {
+      const lines = [truncateToWidth(th.fg("error", "  ✗ error"), width)];
+      if (!raw) return lines;
+      const { text, elided } = capResult(raw);
+      const body = wrapTextWithAnsi(text, bodyWidth);
+      for (const l of body.slice(0, ERROR_PREVIEW_LINES)) {
+        lines.push(truncateToWidth(th.fg("dim", indent + l), width));
+      }
+      const hidden = body.length - ERROR_PREVIEW_LINES + (elided > 0 ? 1 : 0);
+      if (hidden > 0) lines.push(truncateToWidth(th.fg("dim", `${indent}… +${hidden} more lines`), width));
+      return lines;
+    }
+
+    const mode = this.markdownMode();
+    if (mode === "all" || mode === "off") {
+      // Full result, exactly as the legacy block rendered it.
+      const { text, elided } = capResult(raw);
+      if (!text) return [truncateToWidth(th.fg("dim", "  ✓ (no output)"), width)];
+      const lines = [truncateToWidth(th.fg("success", "  ✓"), width)];
+      lines.push(...(mode === "all" ? this.markdownLines(msg, text, width, true) : this.rawLines(text, width, true)));
+      if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+      return lines;
+    }
+
+    if (!raw) return [truncateToWidth(th.fg("dim", "  ✓ (no output)"), width)];
+    // Preview: cap first (a huge single line is still expensive to wrap), then
+    // take the first lines. The elision note names the `m` escape hatch.
+    const { text } = capResult(raw);
+    const lines = [truncateToWidth(th.fg("success", "  ✓"), width)];
+    const body = wrapTextWithAnsi(text, bodyWidth);
+    for (const l of body.slice(0, RESULT_PREVIEW_LINES)) {
+      lines.push(truncateToWidth(th.fg("dim", indent + l), width));
+    }
+    if (body.length > RESULT_PREVIEW_LINES) {
+      lines.push(truncateToWidth(th.fg("dim", `${indent}… +${body.length - RESULT_PREVIEW_LINES} lines (m for full)`), width));
+    }
+    return lines;
+  }
+
+  /** Thinking block: receded `✻ thinking` preview, capped like results. */
+  private thinkingLines(text: string, width: number): string[] {
+    const th = this.theme;
+    if (!text.trim()) return [];
+    const lines = [truncateToWidth(th.fg("muted", "  ✻ thinking"), width)];
+    const body = wrapTextWithAnsi(text.trim(), Math.max(1, width - 4));
+    for (const l of body.slice(0, THINKING_PREVIEW_LINES)) {
+      lines.push(truncateToWidth(th.fg("dim", "  " + l), width));
+    }
+    if (body.length > THINKING_PREVIEW_LINES) {
+      lines.push(truncateToWidth(th.fg("dim", `  … +${body.length - THINKING_PREVIEW_LINES} lines`), width));
+    }
+    return lines;
+  }
+
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
 
@@ -519,8 +691,26 @@ export class ConversationViewer implements Component {
     }
 
     const mode = this.markdownMode();
+
+    // Detailed-log association (omp-style): pair each tool result with its call
+    // so the outcome renders directly beneath the call — instead of calls as
+    // bare names and results as detached blocks. Results left unconsumed (no
+    // matching call rendered) fall back to the legacy standalone block.
+    const resultById = new Map<string, any>();
+    for (const msg of messages) {
+      if (msg.role === "toolResult") {
+        const id = (msg as any).toolCallId;
+        if (typeof id === "string") resultById.set(id, msg);
+      }
+    }
+    const consumedResults = new Set<string>();
+
     let needsSeparator = false;
     for (const msg of messages) {
+      if (msg.role === "toolResult") {
+        const id = (msg as any).toolCallId as string | undefined;
+        if (id !== undefined && consumedResults.has(id)) continue; // already under its call
+      }
       if (msg.role === "user") {
         const text = typeof msg.content === "string"
           ? msg.content
@@ -532,25 +722,41 @@ export class ConversationViewer implements Component {
           lines.push(line);
         }
       } else if (msg.role === "assistant") {
-        const textParts: string[] = [];
-        const toolCalls: string[] = [];
-        for (const c of msg.content) {
-          if (c.type === "text" && c.text) textParts.push(c.text);
-          else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
-          }
-        }
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
-        if (textParts.length > 0) {
-          const text = textParts.join("\n").trim();
-          lines.push(...(mode === "off"
-            ? this.rawLines(text, width, false)
-            : this.markdownLines(msg, text, width, false)));
+        // Text, thinking and tool calls render in content order (consecutive
+        // text blocks join, matching the old joined-text behavior).
+        let textRun: string[] = [];
+        const flushText = () => {
+          if (textRun.length === 0) return;
+          const text = textRun.join("\n").trim();
+          textRun = [];
+          if (text) {
+            lines.push(...(mode === "off"
+              ? this.rawLines(text, width, false)
+              : this.markdownLines(msg, text, width, false)));
+          }
+        };
+        for (const c of msg.content) {
+          if (c.type === "text" && c.text) {
+            textRun.push(c.text);
+          } else if ((c as any).type === "thinking") {
+            flushText();
+            lines.push(...this.thinkingLines((c as any).thinking ?? "", width));
+          } else if (c.type === "toolCall") {
+            flushText();
+            const callId = (c as any).id ?? (c as any).toolUseId;
+            lines.push(...this.toolCallLines(c as any, width));
+            const result = typeof callId === "string" ? resultById.get(callId) : undefined;
+            if (result) {
+              consumedResults.add(callId as string);
+              lines.push(...this.toolResultLines(result, width));
+            } else if (this.record.status === "running" || this.record.status === "queued") {
+              lines.push(truncateToWidth(th.fg("dim", "  ○ awaiting result"), width));
+            }
+          }
         }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
-        }
+        flushText();
       } else if (msg.role === "toolResult") {
         const { text, elided } = capResult(extractText(msg.content).trim());
         if (!text) continue;
