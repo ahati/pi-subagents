@@ -3072,7 +3072,9 @@ Terse command-style prompts produce shallow, generic work.
     // Same windowed panel the fleet list opens (with the `f` full-screen
     // toggle), so every entry point shares one overlay lifecycle and the same
     // settings wiring — the old inline viewer construction drifted once.
-    fleet.openHub(record.id, ctx.ui as never);
+    // Awaited: callers re-show their menus on return, and a dialog opened
+    // while the panel is still up would steal its keyboard.
+    await fleet.openHub(record.id, ctx.ui as never);
   }
 
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {

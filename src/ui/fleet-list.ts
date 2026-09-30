@@ -383,15 +383,20 @@ export class FleetList {
    * fleet's UI context (the workflow inspector's `c`), so they get the same
    * panel instead of silently no-oping.
    *
+   * Returns the hub's promise — resolves when the hub closes. Callers that
+   * stack another dialog after this (e.g. /agents re-showing its list) MUST
+   * await it: the dialog would otherwise open on top of the panel and take
+   * its keys.
+   *
    * Shared by the fleet list and `/agents` so both entry points drive the same
    * overlay lifecycle: while the hub is up the list keeps its keys to itself
    * (`viewerClose`), and on close the cursor returns to the viewed agent.
    */
-  openHub(agentId?: string, uiOverride?: FleetUICtx): void {
+  openHub(agentId?: string, uiOverride?: FleetUICtx): Promise<void> {
     const ui = uiOverride ?? this.ui;
-    if (!ui) return;
+    if (!ui) return Promise.resolve(undefined);
     if (agentId != null) this.viewingAgentId = agentId;
-    void openAgentHub(
+    return openAgentHub(
       ui,
       {
         manager: this.manager,
@@ -404,7 +409,10 @@ export class FleetList {
         notify: (message, type) => ui.notify(message, type),
       },
       { agentId },
-    ).then(() => this.clearViewer(), () => this.clearViewer());
+    ).then(
+      () => this.clearViewer(),
+      () => this.clearViewer(),
+    );
   }
 
   private openSelected(): void {
