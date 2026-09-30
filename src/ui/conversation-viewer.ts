@@ -284,12 +284,13 @@ export class ConversationViewer implements Component {
    */
   private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
   /**
-   * Rich tool-renderer components, cached per call/result object (they are
-   * designed to be re-rendered across frames) and rebuilt when the underlying
-   * payload changes (streaming args grow, results land).
+   * Rich tool-renderer components, keyed per call/result object. The stored
+   * component is passed back to the renderer as `lastComponent` on the next
+   * frame — renderers reuse or rebuild it as they see fit (pi's edit renderer
+   * clears and refills the same Container, for instance).
    */
-  private readonly callComponentCache = new WeakMap<object, { component: unknown; argsKey: string }>();
-  private readonly resultComponentCache = new WeakMap<object, { component: unknown; len: number; isError: boolean }>();
+  private readonly callComponentCache = new WeakMap<object, { component: unknown }>();
+  private readonly resultComponentCache = new WeakMap<object, { component: unknown }>();
   /**
    * Shared per-execution renderer state (`ToolRenderContext.state`), keyed by
    * toolCallId. The main window passes one plain object per tool execution to
@@ -741,23 +742,19 @@ export class ConversationViewer implements Component {
   private richCallLines(call: { id?: string; toolUseId?: string }, args: unknown, renderers: ToolRenderers, width: number): string[] | undefined {
     if (!renderers.renderCall) return undefined;
     try {
-      const argsKey = typeof args === "object" && args !== null ? JSON.stringify(args) : String(args);
-      const callId = call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`;
-      const state = this.execState(String(callId));
-      let entry = this.callComponentCache.get(call as object);
-      if (!entry || entry.argsKey !== argsKey) {
-        // Same wiring as the main window: `state` is renderer-owned (the edit
-        // renderer, for one, hangs its diff preview on it), and `lastComponent`
-        // is the previous component for this render slot. Never write to state
-        // from the presentation — that clobbers renderer-managed fields.
-        const component = renderers.renderCall(args, this.theme, this.renderContext(callId, args, {
-          state,
-          lastComponent: entry?.component,
-        }));
-        entry = { component, argsKey };
-        this.callComponentCache.set(call as object, entry);
-      }
-      const lines = (entry.component as { render?(w: number): string[] })?.render?.(width);
+      const callId = String(call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`);
+      const state = this.execState(callId);
+      const entry = this.callComponentCache.get(call as object);
+      // Re-invoke the renderer EVERY frame, exactly like pi's tool-execution:
+      // renderers are written to be called repeatedly with their previous
+      // component (the edit renderer computes its diff async and rebuilds its
+      // children on a later frame — skipping the call freezes it mid-preview).
+      const component = renderers.renderCall(args, this.theme, this.renderContext(callId, args, {
+        state,
+        lastComponent: entry?.component,
+      }));
+      this.callComponentCache.set(call as object, { component });
+      const lines = (component as { render?(w: number): string[] })?.render?.(width);
       return Array.isArray(lines) && lines.length > 0 ? lines : undefined;
     } catch {
       // Renderers are host components running against arbitrary content; a
@@ -773,27 +770,25 @@ export class ConversationViewer implements Component {
   private richResultLines(msg: any, callArgs: unknown, renderers: ToolRenderers, width: number): string[] | undefined {
     if (!renderers.renderResult) return undefined;
     try {
-      const len = extractText(msg.content).length;
       const isError = !!msg.isError;
       const callId = String(msg.toolCallId ?? "result");
       const state = this.execState(callId);
-      let entry = this.resultComponentCache.get(msg);
-      if (!entry || entry.len !== len || entry.isError !== isError) {
-        const result = { content: msg.content, details: msg.details, isError };
-        const component = renderers.renderResult(
-          result,
-          { expanded: false, isPartial: false },
-          this.theme,
-          this.renderContext(callId, callArgs, {
-            state,
-            lastComponent: entry?.component,
-            isError,
-          }),
-        );
-        entry = { component, len, isError };
-        this.resultComponentCache.set(msg, entry);
-      }
-      const lines = (entry.component as { render?(w: number): string[] })?.render?.(width);
+      const entry = this.resultComponentCache.get(msg);
+      // Same every-frame contract as richCallLines — renderers own their
+      // component updates; the viewer only supplies lastComponent and state.
+      const result = { content: msg.content, details: msg.details, isError };
+      const component = renderers.renderResult(
+        result,
+        { expanded: false, isPartial: false },
+        this.theme,
+        this.renderContext(callId, callArgs, {
+          state,
+          lastComponent: entry?.component,
+          isError,
+        }),
+      );
+      this.resultComponentCache.set(msg, { component });
+      const lines = (component as { render?(w: number): string[] })?.render?.(width);
       return Array.isArray(lines) && lines.length > 0 ? lines : undefined;
     } catch {
       return undefined;

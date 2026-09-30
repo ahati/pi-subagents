@@ -98,23 +98,38 @@ describe("rich tool renderers (main-window quality)", () => {
     expect(out).toContain("HALF err=false");
   });
 
-  it("reuses the cached component while args do not change, rebuilds when they do", () => {
-    let constructions = 0;
-    const counting = {
-      renderCall: (args: any) => {
-        constructions++;
-        return { render: () => [`C ${constructions}`] };
+  it("re-invokes renderCall every frame with the same shared component (async-preview pattern)", async () => {
+    // Mirrors pi's edit renderer: state-owned component, children rebuilt per
+    // frame, and a preview that lands ASYNC via ctx.invalidate() — the next
+    // invocation must see it and render the body.
+    let component: any;
+    const invocations: number[] = [];
+    const editLike = {
+      renderCall: (args: any, _theme: any, ctx: any) => {
+        invocations.push(Date.now());
+        component ??= { children: ["header"], preview: undefined as string[] | undefined };
+        ctx.state.callComponent = component;
+        // Simulate the async diff landing after the first frame.
+        if (invocations.length === 1) {
+          Promise.resolve().then(() => {
+            component.preview = ["+ diff line"];
+            ctx.invalidate();
+          });
+        }
+        const lines = ["header", ...(component.preview ?? [])];
+        return { render: () => lines };
       },
     };
-    const call = { type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } };
-    const session = mockSession([{ role: "assistant", content: [call] }], () => counting);
+    const session = mockSession([{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } }] }],
+      () => editLike);
     const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
-    viewer.render(120);
-    viewer.render(120);
-    expect(constructions).toBe(1);
-    call.arguments = { path: "y.ts" };
-    viewer.render(120);
-    expect(constructions).toBe(2);
+    const first = plain(viewer.render(120));
+    expect(first).not.toContain("+ diff line");
+    await 0; // let the simulated async preview land
+    const second = plain(viewer.render(120));
+    expect(second).toContain("+ diff line");
+    expect(invocations.length).toBe(2); // re-invoked, not cached out
+    void component;
   });
 });
 
@@ -145,7 +160,7 @@ describe("rich tool renderers — main-window state wiring", () => {
     expect(seenArgs).toEqual({ path: "x.ts", edits: [] });
   });
 
-  it("re-invokes renderResult on payload change with the previous component as lastComponent", () => {
+  it("invokes renderResult every frame, handing back the previous component", () => {
     const lastComponents: unknown[] = [];
     const returned: unknown[] = [];
     const def = {
@@ -163,14 +178,9 @@ describe("rich tool renderers — main-window state wiring", () => {
     ], () => def);
     const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
     viewer.render(120);
-    // Unchanged payload → cached component re-rendered, renderer not re-invoked.
-    viewer.render(120);
-    expect(lastComponents).toHaveLength(1);
-    expect(lastComponents[0]).toBeUndefined();
-    // Payload grows (streaming) → renderer re-invoked with its previous component.
-    result.content[0].text = "ok — more output arrived";
     viewer.render(120);
     expect(lastComponents).toHaveLength(2);
+    expect(lastComponents[0]).toBeUndefined();
     expect(lastComponents[1]).toBe(returned[0]);
   });
 
