@@ -110,6 +110,61 @@ function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}) {
   };
 }
 
+describe("agent hub mouse wheel", () => {
+  /** A hub whose wheel handler is the component's own (the host calls it directly). */
+  function wheelHub(agents: AgentRecord[]) {
+    const h = harness(agents);
+    h.open();
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    return { h, component };
+  }
+
+  it("moves the roster selection and consumes the event", () => {
+    const { h, component } = wheelHub([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
+      makeRecord({ id: "a3", description: "gamma task" }),
+    ]);
+    expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+    component.handleMouse({ type: "wheel", wheelDelta: 1 });
+    expect(h.frame().join("\n")).toContain("▸ Agent gamma task");
+    // Clamps at the end instead of wrapping.
+    component.handleMouse({ type: "wheel", wheelDelta: 5 });
+    expect(h.frame().join("\n")).toContain("▸ Agent gamma task");
+    // Wheel up.
+    component.handleMouse({ type: "wheel", wheelDelta: -1 });
+    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+  });
+
+  it("ignores non-wheel events and empty deltas", () => {
+    const { component } = wheelHub([makeRecord({ id: "a1" })]);
+    expect(component.handleMouse({ type: "click" })).toBeUndefined();
+    expect(component.handleMouse({ type: "wheel", wheelDelta: 0 })).toBeUndefined();
+    expect(component.handleMouse({ type: "wheel" })).toBeUndefined();
+  });
+
+  it("scrolls the conversation in the chat view", () => {
+    const messages = Array.from({ length: 40 }, (_, i) => ({
+      role: "user",
+      content: `message number ${i}`,
+    }));
+    const h = harness([makeRecord({ id: "a1", session: { subscribe: () => () => {}, messages } })]);
+    h.open({ agentId: "a1" });
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    const followed = h.frame().join("\n");
+    expect(followed).toContain("message number 39"); // auto-following the tail
+    expect(component.handleMouse({ type: "wheel", wheelDelta: -5 })).toEqual({ handled: true });
+    const scrolled = h.frame().join("\n");
+    expect(scrolled).not.toBe(followed);
+    expect(scrolled).not.toContain("message number 39");
+  });
+});
+
 describe("agent hub ←/→ agent cycling", () => {
   it("right cycles to the next agent's conversation, left wraps backwards", async () => {
     const h = harness([

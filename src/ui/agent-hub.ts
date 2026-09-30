@@ -41,6 +41,13 @@ const MAX_NAME_COL = 24;
 /** A terminal shorter than this renders the empty state instead of a broken table. */
 const MIN_TERMINAL_ROWS = 8;
 
+/** Result of a wheel dispatch — structural subset of pi-tui's mouse types. */
+interface HubMouseEvent {
+  type: string;
+  /** Logical lines; negative scrolls up. */
+  wheelDelta?: number;
+}
+
 type HubView = "table" | "activity" | "chat";
 
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
@@ -241,6 +248,41 @@ export class AgentHub implements Component {
   }
 
   invalidate(): void { /* no cached render state */ }
+
+  /**
+   * Mouse wheel support. pi routes mouse events to an overlay's top-level
+   * component — which is this hub — and only in `tuiMode: "fullscreen"`; in
+   * regular mode the terminal owns the scrollback and nothing arrives here.
+   *
+   * The shape is declared locally rather than imported: mouse dispatch landed
+   * in pi-tui 0.99 while this extension's peer floor is 0.84, so the method is
+   * duck-typed — hosts that support mouse call it, older hosts never do.
+   *
+   * The conversation view hands the wheel to the embedded viewer's own scroll
+   * (so follow-the-tail behaves exactly as with ↑/↓). The roster views move the
+   * selection a row per logical line. Either way the event is consumed: leaving
+   * it unhandled would scroll the transcript *underneath* the overlay.
+   */
+  handleMouse(event: HubMouseEvent): { handled?: boolean } | undefined {
+    if (event.type !== "wheel") return undefined;
+    const delta = event.wheelDelta ?? 0;
+    if (delta === 0) return undefined;
+
+    if (this.view === "chat" && this.chatViewer) {
+      this.chatViewer.scrollBy(delta);
+      this.requestRender();
+      return { handled: true };
+    }
+
+    const steps = Math.max(1, Math.round(Math.abs(delta)));
+    const items = this.entries();
+    if (items.length > 0) {
+      this.selected = Math.min(items.length - 1, Math.max(0, this.selected + Math.sign(delta) * steps));
+      this.stopArmed = false;
+      this.requestRender();
+    }
+    return { handled: true };
+  }
 
   dispose(): void {
     this.disposed = true;

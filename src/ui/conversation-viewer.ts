@@ -647,6 +647,28 @@ export class ConversationViewer implements Component {
 
   invalidate(): void { /* no cached state to clear */ }
 
+  /**
+   * Scroll by `delta` logical lines (positive = down). Mouse-wheel input from
+   * the host funnels here; the keyboard path keeps its own handling because it
+   * also owns the page/home/end semantics. Returns whether anything moved —
+   * a wheel event at either end is still consumed by the caller so it cannot
+   * fall through and scroll the view underneath the overlay.
+   *
+   * Auto-follow resumes only when the bottom is reached, mirroring `↓`/`End`:
+   * scrolling up pauses it, scrolling back to the end re-arms it.
+   */
+  scrollBy(delta: number): boolean {
+    if (!Number.isFinite(delta) || delta === 0 || this.composer) return false;
+    const totalLines = this.buildContentLines(this.lastInnerW).length;
+    const viewportHeight = this.viewportHeight();
+    const maxScroll = Math.max(0, totalLines - viewportHeight);
+    const next = Math.min(maxScroll, Math.max(0, this.scrollOffset + delta));
+    if (next === this.scrollOffset) return false;
+    this.scrollOffset = next;
+    this.autoScroll = this.scrollOffset >= maxScroll;
+    return true;
+  }
+
   dispose(): void {
     this.closed = true;
     if (this.unsubscribe) {

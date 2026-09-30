@@ -295,3 +295,30 @@ describe("detailed agentic log (omp-style rendering)", () => {
     expect(out).toContain("file1");
   });
 });
+
+describe("viewer scrollBy (mouse wheel funnel)", () => {
+  function tallViewer() {
+    const messages = Array.from({ length: 60 }, (_, i) => ({ role: "user", content: `line ${i}` }));
+    const viewer = new ConversationViewer(mockTui(), mockSession(messages), mockRecord({ status: "completed" }), undefined, theme as any, vi.fn());
+    return viewer;
+  }
+
+  it("scrolls up from the tail, and down again to re-arm auto-follow", () => {
+    const viewer = tallViewer();
+    const tail = plain(viewer.render(120));
+    expect(tail).toContain("line 59");
+    expect(viewer.scrollBy(-5)).toBe(true);
+    const up = plain(viewer.render(120));
+    expect(up).not.toContain("line 59");
+    expect(viewer.scrollBy(5)).toBe(true);
+    expect(plain(viewer.render(120))).toContain("line 59");
+  });
+
+  it("returns false when nothing can move, and for degenerate deltas", () => {
+    const viewer = tallViewer();
+    viewer.render(120);
+    expect(viewer.scrollBy(0)).toBe(false);
+    expect(viewer.scrollBy(Number.NaN)).toBe(false);
+    expect(viewer.scrollBy(999)).toBe(false); // already at the tail
+  });
+});
