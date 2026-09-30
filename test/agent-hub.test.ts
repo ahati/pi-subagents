@@ -110,6 +110,52 @@ function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}) {
   };
 }
 
+describe("agent hub ←/→ agent cycling", () => {
+  it("right cycles to the next agent's conversation, left wraps backwards", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
+      makeRecord({ id: "a3", description: "gamma task" }),
+    ]);
+    h.open({ agentId: "a2" });
+    expect(h.frame().join("\n")).toContain("beta task");
+    const RIGHT = "\x1b[C";
+    const LEFT = "\x1b[D";
+    h.press(RIGHT);
+    expect(h.frame().join("\n")).toContain("gamma task");
+    h.press(RIGHT); // wraps to a1
+    expect(h.frame().join("\n")).toContain("alpha task");
+    h.press(LEFT); // back to a3
+    expect(h.frame().join("\n")).toContain("gamma task");
+    expect(h.settled()).toBe(false);
+  });
+
+  it("skips workflow rows in the cycle", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task" }),
+    ], {
+      workflows: () => [{
+        id: "wf_1", name: "audit", status: "running", doneCount: 0, totalCount: 1,
+        startedAt: Date.now() - 1000, tokens: 0,
+      }],
+    });
+    h.open({ agentId: "a1" });
+    const RIGHT = "\x1b[C";
+    h.press(RIGHT); // a1 → a2 (not the workflow)
+    expect(h.frame().join("\n")).toContain("beta task");
+  });
+
+  it("does not rebuild the viewer when cycling is a no-op (single agent)", () => {
+    const h = harness([makeRecord({ id: "a1", description: "only task" })]);
+    h.open({ agentId: "a1" });
+    const before = h.components.length;
+    h.press("\x1b[C");
+    h.press("\x1b[D");
+    expect(h.components.length).toBe(before); // same viewer instance, scroll kept
+  });
+});
+
 describe("agent hub open modes", () => {
   it("defaults to the windowed popup on the agent's conversation", () => {
     const h = harness([makeRecord()]);

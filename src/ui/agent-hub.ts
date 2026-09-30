@@ -464,12 +464,24 @@ export class AgentHub implements Component {
         maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
         // Popup has no roster behind it — Esc closes. Full-screen walks back.
         onBack: () => (this.popup ? this.close() : this.leaveChat()),
-        backHint: () => (this.popup ? "Esc close · f expand" : "Esc back · f popup"),
-        // The hub's `f` rides through the viewer's key stream.
+        backHint: () => (this.popup ? "←→ agent · Esc close · f expand" : "←→ agent · Esc back · f popup"),
+        // The hub's extra keys ride through the viewer's key stream: `f`
+        // flips popup/full-screen, ←/→ cycle the conversation across the
+        // roster's agents (wrapping).
         onUnhandledKey: data => {
-          if (!matchesKey(data, "f")) return false;
-          this.requestToggle();
-          return true;
+          if (matchesKey(data, "f")) {
+            this.requestToggle();
+            return true;
+          }
+          if (matchesKey(data, "left")) {
+            this.cycleAgent(-1);
+            return true;
+          }
+          if (matchesKey(data, "right")) {
+            this.cycleAgent(1);
+            return true;
+          }
+          return false;
         },
       },
     );
@@ -483,6 +495,24 @@ export class AgentHub implements Component {
     this.view = "table";
     this.clampSelection();
     this.requestRender();
+  }
+
+  /**
+   * ←/→ in the conversation: jump to the previous/next agent in roster order
+   * (earliest-launched first), wrapping around. Workflows are skipped — they
+   * have no conversation — and finished agents stay in the cycle so a wrap
+   * still reaches them for review. Re-entering the same agent is a no-op so
+   * scroll position survives a stray keypress.
+   */
+  private cycleAgent(direction: 1 | -1): void {
+    const agents = this.roster().filter((e): e is AgentEntry => e.kind === "agent" && !!e.record.session);
+    if (agents.length < 2) return;
+    const current = agents.findIndex(e => e.record.id === this.chatRecordId);
+    const next = current === -1 ? 0 : (current + direction + agents.length) % agents.length;
+    const record = agents[next].record;
+    if (record.id === this.chatRecordId) return;
+    const fresh = this.deps.manager.listAgents().find(a => a.id === record.id) ?? record;
+    if (fresh.session) this.enterChat(fresh);
   }
 
   /** Two-press stop on the selected agent, mirroring the viewer's `x`. */

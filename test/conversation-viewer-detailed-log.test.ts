@@ -118,6 +118,82 @@ describe("rich tool renderers (main-window quality)", () => {
   });
 });
 
+describe("rich tool renderers — main-window state wiring", () => {
+  it("passes shared state: renderResult sees renderCall's component (edit-diff pattern)", () => {
+    let seenByResult: unknown;
+    let seenArgs: unknown;
+    const editLike = {
+      renderCall: (_args: any, _theme: any, ctx: any) => {
+        // hang the diff on the shared call component, as pi's edit renderer does
+        ctx.state.callComponent = { diff: "DIFF HUNK" };
+        return { render: () => ["CALL ROW"] };
+      },
+      renderResult: (_result: any, _opts: any, _theme: any, ctx: any) => {
+        seenByResult = ctx.state.callComponent;
+        seenArgs = ctx.args;
+        const diff = (ctx.state.callComponent as any)?.diff;
+        return { render: () => [diff === "DIFF HUNK" ? "RESULT WITH HUNKS" : "RESULT WITHOUT HUNKS"] };
+      },
+    };
+    const session = mockSession([
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts", edits: [] } }] },
+      { role: "toolResult", toolCallId: "t1", toolName: "edit", isError: false, content: [{ type: "text", text: "ok" }] },
+    ], () => editLike);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    const out = plain(viewer.render(120));
+    expect(out).toContain("RESULT WITH HUNKS");
+    expect(seenArgs).toEqual({ path: "x.ts", edits: [] });
+  });
+
+  it("re-invokes renderResult on payload change with the previous component as lastComponent", () => {
+    const lastComponents: unknown[] = [];
+    const returned: unknown[] = [];
+    const def = {
+      renderResult: (_r: any, _o: any, _t: any, ctx: any) => {
+        lastComponents.push(ctx.lastComponent);
+        const component = { render: () => [`R ${_r.content[0].text}`] };
+        returned.push(component);
+        return component;
+      },
+    };
+    const result = { role: "toolResult", toolCallId: "t1", toolName: "edit", isError: false, content: [{ type: "text", text: "ok" }] };
+    const session = mockSession([
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: {} }] },
+      result,
+    ], () => def);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    viewer.render(120);
+    // Unchanged payload → cached component re-rendered, renderer not re-invoked.
+    viewer.render(120);
+    expect(lastComponents).toHaveLength(1);
+    expect(lastComponents[0]).toBeUndefined();
+    // Payload grows (streaming) → renderer re-invoked with its previous component.
+    result.content[0].text = "ok — more output arrived";
+    viewer.render(120);
+    expect(lastComponents).toHaveLength(2);
+    expect(lastComponents[1]).toBe(returned[0]);
+  });
+
+  it("toolCallId collision keeps separate state per execution", () => {
+    const states: unknown[] = [];
+    const def = {
+      renderCall: (_a: any, _t: any, ctx: any) => {
+        states.push(ctx.state);
+        return { render: () => ["C"] };
+      },
+    };
+    const session = mockSession([
+      { role: "assistant", content: [
+        { type: "toolCall", id: "t1", name: "edit", arguments: { n: 1 } },
+        { type: "toolCall", id: "t2", name: "edit", arguments: { n: 2 } },
+      ] },
+    ], () => def);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    viewer.render(120);
+    expect(states[0]).not.toBe(states[1]);
+  });
+});
+
 const CALL = { type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls -la\nsrc" } };
 const OK_RESULT = {
   role: "toolResult",

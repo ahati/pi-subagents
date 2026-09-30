@@ -290,6 +290,15 @@ export class ConversationViewer implements Component {
    */
   private readonly callComponentCache = new WeakMap<object, { component: unknown; argsKey: string }>();
   private readonly resultComponentCache = new WeakMap<object, { component: unknown; len: number; isError: boolean }>();
+  /**
+   * Shared per-execution renderer state (`ToolRenderContext.state`), keyed by
+   * toolCallId. The main window passes one plain object per tool execution to
+   * every renderCall/renderResult and lets the renderer own its contents — the
+   * edit renderer, for one, caches its call component and computed diff there
+   * and reads them back on the result render. Without this, renderers silently
+   * degrade to their no-state output (that is why edit hunks went missing).
+   */
+  private readonly toolExecState = new Map<string, Record<string, unknown>>();
   /** Built-in tool renderers, best-effort — see `loadBuiltinRenderers`. */
   private builtinRenderers: Record<string, ToolRenderers> | undefined;
 
@@ -715,6 +724,15 @@ export class ConversationViewer implements Component {
     };
   }
 
+  private execState(toolCallId: string): Record<string, unknown> {
+    let state = this.toolExecState.get(toolCallId);
+    if (!state) {
+      state = {};
+      this.toolExecState.set(toolCallId, state);
+    }
+    return state;
+  }
+
   /**
    * Try the tool's own `renderCall` component (cached per call object). Returns
    * undefined when no renderer is available or it throws — the caller falls
@@ -724,10 +742,18 @@ export class ConversationViewer implements Component {
     if (!renderers.renderCall) return undefined;
     try {
       const argsKey = typeof args === "object" && args !== null ? JSON.stringify(args) : String(args);
+      const callId = call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`;
+      const state = this.execState(String(callId));
       let entry = this.callComponentCache.get(call as object);
       if (!entry || entry.argsKey !== argsKey) {
-        const callId = call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`;
-        const component = renderers.renderCall(args, this.theme, this.renderContext(callId, args));
+        // Same wiring as the main window: `state` is renderer-owned (the edit
+        // renderer, for one, hangs its diff preview on it), and `lastComponent`
+        // is the previous component for this render slot. Never write to state
+        // from the presentation — that clobbers renderer-managed fields.
+        const component = renderers.renderCall(args, this.theme, this.renderContext(callId, args, {
+          state,
+          lastComponent: entry?.component,
+        }));
         entry = { component, argsKey };
         this.callComponentCache.set(call as object, entry);
       }
@@ -744,11 +770,13 @@ export class ConversationViewer implements Component {
    * Try the tool's own `renderResult` component (cached per result message).
    * Same contract as `richCallLines`: undefined → text fallback.
    */
-  private richResultLines(msg: any, renderers: ToolRenderers, width: number): string[] | undefined {
+  private richResultLines(msg: any, callArgs: unknown, renderers: ToolRenderers, width: number): string[] | undefined {
     if (!renderers.renderResult) return undefined;
     try {
       const len = extractText(msg.content).length;
       const isError = !!msg.isError;
+      const callId = String(msg.toolCallId ?? "result");
+      const state = this.execState(callId);
       let entry = this.resultComponentCache.get(msg);
       if (!entry || entry.len !== len || entry.isError !== isError) {
         const result = { content: msg.content, details: msg.details, isError };
@@ -756,7 +784,11 @@ export class ConversationViewer implements Component {
           result,
           { expanded: false, isPartial: false },
           this.theme,
-          this.renderContext(msg.toolCallId ?? "result", undefined, { isError }),
+          this.renderContext(callId, callArgs, {
+            state,
+            lastComponent: entry?.component,
+            isError,
+          }),
         );
         entry = { component, len, isError };
         this.resultComponentCache.set(msg, entry);
@@ -787,16 +819,17 @@ export class ConversationViewer implements Component {
    * full result as Markdown; `off` shows it raw — the old escape hatches keep
    * working, just per-call instead of per-block.
    */
-  private toolResultLines(msg: any, width: number): string[] {
+  private toolResultLines(msg: any, callArgs: unknown, width: number): string[] {
     const th = this.theme;
     const isError = !!msg.isError;
     const raw = extractText(msg.content).trim();
 
     // Rich path first: the tool's own result component (diffs, command output
-    // blocks…), exactly what the main transcript shows for this tool.
+    // blocks…), exactly what the main transcript shows for this tool. Call args
+    // ride along — renderers like edit read them for the diff context.
     const toolName = msg.toolName ?? "";
     const renderers = toolName ? this.resolveRenderers(toolName) : undefined;
-    const rich = renderers ? this.richResultLines(msg, renderers, width) : undefined;
+    const rich = renderers ? this.richResultLines(msg, callArgs, renderers, width) : undefined;
     if (rich) return rich;
 
     const indent = "    ";
@@ -924,11 +957,12 @@ export class ConversationViewer implements Component {
           } else if (c.type === "toolCall") {
             flushText();
             const callId = (c as any).id ?? (c as any).toolUseId;
+            const callArgs = (c as any).arguments ?? (c as any).input;
             lines.push(...this.toolCallLines(c as any, width));
             const result = typeof callId === "string" ? resultById.get(callId) : undefined;
             if (result) {
               consumedResults.add(callId as string);
-              lines.push(...this.toolResultLines(result, width));
+              lines.push(...this.toolResultLines(result, callArgs, width));
             } else if (this.record.status === "running" || this.record.status === "queued") {
               lines.push(truncateToWidth(th.fg("dim", "  ○ awaiting result"), width));
             }
