@@ -1,6 +1,8 @@
-# @tintinweb/pi-subagents
+# @tintinweb/pi-subagents (ahati fork)
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
+
+> **This is a fork** of [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) with UI enhancements on top — see [What this fork adds](#what-this-fork-adds). Install instructions for the fork are in [Install](#install); everything else in this README describes the shared feature set.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -9,6 +11,17 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 <img width="600" alt="pi-color-badges-white" src="https://github.com/user-attachments/assets/555dcae4-333e-4ff0-b420-7b3369c018a4" />
 
+
+## What this fork adds
+
+UI-layer enhancements over upstream — no changes to agent behavior, tools, steering, workflows, or settings:
+
+- **Full-screen agent hub** — a full-terminal roster of every agent plus workflow runs: status glyph, name, task, live activity, tools/tokens/cost/context/elapsed columns, an activity tab (`1`/`2`/`Tab`), `/` filtering, and two-press `x` to stop. `Enter` opens the conversation, `q`/`Esc` closes
+- **Windowed panel stays the default** — opening an agent (fleet `Enter`, `/agents`, workflow inspector `c`) shows the familiar 90%×70% live conversation; **`f`** expands it to the full-screen hub and **`f`** collapses back, with view/selection/filter state carried across
+- **Detailed agentic log** — tool calls render as `⏺ name(key-arg)` with their results paired inline: `✓`/`✗` plus a preview (`m` cycles full/preview as before), thinking blocks as a receded `✻` preview, pending calls marked
+- **Main-window-quality tool rendering** — tool calls and results render with pi's own per-tool renderers (edit diffs, highlighted reads, bash command blocks), wired exactly like the main transcript
+- **←/→ agent cycling** — left/right in the conversation panel jumps to the previous/next agent in roster order, wrapping around
+- **Fixed**: opening an agent from `/agents` no longer stacks the menu dialog on top of the panel (keyboard and close behavior restored)
 
 ## Features
 
@@ -38,6 +51,16 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
 ## Install
+
+**Install this fork** (git source, tracks `master`):
+
+```bash
+pi install git:github.com/ahati/pi-subagents@master
+```
+
+Update later with `pi update git:github.com/ahati/pi-subagents@master`.
+
+**Upstream release** (npm package, without the fork's UI additions):
 
 ```bash
 pi install npm:@tintinweb/pi-subagents
