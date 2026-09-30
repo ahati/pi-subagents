@@ -2912,6 +2912,12 @@ Terse command-style prompts produce shallow, generic work.
       options.push(`Running agents (${agents.length}) — ${running} running, ${done} done`);
     }
 
+    // Full-screen hub: the roster/activity surface (the windowed panel is the
+    // default surface and opens from the fleet list / agent rows).
+    if (agents.length > 0 || fleet.hasRows()) {
+      options.push("Agent hub (roster)");
+    }
+
     // Agent types list
     if (allNames.length > 0) {
       options.push(`Agent types (${allNames.length})`);
@@ -2949,6 +2955,8 @@ Terse command-style prompts produce shallow, generic work.
     if (choice.startsWith("Running agents (")) {
       await showRunningAgents(ctx);
       await showAgentsMenu(ctx);
+    } else if (choice === "Agent hub (roster)") {
+      fleet.openHub();
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
       await showAgentsMenu(ctx);
@@ -3061,24 +3069,10 @@ Terse command-style prompts produce shallow, generic work.
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
-
-    const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
-    const session = record.session;
-    const activity = agentActivity.get(record.id);
-
-    await ctx.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
-          if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
-          }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx));
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    );
+    // Same windowed panel the fleet list opens (with the `f` full-screen
+    // toggle), so every entry point shares one overlay lifecycle and the same
+    // settings wiring — the old inline viewer construction drifted once.
+    fleet.openHub(record.id, ctx.ui as never);
   }
 
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {

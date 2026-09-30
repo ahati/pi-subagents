@@ -176,6 +176,20 @@ export function formatDuration(startedAt: number, completedAt?: number): string 
 }
 
 /** Get display name for any agent type (built-in or custom). */
+/** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
+export function formatFleetElapsed(ms: number): string {
+  return `${Math.max(0, Math.round(ms / 1000))}s`;
+}
+
+/** `↓ 13.1k tokens` — down-arrow prefix, compact magnitude, plural "tokens". */
+export function formatFleetTokens(count: number): string {
+  let compact: string;
+  if (count >= 1_000_000) compact = `${(count / 1_000_000).toFixed(1)}M`;
+  else if (count >= 1_000) compact = `${(count / 1_000).toFixed(1)}k`;
+  else compact = `${count}`;
+  return `↓ ${compact} tokens`;
+}
+
 export function getDisplayName(type: SubagentType): string {
   return getConfig(type).displayName;
 }

@@ -16,8 +16,8 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { openAgentHub } from "./agent-hub.js";
+import { type AgentActivity, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -27,6 +27,10 @@ const MAX_AGENT_ROWS = 5;
 const TICK_MS = 200;
 /** How long a finished agent lingers in the list before it drops out. */
 const FINISHED_LINGER_MS = 4000;
+
+// Fleet-row format helpers moved to agent-widget (shared with the agent hub);
+// re-exported here for the established import path.
+export { formatFleetElapsed, formatFleetTokens } from "./agent-widget.js";
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
 export type FleetUICtx = {
@@ -68,20 +72,6 @@ type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
-
-/** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
-export function formatFleetElapsed(ms: number): string {
-  return `${Math.max(0, Math.round(ms / 1000))}s`;
-}
-
-/** `↓ 13.1k tokens` — down-arrow prefix, compact magnitude, plural "tokens". */
-export function formatFleetTokens(count: number): string {
-  let compact: string;
-  if (count >= 1_000_000) compact = `${(count / 1_000_000).toFixed(1)}M`;
-  else if (count >= 1_000) compact = `${(count / 1_000).toFixed(1)}k`;
-  else compact = `${count}`;
-  return `↓ ${compact} tokens`;
-}
 
 /**
  * Place `right` flush to `width`, truncating `left` first so the stats survive.
@@ -195,6 +185,11 @@ export class FleetList {
     this.ui = undefined;
   }
 
+  /** Whether the list currently has anything to show (agents or workflow rows). */
+  hasRows(): boolean {
+    return this.enabled && this.roster().length > 1;
+  }
+
   /** Re-register/refresh the below-editor widget; clears it when nothing remains. */
   update(): void {
     if (!this.ui) return;
@@ -202,7 +197,7 @@ export class FleetList {
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
     // anything here" drifted apart once before.
-    const hasRows = this.enabled && this.roster().length > 1;
+    const hasRows = this.hasRows();
 
     if (!hasRows) {
       if (this.widgetRegistered) {
@@ -379,6 +374,39 @@ export class FleetList {
     this.update();
   }
 
+  /**
+   * Open the full-screen agent hub. `agentId` starts in the windowed panel on
+   * that agent (the Enter-on-agent / `c`-on-row flow); without it the hub
+   * opens full-screen on the roster.
+   *
+   * `uiOverride` serves entry points reached before this session bound the
+   * fleet's UI context (the workflow inspector's `c`), so they get the same
+   * panel instead of silently no-oping.
+   *
+   * Shared by the fleet list and `/agents` so both entry points drive the same
+   * overlay lifecycle: while the hub is up the list keeps its keys to itself
+   * (`viewerClose`), and on close the cursor returns to the viewed agent.
+   */
+  openHub(agentId?: string, uiOverride?: FleetUICtx): void {
+    const ui = uiOverride ?? this.ui;
+    if (!ui) return;
+    if (agentId != null) this.viewingAgentId = agentId;
+    void openAgentHub(
+      ui,
+      {
+        manager: this.manager,
+        agentActivity: this.agentActivity,
+        showCost: this.showCost(),
+        viewerMarkdown: this.viewerMarkdown,
+        onViewerMarkdown: this.onViewerMarkdown,
+        workflows: this.workflowSource,
+        openWorkflow: id => this.openWorkflow?.(id),
+        notify: (message, type) => ui.notify(message, type),
+      },
+      { agentId },
+    ).then(() => this.clearViewer(), () => this.clearViewer());
+  }
+
   private openSelected(): void {
     const entry = this.roster()[this.selectedIndex];
     if (!entry || entry.kind === "main") {
@@ -397,41 +425,9 @@ export class FleetList {
       );
       return;
     }
-    const record = entry.record;
-    if (!this.ui) return;
-    if (!record.session) {
-      this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
-      return;
-    }
-    const session = record.session;
-    const activity = this.agentActivity.get(record.id);
-    this.viewingAgentId = record.id;
-
-    void this.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        this.viewerClose = () => done(undefined);
-        return new ConversationViewer(
-          tui,
-          session,
-          record,
-          activity,
-          theme,
-          done,
-          () => {
-            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
-          },
-          keybindings,
-          (message: string) => this.manager.steer(record.id, message),
-          this.showCost(),
-          this.viewerMarkdown,
-          this.onViewerMarkdown,
-        );
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    ).then(() => this.clearViewer(), () => this.clearViewer());
+    // Agents open in the full-screen hub, straight into the conversation —
+    // Esc comes back to the hub roster instead of closing the overlay.
+    this.openHub(entry.record.id);
   }
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
