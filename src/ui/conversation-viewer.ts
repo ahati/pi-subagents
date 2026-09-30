@@ -89,6 +89,9 @@ function oneLine(text: string, max = 60): string {
   return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
 
+/** Fallback toolCallId for rich renderers when a call block carries no id. */
+let fallbackCallId = 0;
+
 /** The one argument that says what this call does, for the `⏺ name(...)` line. */
 function describeToolArgs(args: unknown): string {
   if (args == null) return "";
@@ -172,6 +175,59 @@ function fallbackMarkdownTheme(th: Theme): MarkdownTheme {
 }
 
 /**
+ * Tool renderers, as merged onto a definition: pi's main window does exactly
+ * this merge (`withBuiltInRenderers(toolName, session.getToolDefinition(name))`).
+ */
+interface ToolRenderers {
+  renderCall?: (args: any, theme: any, context: any) => unknown;
+  renderResult?: (result: any, options: any, theme: any, context: any) => unknown;
+}
+
+let builtinRenderersPromise: Promise<Record<string, ToolRenderers> | undefined> | undefined;
+
+/**
+ * pi's built-in tool renderers (diffs, syntax-highlighted reads, command
+ * blocks…) live in an internal module that the package's exports map does not
+ * expose — the main window merges them over tool definitions at render time.
+ * For main-window-quality rendering in this panel we locate that module
+ * best-effort: pi's entry script is on argv and the module sits at a stable
+ * path relative to the package root. Any failure (packaged binary, layout
+ * change, unusual host) → undefined, and the viewer keeps its own text
+ * rendering for built-ins. Extension tools render richly regardless, through
+ * the session's own definitions.
+ */
+function loadBuiltinRenderers(): Promise<Record<string, ToolRenderers> | undefined> {
+  builtinRenderersPromise ??= (async () => {
+    try {
+      const { dirname, join, resolve } = await import("node:path");
+      const { readFile, realpath } = await import("node:fs/promises");
+      const entry = process.argv[1];
+      if (!entry) return undefined;
+      let dir = dirname(await realpath(resolve(entry)));
+      for (let i = 0; i < 10; i++) {
+        try {
+          const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
+          if (pkg?.name === "@earendil-works/pi-coding-agent") {
+            const mod = await import(join(dir, "dist", "core", "tools", "renderers", "index.js"));
+            const all = mod?.createAllToolRenderers?.();
+            return typeof all === "object" && all ? (all as Record<string, ToolRenderers>) : undefined;
+          }
+        } catch {
+          // no package.json here — keep walking up
+        }
+        const parent = dirname(dir);
+        if (parent === dir) return undefined;
+        dir = parent;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  return builtinRenderersPromise;
+}
+
+/**
  * Cap `text` at `RESULT_MAX_CHARS`, reporting the elision separately rather than
  * appending it.
  *
@@ -227,6 +283,15 @@ export class ConversationViewer implements Component {
    * Weak so a compacted-away message doesn't pin its render.
    */
   private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
+  /**
+   * Rich tool-renderer components, cached per call/result object (they are
+   * designed to be re-rendered across frames) and rebuilt when the underlying
+   * payload changes (streaming args grow, results land).
+   */
+  private readonly callComponentCache = new WeakMap<object, { component: unknown; argsKey: string }>();
+  private readonly resultComponentCache = new WeakMap<object, { component: unknown; len: number; isError: boolean }>();
+  /** Built-in tool renderers, best-effort — see `loadBuiltinRenderers`. */
+  private builtinRenderers: Record<string, ToolRenderers> | undefined;
 
   constructor(
     private tui: TUI,
@@ -263,6 +328,14 @@ export class ConversationViewer implements Component {
   ) {
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
+    // Rich built-in tool rendering arrives asynchronously (module discovery);
+    // until then calls/results render as text, and one repaint upgrades them.
+    void loadBuiltinRenderers().then(renderers => {
+      if (renderers && !this.closed) {
+        this.builtinRenderers = renderers;
+        this.tui.requestRender();
+      }
+    });
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
       this.tui.requestRender();
@@ -602,11 +675,108 @@ export class ConversationViewer implements Component {
 
   // ---- Detailed-log rendering (omp-style) ----
 
+  /**
+   * Renderers for a tool, merged the way the main window merges them: the
+   * session's own definition wins per hook, built-ins fill the gaps. Anything
+   * unavailable (host restrictions, unknown tool) → undefined → text fallback.
+   */
+  private resolveRenderers(toolName: string): ToolRenderers | undefined {
+    let def: any;
+    try {
+      def = this.session.getToolDefinition?.(toolName);
+    } catch {
+      def = undefined;
+    }
+    const builtin = this.builtinRenderers?.[toolName];
+    const merged: ToolRenderers = {
+      renderCall: def?.renderCall ?? builtin?.renderCall,
+      renderResult: def?.renderResult ?? builtin?.renderResult,
+    };
+    if (!merged.renderCall && !merged.renderResult) return undefined;
+    return merged;
+  }
+
+  /** ToolRenderContext for a renderer call — every field the hooks may read. */
+  private renderContext(toolCallId: string, args: unknown, over: Partial<Record<string, unknown>> = {}): any {
+    return {
+      args,
+      toolCallId,
+      invalidate: () => this.tui.requestRender(),
+      lastComponent: undefined,
+      state: undefined,
+      cwd: process.cwd(),
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: false,
+      expanded: false,
+      showImages: true,
+      isError: false,
+      ...over,
+    };
+  }
+
+  /**
+   * Try the tool's own `renderCall` component (cached per call object). Returns
+   * undefined when no renderer is available or it throws — the caller falls
+   * back to the plain `⏺ name(args)` line.
+   */
+  private richCallLines(call: { id?: string; toolUseId?: string }, args: unknown, renderers: ToolRenderers, width: number): string[] | undefined {
+    if (!renderers.renderCall) return undefined;
+    try {
+      const argsKey = typeof args === "object" && args !== null ? JSON.stringify(args) : String(args);
+      let entry = this.callComponentCache.get(call as object);
+      if (!entry || entry.argsKey !== argsKey) {
+        const callId = call.id ?? call.toolUseId ?? `call-${++fallbackCallId}`;
+        const component = renderers.renderCall(args, this.theme, this.renderContext(callId, args));
+        entry = { component, argsKey };
+        this.callComponentCache.set(call as object, entry);
+      }
+      const lines = (entry.component as { render?(w: number): string[] })?.render?.(width);
+      return Array.isArray(lines) && lines.length > 0 ? lines : undefined;
+    } catch {
+      // Renderers are host components running against arbitrary content; a
+      // throw here must degrade to the text line, not take the overlay down.
+      return undefined;
+    }
+  }
+
+  /**
+   * Try the tool's own `renderResult` component (cached per result message).
+   * Same contract as `richCallLines`: undefined → text fallback.
+   */
+  private richResultLines(msg: any, renderers: ToolRenderers, width: number): string[] | undefined {
+    if (!renderers.renderResult) return undefined;
+    try {
+      const len = extractText(msg.content).length;
+      const isError = !!msg.isError;
+      let entry = this.resultComponentCache.get(msg);
+      if (!entry || entry.len !== len || entry.isError !== isError) {
+        const result = { content: msg.content, details: msg.details, isError };
+        const component = renderers.renderResult(
+          result,
+          { expanded: false, isPartial: false },
+          this.theme,
+          this.renderContext(msg.toolCallId ?? "result", undefined, { isError }),
+        );
+        entry = { component, len, isError };
+        this.resultComponentCache.set(msg, entry);
+      }
+      const lines = (entry.component as { render?(w: number): string[] })?.render?.(width);
+      return Array.isArray(lines) && lines.length > 0 ? lines : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Tool call line: `⏺ name(key-args)` — the call is the anchor of its log entry. */
-  private toolCallLines(call: { name?: string; toolName?: string; arguments?: unknown; input?: unknown }, width: number): string[] {
+  private toolCallLines(call: { name?: string; toolName?: string; arguments?: unknown; input?: unknown; id?: string; toolUseId?: string }, width: number): string[] {
     const th = this.theme;
     const name = call.name ?? call.toolName ?? "unknown";
-    const args = describeToolArgs(call.arguments ?? call.input);
+    const argsValue = call.arguments ?? call.input;
+    const renderers = this.resolveRenderers(name);
+    const rich = renderers ? this.richCallLines(call as any, argsValue, renderers, width) : undefined;
+    if (rich) return rich;
+    const args = describeToolArgs(argsValue);
     const head = `${th.fg("accent", "⏺")} ${th.bold(name)}${args ? th.fg("dim", `(${args})`) : ""}`;
     return [truncateToWidth(head, width)];
   }
@@ -621,6 +791,14 @@ export class ConversationViewer implements Component {
     const th = this.theme;
     const isError = !!msg.isError;
     const raw = extractText(msg.content).trim();
+
+    // Rich path first: the tool's own result component (diffs, command output
+    // blocks…), exactly what the main transcript shows for this tool.
+    const toolName = msg.toolName ?? "";
+    const renderers = toolName ? this.resolveRenderers(toolName) : undefined;
+    const rich = renderers ? this.richResultLines(msg, renderers, width) : undefined;
+    if (rich) return rich;
+
     const indent = "    ";
     const bodyWidth = Math.max(1, width - indent.length - 2);
 

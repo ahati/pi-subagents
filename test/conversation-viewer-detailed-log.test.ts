@@ -13,8 +13,8 @@ function mockTui(rows = 40, columns = 120) {
   return { terminal: { rows, columns }, requestRender: vi.fn() } as any;
 }
 
-function mockSession(messages: any[]) {
-  return { subscribe: () => () => {}, messages } as any;
+function mockSession(messages: any[], getToolDefinition?: (name: string) => unknown) {
+  return { subscribe: () => () => {}, messages, getToolDefinition } as any;
 }
 
 function mockRecord(over: Partial<AgentRecord> = {}): AgentRecord {
@@ -46,6 +46,77 @@ function render(messages: any[], over: Partial<AgentRecord> = {}, viewerMarkdown
   );
   return plain(viewer.render(120));
 }
+
+describe("rich tool renderers (main-window quality)", () => {
+  const richDef = {
+    renderCall: (args: any) => ({ render: (w: number) => [`RICH CALL ${JSON.stringify(args)}`] }),
+    renderResult: (result: any) => ({ render: (w: number) => [`RICH RESULT err=${result.isError}`] }),
+  };
+
+  it("uses the session definition's renderCall for the call row", () => {
+    const session = mockSession([{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } }] }],
+      name => (name === "edit" ? richDef : undefined));
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    const out = plain(viewer.render(120));
+    expect(out).toContain('RICH CALL {"path":"x.ts"}');
+    expect(out).not.toContain("⏺ edit");
+  });
+
+  it("uses renderResult for the outcome row, with isError", () => {
+    const session = mockSession([
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: {} }] },
+      { role: "toolResult", toolCallId: "t1", toolName: "edit", isError: true, content: [{ type: "text", text: "boom" }] },
+    ], name => (name === "edit" ? richDef : undefined));
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    const out = plain(viewer.render(120));
+    expect(out).toContain("RICH RESULT err=true");
+    expect(out).not.toContain("✗ error");
+  });
+
+  it("falls back to text when a rich renderer throws", () => {
+    const throwing = {
+      renderCall: () => {
+        throw new Error("renderer bug");
+      },
+    };
+    const session = mockSession([{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } }] }],
+      () => throwing);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    const out = plain(viewer.render(120));
+    expect(out).toContain("⏺ edit(x.ts)");
+  });
+
+  it("merges: definition hook wins, missing hook comes from nowhere and text fills in", () => {
+    const half = { renderResult: (result: any) => ({ render: () => [`HALF err=${result.isError}`] }) };
+    const session = mockSession([
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } }] },
+      { role: "toolResult", toolCallId: "t1", toolName: "edit", isError: false, content: [{ type: "text", text: "ok" }] },
+    ], () => half);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    const out = plain(viewer.render(120));
+    expect(out).toContain("⏺ edit(x.ts)"); // no renderCall on the definition
+    expect(out).toContain("HALF err=false");
+  });
+
+  it("reuses the cached component while args do not change, rebuilds when they do", () => {
+    let constructions = 0;
+    const counting = {
+      renderCall: (args: any) => {
+        constructions++;
+        return { render: () => [`C ${constructions}`] };
+      },
+    };
+    const call = { type: "toolCall", id: "t1", name: "edit", arguments: { path: "x.ts" } };
+    const session = mockSession([{ role: "assistant", content: [call] }], () => counting);
+    const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+    viewer.render(120);
+    viewer.render(120);
+    expect(constructions).toBe(1);
+    call.arguments = { path: "y.ts" };
+    viewer.render(120);
+    expect(constructions).toBe(2);
+  });
+});
 
 const CALL = { type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls -la\nsrc" } };
 const OK_RESULT = {
