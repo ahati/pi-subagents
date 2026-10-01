@@ -28,6 +28,7 @@ import type { AgentActivity, Theme } from "./agent-widget.js";
 import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 import type { FleetWorkflow } from "./fleet-list.js";
+import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
 
 /** How long a settled workflow run lingers in the roster (matches the fleet list). */
@@ -46,6 +47,12 @@ interface HubMouseEvent {
   type: string;
   /** Logical lines; negative scrolls up. */
   wheelDelta?: number;
+}
+
+/** The TUI/terminal surface mouse capture needs — structural, version-safe. */
+interface MouseTerminalHost {
+  mode?: string;
+  terminal?: { write?(data: string): void };
 }
 
 type HubView = "table" | "activity" | "chat";
@@ -219,6 +226,8 @@ export class AgentHub implements Component {
   private readonly onToggle: () => void;
   private readonly tick: ReturnType<typeof setInterval>;
   private disposed = false;
+  /** Whether this panel enabled regular-mode mouse reporting (and must restore it). */
+  private mouseCaptured = false;
 
   constructor(
     private tui: TUI,
@@ -245,35 +254,46 @@ export class AgentHub implements Component {
     this.tick = setInterval(() => {
       if (!this.disposed) this.tui.requestRender();
     }, TICK_MS);
+    // Regular TUI mode leaves the wheel to the terminal's own scrollback;
+    // capture it for the panel's lifetime. No-op in fullscreen, where pi
+    // already parses mouse input and calls handleMouse instead.
+    this.mouseCaptured = enableTerminalMouse(this.tui as unknown as MouseTerminalHost);
   }
 
   invalidate(): void { /* no cached render state */ }
 
   /**
-   * Mouse wheel support. pi routes mouse events to an overlay's top-level
-   * component — which is this hub — and only in `tuiMode: "fullscreen"`; in
-   * regular mode the terminal owns the scrollback and nothing arrives here.
+   * Mouse wheel support, fullscreen route. pi's alt-screen renderer parses
+   * mouse input and dispatches wheel events to an overlay's top-level component
+   * — this hub. In regular mode nothing arrives here; `handleInput` parses the
+   * reports instead (see `terminal-mouse.ts`).
    *
    * The shape is declared locally rather than imported: mouse dispatch landed
    * in pi-tui 0.99 while this extension's peer floor is 0.84, so the method is
    * duck-typed — hosts that support mouse call it, older hosts never do.
-   *
-   * The conversation view hands the wheel to the embedded viewer's own scroll
-   * (so follow-the-tail behaves exactly as with ↑/↓). The roster views move the
-   * selection a row per logical line. Either way the event is consumed: leaving
-   * it unhandled would scroll the transcript *underneath* the overlay.
    */
   handleMouse(event: HubMouseEvent): { handled?: boolean } | undefined {
     if (event.type !== "wheel") return undefined;
     const delta = event.wheelDelta ?? 0;
     if (delta === 0) return undefined;
+    this.applyWheel(delta);
+    return { handled: true };
+  }
 
+  /**
+   * One wheel movement, from whichever route delivered it (fullscreen mouse
+   * dispatch, or regular-mode input parsing). Conversation views scroll the
+   * embedded viewer — so follow-the-tail behaves exactly as with ↑/↓ — and
+   * roster views move the selection a row per logical line. Consumed by the
+   * caller either way: an unhandled wheel would scroll the transcript
+   * underneath the overlay.
+   */
+  private applyWheel(delta: number): void {
     if (this.view === "chat" && this.chatViewer) {
       this.chatViewer.scrollBy(delta);
       this.requestRender();
-      return { handled: true };
+      return;
     }
-
     const steps = Math.max(1, Math.round(Math.abs(delta)));
     const items = this.entries();
     if (items.length > 0) {
@@ -281,7 +301,6 @@ export class AgentHub implements Component {
       this.stopArmed = false;
       this.requestRender();
     }
-    return { handled: true };
   }
 
   dispose(): void {
@@ -289,6 +308,11 @@ export class AgentHub implements Component {
     clearInterval(this.tick);
     this.chatViewer?.dispose();
     this.chatViewer = undefined;
+    // Hand the wheel back to the terminal (native scrollback, text selection).
+    if (this.mouseCaptured) {
+      disableTerminalMouse(this.tui as unknown as MouseTerminalHost);
+      this.mouseCaptured = false;
+    }
   }
 
   // ---- Roster ----
@@ -329,6 +353,15 @@ export class AgentHub implements Component {
   // ---- Key handling ----
 
   handleInput(data: string): void {
+    // Mouse reports first. In regular mode the panel captured mouse reporting,
+    // so wheel bytes arrive as input; the chunk is consumed either way so no
+    // escape sequence can leak into the editor.
+    const mouse = parseMouseInput(data);
+    if (mouse.sawMouse) {
+      if (mouse.wheelDelta !== 0) this.applyWheel(mouse.wheelDelta);
+      return;
+    }
+
     // The filter input owns all keys while open (Enter applies, Esc clears).
     if (this.filterInput) {
       this.filterInput.handleInput(data);

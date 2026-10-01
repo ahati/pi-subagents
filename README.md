@@ -21,7 +21,10 @@ UI-layer enhancements over upstream — no changes to agent behavior, tools, ste
 - **Detailed agentic log** — tool calls render as `⏺ name(key-arg)` with their results paired inline: `✓`/`✗` plus a preview (`m` cycles full/preview as before), thinking blocks as a receded `✻` preview, pending calls marked
 - **Main-window-quality tool rendering** — tool calls and results render with pi's own per-tool renderers (edit diffs, highlighted reads, bash command blocks), wired exactly like the main transcript
 - **←/→ agent cycling** — left/right in the conversation panel jumps to the previous/next agent in roster order, wrapping around
+- **Mouse wheel scrolling** — wheel over an agent's conversation scrolls it; over the hub roster it moves the selection. Works in **both** TUI modes: fullscreen uses pi's native mouse dispatch, while in regular mode the panel captures terminal mouse reporting for its own lifetime and restores it on close (so the terminal's native scrollback and mouse text-selection are only borrowed while a panel is open — hold Shift to select text as usual)
 - **Fixed**: opening an agent from `/agents` no longer stacks the menu dialog on top of the panel (keyboard and close behavior restored)
+
+> Regular TUI mode has no mouse support of its own — pi only parses mouse input in `tuiMode: "fullscreen"` (in regular mode the terminal owns the wheel for its scrollback). The panel therefore enables mouse reporting itself while it is open and restores the terminal when it closes.
 
 ## Features
 

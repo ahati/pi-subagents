@@ -58,8 +58,12 @@ interface Harness {
   settled(): boolean;
 }
 
-function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}) {
-  const fakeTui = { requestRender: vi.fn(), terminal: { columns: 120, rows: 40 } };
+function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}, opts: { tuiMode?: string } = {}) {
+  const fakeTui = {
+    mode: opts.tuiMode ?? "regular",
+    requestRender: vi.fn(),
+    terminal: { columns: 120, rows: 40, write: vi.fn() },
+  };
   const components: Harness["components"] = [];
   const optionSets: Harness["optionSets"] = [];
   let settled = false;
@@ -102,6 +106,8 @@ function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}) {
       return optionSets;
     },
     settled: () => settled,
+    /** The fake TUI handed to the overlay factory (terminal.write spy included). */
+    tui: fakeTui,
     flush: async () => {
       for (let i = 0; i < 4; i++) await Promise.resolve();
     },
@@ -162,6 +168,65 @@ describe("agent hub mouse wheel", () => {
     const scrolled = h.frame().join("\n");
     expect(scrolled).not.toBe(followed);
     expect(scrolled).not.toContain("message number 39");
+  });
+});
+
+describe("agent hub mouse in regular TUI mode", () => {
+  /** SGR report: 64 = wheel up, 65 = wheel down. */
+  const wheel = (button: number) => `\x1b[<${button};10;5M`;
+
+  it("captures mouse reporting while open and restores it on close", async () => {
+    const h = harness([makeRecord({ id: "a1" })]);
+    h.open();
+    // Enable sequence written once, on construction.
+    const writes = h.tui.terminal.write.mock.calls.map(c => c[0] as string);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain("\x1b[?1006h");
+
+    h.press("q"); // close → dispose → restore
+    await h.flush();
+    const after = h.tui.terminal.write.mock.calls.map(c => c[0] as string);
+    expect(after).toHaveLength(2);
+    expect(after[1]).toContain("\x1b[?1006l");
+  });
+
+  it("does not capture in fullscreen mode (pi dispatches there)", () => {
+    const h = harness([makeRecord({ id: "a1" })], {}, { tuiMode: "fullscreen" });
+    h.open();
+    expect(h.tui.terminal.write).not.toHaveBeenCalled();
+    h.press("q");
+    expect(h.tui.terminal.write).not.toHaveBeenCalled();
+  });
+
+  it("parses wheel bytes from input and scrolls the conversation", () => {
+    const messages = Array.from({ length: 40 }, (_, i) => ({ role: "user", content: `message number ${i}` }));
+    const h = harness([makeRecord({ id: "a1", session: { subscribe: () => () => {}, messages } })]);
+    h.open({ agentId: "a1" });
+    const followed = h.frame().join("\n");
+    expect(followed).toContain("message number 39");
+    h.press(wheel(64)); // wheel up
+    const scrolled = h.frame().join("\n");
+    expect(scrolled).not.toBe(followed);
+    expect(scrolled).not.toContain("message number 39");
+  });
+
+  it("parses wheel bytes in the roster views to move the selection", () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task" }),
+    ]);
+    h.open();
+    h.press(wheel(65)); // wheel down → next row
+    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+  });
+
+  it("consumes non-wheel mouse reports without moving anything", () => {
+    const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
+    h.open();
+    const before = h.frame().join("\n");
+    h.press("\x1b[<0;10;5M"); // left click
+    h.press("\x1b[<0;10;5m"); // release
+    expect(h.frame().join("\n")).toBe(before);
   });
 });
 
