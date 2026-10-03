@@ -6,6 +6,8 @@ import { type AgentActivity } from "../src/ui/agent-widget.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const ESC = "\x1b";
+/** End of the pane list's left cell: `│ ` + 18-col pane + ` ` (before the `│`). */
+const CHAT_CELL_END = 21;
 
 const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
 
@@ -341,6 +343,85 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     expect(frame).toContain("↑↓ agent");
     expect(frame).toContain("Esc close");
     expect(frame).not.toContain("←→ agent");
+  });
+
+  it("groups the pane list by lifecycle: active, completed, failed", () => {
+    // start times deliberately out of group order — grouping must win over age
+    const h = harness([
+      makeRecord({ id: "a1", description: "running task", startedAt: Date.now() - 5000, status: "running" }),
+      makeRecord({ id: "a2", description: "done task", startedAt: Date.now() - 9000, status: "completed" }),
+      makeRecord({ id: "a3", description: "broken task", startedAt: Date.now() - 7000, status: "error" }),
+    ]);
+    h.open({ agentId: "a1" });
+    const lines = h.frame();
+    const activeLine = lines.findIndex(l => l.includes("ACTIVE"));
+    const completedLine = lines.findIndex(l => l.includes("COMPLETED"));
+    const failedLine = lines.findIndex(l => l.includes("FAILED"));
+    expect(activeLine).toBeGreaterThanOrEqual(0);
+    expect(completedLine).toBeGreaterThan(activeLine);
+    expect(failedLine).toBeGreaterThan(completedLine);
+    // The left cell of each group's first row carries that group's status
+    // glyph (the selected running row renders only its pointer here — the
+    // test theme's fake markers consume its width budget).
+    const leftCell = (i: number) => lines[i].slice(0, CHAT_CELL_END);
+    expect(leftCell(activeLine + 1)).toContain("❯");
+    expect(leftCell(completedLine + 1)).toContain("✓");
+    expect(leftCell(failedLine + 1)).toContain("✗");
+  });
+
+  it("omits empty groups from the pane list", () => {
+    const h = harness([makeRecord({ id: "a1", status: "running" })]);
+    h.open({ agentId: "a1" });
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("ACTIVE");
+    expect(frame).not.toContain("COMPLETED");
+    expect(frame).not.toContain("FAILED");
+  });
+
+  it("keeps the pointer on an agent that moves groups when it finishes", () => {
+    const records = [
+      makeRecord({ id: "a1", description: "the watched one", startedAt: Date.now() - 9000, status: "running" }),
+      makeRecord({ id: "a2", description: "the other one", startedAt: Date.now() - 5000, status: "running" }),
+    ];
+    const h = harness(records);
+    h.open({ agentId: "a1" });
+    const before = h.frame();
+    const activeLine = before.findIndex(l => l.includes("ACTIVE"));
+    expect(before.findIndex(l => l.includes("❯"))).toBeGreaterThan(activeLine);
+    // The watched agent finishes: it relocates under COMPLETED, pointer follows.
+    records[0].status = "completed";
+    const after = h.frame();
+    const completedLine = after.findIndex(l => l.includes("COMPLETED"));
+    const pointerLine = after.findIndex(l => l.includes("❯"));
+    expect(pointerLine).toBe(completedLine + 1); // first row under COMPLETED — the pointer followed it there
+  });
+
+  it("c copies a completed agent's response to the clipboard", async () => {
+    const notify = vi.fn();
+    const h = harness(
+      [makeRecord({ id: "a1", description: "done task", status: "completed", result: "the final answer" })],
+      { notify },
+    );
+    h.open({ agentId: "a1" });
+    h.press("c");
+    await h.flush();
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("Copied \"done task\""), "info");
+  });
+
+  it("c on a running agent explains there is nothing to copy yet", () => {
+    const notify = vi.fn();
+    const h = harness([makeRecord({ id: "a1", status: "running" })], { notify });
+    h.open({ agentId: "a1" });
+    h.press("c");
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("still running"), "info");
+  });
+
+  it("c warns when a settled agent has no result text", () => {
+    const notify = vi.fn();
+    const h = harness([makeRecord({ id: "a1", status: "stopped" })], { notify });
+    h.open({ agentId: "a1" });
+    h.press("c");
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("no result text"), "info");
   });
 });
 

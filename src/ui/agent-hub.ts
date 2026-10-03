@@ -21,6 +21,7 @@
  * stopping, markdown modes, cost display, linger semantics — is unchanged.
  */
 
+import * as piHost from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
@@ -47,6 +48,35 @@ const MIN_TERMINAL_ROWS = 8;
 const CHAT_LIST_WIDTH = 18;
 /** Below this total width the chat drops the list pane and shows the conversation alone. */
 const CHAT_TWO_PANE_MIN_WIDTH = 60;
+
+/**
+ * The host's clipboard helper, when this pi has one — it landed after the
+ * 0.84.0 peer floor (0.84.2 has it), so a named import would fail the whole
+ * extension on the floor version. A namespace import never throws for a
+ * missing binding; the property is simply `undefined` there and the OSC 52
+ * fallback below takes over.
+ */
+const hostCopyToClipboard: ((text: string) => Promise<void>) | undefined =
+  (piHost as { copyToClipboard?: (text: string) => Promise<void> }).copyToClipboard;
+
+/** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
+function chatGroupRank(status: AgentRecord["status"]): number {
+  switch (status) {
+    case "running":
+    case "queued":
+      return 0;
+    case "completed":
+    case "steered":
+      return 1;
+    // error / aborted / stopped — a stopped run has no result, so it groups
+    // with the failures rather than implying it finished.
+    default:
+      return 2;
+  }
+}
+
+/** Pane labels for the three lifecycle groups, in rank order. */
+const CHAT_GROUP_LABELS = ["ACTIVE", "COMPLETED", "FAILED"] as const;
 
 /** Result of a wheel dispatch — structural subset of pi-tui's mouse types. */
 interface HubMouseEvent {
@@ -224,8 +254,6 @@ export class AgentHub implements Component {
   /** Chat view state — one viewer instance per opened agent. */
   private chatViewer: ConversationViewer | undefined;
   private chatRecordId: string | undefined;
-  /** Selection index into the chat pane's agent list (`chatAgents()`). */
-  private chatSelected = 0;
   /**
    * Whether the embedded viewer renders frameless — true in the two-pane
    * layout (the shared border spans the list too), false on the narrow
@@ -530,9 +558,6 @@ export class AgentHub implements Component {
     this.chatViewer?.dispose();
     this.view = "chat";
     this.chatRecordId = record.id;
-    // Keep the pane list's cursor on the agent now shown — Enter-on-row and the
-    // toggle loop land here too, not just ↑/↓ moves.
-    this.chatSelected = Math.max(0, this.chatAgents().findIndex(a => a.id === record.id));
     this.chatViewer = new ConversationViewer(
       this.tui,
       record.session!,
@@ -558,7 +583,7 @@ export class AgentHub implements Component {
         maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
         // Popup has no roster behind it — Esc closes. Full-screen walks back.
         onBack: () => (this.popup ? this.close() : this.leaveChat()),
-        backHint: () => (this.popup ? "↑↓ agent · Esc close · f expand" : "↑↓ agent · Esc back · f popup"),
+        backHint: () => (this.popup ? "↑↓ agent · c copy · Esc close · f expand" : "↑↓ agent · c copy · Esc back · f popup"),
         // ↑/↓ are repurposed by the pane list, so the viewer must not
         // advertise them as scroll keys.
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
@@ -568,11 +593,16 @@ export class AgentHub implements Component {
         frameless: () => this.chatFrameless,
         // The hub's extra keys ride through the viewer's key stream: `f`
         // flips popup/full-screen, ↑/↓ move the pane list's selection and the
-        // stream follows. The composer check inside the viewer runs first, so
-        // a steering message still receives its arrow keys.
+        // stream follows, `c` copies the shown agent's response. The composer
+        // check inside the viewer runs first, so a steering message still
+        // receives its arrow keys and its "c"s.
         onUnhandledKey: data => {
           if (matchesKey(data, "f")) {
             this.requestToggle();
+            return true;
+          }
+          if (matchesKey(data, "c")) {
+            this.copyChatResult();
             return true;
           }
           if (matchesKey(data, "up")) {
@@ -600,15 +630,23 @@ export class AgentHub implements Component {
   }
 
   /**
-   * The chat pane's list: the roster's agents that have a session to show,
-   * filter-matched like every other view. Workflows are skipped — they have no
-   * conversation — and finished agents stay listed until the hub closes, so a
-   * selection never slides out from under the user mid-read.
+   * The chat pane's list, grouped by lifecycle — active, then completed, then
+   * failed — earliest-launched within each group. The list is what the user
+   * navigates spatially, so an agent finishing must not reshuffle it out from
+   * under the pointer: the selection is re-derived from `chatRecordId` on
+   * every move and render (see `chatSelIndex`), and the group move merely
+   * relocates the same agent, with the pointer following it.
    */
   private chatAgents(): AgentRecord[] {
     return this.entries()
       .filter(e => e.kind === "agent" && !!e.record.session)
-      .map(e => (e as AgentEntry).record);
+      .map(e => (e as AgentEntry).record)
+      .sort((a, b) => chatGroupRank(a.status) - chatGroupRank(b.status) || a.startedAt - b.startedAt);
+  }
+
+  /** The pane list's cursor, derived from the agent being shown. */
+  private chatSelIndex(agents: AgentRecord[]): number {
+    return Math.max(0, agents.findIndex(a => a.id === this.chatRecordId));
   }
 
   /**
@@ -620,16 +658,50 @@ export class AgentHub implements Component {
   private moveChatSelection(direction: 1 | -1): void {
     const agents = this.chatAgents();
     if (agents.length === 0) return;
-    const next = Math.min(agents.length - 1, Math.max(0, this.chatSelected + direction));
-    if (next === this.chatSelected) return;
+    const next = Math.min(agents.length - 1, Math.max(0, this.chatSelIndex(agents) + direction));
+    if (next === this.chatSelIndex(agents)) return;
     const record = agents[next];
-    if (record.id === this.chatRecordId) {
-      this.chatSelected = next;
-      this.requestRender();
-      return;
-    }
+    if (record.id === this.chatRecordId) return;
     const fresh = this.deps.manager.listAgents().find(a => a.id === record.id) ?? record;
     if (fresh.session) this.enterChat(fresh);
+  }
+
+  /**
+   * `c`: copy the shown agent's response to the system clipboard. Only a
+   * settled agent has a response worth pasting — a running one is still
+   * writing it. Uses the host's clipboard helper when this pi has one (it
+   * covers the platform tools and OSC 52 itself); on the pre-0.84.2 floor the
+   * fallback emits the OSC 52 sequence directly, the same escape route pi's
+   * own helper takes at the end of its chain.
+   */
+  private copyChatResult(): void {
+    const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
+    if (!record) return;
+    if (record.status === "running" || record.status === "queued") {
+      this.deps.notify?.(`"${record.description}" is still running — nothing to copy yet.`, "info");
+      return;
+    }
+    const text = record.result?.trim();
+    if (!text) {
+      this.deps.notify?.(`"${record.description}" has no result text to copy.`, "info");
+      return;
+    }
+    const report = () =>
+      this.deps.notify?.(`Copied "${record.description}" (${text.length.toLocaleString()} chars) to the clipboard.`, "info");
+    if (hostCopyToClipboard) {
+      void hostCopyToClipboard(text).then(report, () => {
+        this.deps.notify?.("Clipboard copy failed — no clipboard tool or terminal support.", "warning");
+      });
+      return;
+    }
+    // Base64 caps at the same 100k encoded chars pi's own helper allows.
+    const encoded = Buffer.from(text).toString("base64");
+    if (encoded.length > 100_000) {
+      this.deps.notify?.("Result too large for the terminal clipboard fallback.", "warning");
+      return;
+    }
+    process.stdout.write(`\x1b]52;c;${encoded}\x07`);
+    report();
   }
 
   /** Two-press stop on the selected agent, mirroring the viewer's `x`. */
@@ -697,9 +769,12 @@ export class AgentHub implements Component {
    *
    * ```
    * ╭ Agents ───────┬──────────────────────────────────╮
-   * │ ❯ ● Agent     │ ● Agent (twin)  task · 12s · 3t  │
-   * │   ✓ explore   │ ──────────────────────────────── │
-   * │               │ (live conversation)              │
+   * │ ACTIVE        │ ● Agent (twin)  task · 12s · 3t  │
+   * │ ❯ ● Agent     │ ──────────────────────────────── │
+   * │ COMPLETED     │ (live conversation)              │
+   * │   ✓ explore   │                                  │
+   * │ FAILED        │                                  │
+   * │   ✗ plan      │                                  │
    * ╰───────────────┴──────────────────────────────────╯
    * ```
    *
@@ -722,18 +797,43 @@ export class AgentHub implements Component {
     if (chat.length === 0) return chat; // viewer bailed on width; nothing to frame
 
     const agents = this.chatAgents();
-    const sel = Math.min(this.chatSelected, Math.max(0, agents.length - 1));
+    const sel = this.chatSelIndex(agents);
+
+    // Display list: a dim group header whenever the lifecycle group changes,
+    // then each agent row. Only non-empty groups get a header — an empty
+    // "FAILED" label is noise, and the header appearing when an agent fails is
+    // itself the signal.
+    const items: Array<{ kind: "header"; label: string } | { kind: "agent"; record: AgentRecord; selected: boolean }> = [];
+    let lastRank = -1;
+    for (let i = 0; i < agents.length; i++) {
+      const record = agents[i];
+      const rank = chatGroupRank(record.status);
+      if (rank !== lastRank) {
+        items.push({ kind: "header", label: CHAT_GROUP_LABELS[rank] });
+        lastRank = rank;
+      }
+      items.push({ kind: "agent", record, selected: i === sel });
+    }
+
     // Window the rows to the conversation's height so the selection stays visible.
     const rows = chat.length;
-    const start = Math.max(0, Math.min(sel - Math.floor(rows / 2), Math.max(0, agents.length - rows)));
+    let start = 0;
+    if (items.length > rows) {
+      const selAt = items.findIndex(it => it.kind === "agent" && it.selected);
+      start = Math.max(0, Math.min(selAt - Math.floor(rows / 2), items.length - rows));
+    }
 
     const lines: string[] = [];
     const title = " Agents ";
     const listSeg = CHAT_LIST_WIDTH + 2; // one padding column each side of the pane
     lines.push(th.fg("border", `╭${title}${"─".repeat(listSeg - title.length)}┬${"─".repeat(chatW + 2)}╮`));
     for (let i = 0; i < rows; i++) {
-      const record = agents[start + i];
-      const cell = record ? truncateToWidth(this.renderChatRow(record, start + i === sel), CHAT_LIST_WIDTH) : "";
+      const item = items[start + i];
+      const cell = item == null
+        ? ""
+        : item.kind === "header"
+          ? th.fg("dim", item.label)
+          : truncateToWidth(this.renderChatRow(item.record, item.selected), CHAT_LIST_WIDTH);
       const padded = cell + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(cell)));
       lines.push(th.fg("border", "│") + ` ${padded} ` + th.fg("border", "│") + ` ${chat[i]} ` + th.fg("border", "│"));
     }
