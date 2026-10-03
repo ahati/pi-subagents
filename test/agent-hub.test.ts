@@ -241,9 +241,35 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     ]);
     h.open({ agentId: "a1" });
     const frame = h.frame().join("\n");
-    expect(frame).toContain("AGENTS");
+    expect(frame).toContain("Agents");
     expect(frame).toContain("alpha task");
     expect(frame).toContain("waiting for first message");
+  });
+
+  it("wraps both panes in one overall border", () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task" }),
+      makeRecord({ id: "a2", description: "beta task" }),
+    ]);
+    h.open({ agentId: "a1" });
+    const frame = h.frame();
+    // One shared frame: the pane list sits inside the border, the tee marks
+    // the pane junction, and the last line closes it.
+    expect(frame[0].startsWith("╭")).toBe(true);
+    expect(frame[0]).toContain("┬");
+    expect(frame.at(-1)).toContain("┴");
+    expect(frame.at(-1)!.endsWith("╯")).toBe(true);
+    const pointerRow = frame.find(l => l.includes("❯"))!;
+    expect(pointerRow.startsWith("│")).toBe(true); // the list is inside the frame
+    expect(pointerRow).toContain("│"); // ...and the conversation beside it
+    // Every content row carries the outer border on both sides...
+    for (const line of frame.slice(1, -1)) {
+      expect(line.startsWith("│")).toBe(true);
+      expect(line.endsWith("│")).toBe(true);
+    }
+    // ...and no row carries a second frame of the viewer's own — the border
+    // is overall, not the conversation's box with a list beside it.
+    expect(frame.slice(1, -1).some(l => l.includes("╭") || l.includes("╰"))).toBe(false);
   });
 
   it("↓ moves to the next agent's conversation, ↑ back, clamped at the ends", async () => {

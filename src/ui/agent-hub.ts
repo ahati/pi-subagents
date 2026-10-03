@@ -226,6 +226,14 @@ export class AgentHub implements Component {
   private chatRecordId: string | undefined;
   /** Selection index into the chat pane's agent list (`chatAgents()`). */
   private chatSelected = 0;
+  /**
+   * Whether the embedded viewer renders frameless — true in the two-pane
+   * layout (the shared border spans the list too), false on the narrow
+   * fallback where the conversation stands alone with its own box. Read by
+   * the viewer's `frameless` option at render time, so `renderChat` flips it
+   * per frame before delegating.
+   */
+  private chatFrameless = true;
   /** Windowed popup vs full-screen hub; flipped by `f` via the reopen loop. */
   private readonly popup: boolean;
   /** Shared state object written back on close/toggle so the loop can resume. */
@@ -554,6 +562,10 @@ export class AgentHub implements Component {
         // ↑/↓ are repurposed by the pane list, so the viewer must not
         // advertise them as scroll keys.
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
+        // The shared frame spans the pane list too, so the viewer contributes
+        // its header/rules/content/footer — not a box of its own. Flipped off
+        // per render when the terminal is too narrow for the side pane.
+        frameless: () => this.chatFrameless,
         // The hub's extra keys ride through the viewer's key stream: `f`
         // flips popup/full-screen, ↑/↓ move the pane list's selection and the
         // stream follows. The composer check inside the viewer runs first, so
@@ -680,39 +692,52 @@ export class AgentHub implements Component {
   }
 
   /**
-   * The chat view's two-pane layout: the agent list on the left (the workflow
-   * inspector's pane width, pointer and glyphs), the selected agent's live
-   * conversation on the right in its own frame. The viewer is
-   * width-parameterized, so it renders at the reduced width unchanged; the
-   * columns zip line-by-line, the shorter padded with blanks so the frame
-   * never changes height mid-stream. Below `CHAT_TWO_PANE_MIN_WIDTH` the list
-   * pane is dropped rather than squeezing the conversation to unreadable.
+   * The chat view's two-pane layout inside one overall frame — the workflow
+   * inspector's shape, so the border spans the agent list too:
+   *
+   * ```
+   * ╭ Agents ───────┬──────────────────────────────────╮
+   * │ ❯ ● Agent     │ ● Agent (twin)  task · 12s · 3t  │
+   * │   ✓ explore   │ ──────────────────────────────── │
+   * │               │ (live conversation)              │
+   * ╰───────────────┴──────────────────────────────────╯
+   * ```
+   *
+   * The viewer renders frameless at the reduced width (it is
+   * width-parameterized), the list pads to its pane width, and the two zip
+   * line-by-line between the shared borders. Below `CHAT_TWO_PANE_MIN_WIDTH`
+   * the list pane is dropped and the conversation stands alone in its own
+   * framed box rather than being squeezed to unreadable.
    */
   private renderChat(width: number): string[] {
-    const right = this.chatViewer!.render(Math.max(30, width - CHAT_LIST_WIDTH - 1));
-    if (width < CHAT_TWO_PANE_MIN_WIDTH) return right;
+    if (width < CHAT_TWO_PANE_MIN_WIDTH) {
+      this.chatFrameless = false; // conversation alone → its own frame
+      return this.chatViewer!.render(width);
+    }
+    this.chatFrameless = true;
     const th = this.theme;
+    // Row shape: `│ ` + list(CHAT_LIST_WIDTH) + ` │ ` + chat + ` │`.
+    const chatW = width - CHAT_LIST_WIDTH - 7;
+    const chat = this.chatViewer!.render(chatW);
+    if (chat.length === 0) return chat; // viewer bailed on width; nothing to frame
+
     const agents = this.chatAgents();
     const sel = Math.min(this.chatSelected, Math.max(0, agents.length - 1));
-
-    const left: string[] = [];
-    left.push(truncateToWidth(th.fg("dim", " AGENTS"), CHAT_LIST_WIDTH));
-    left.push("");
     // Window the rows to the conversation's height so the selection stays visible.
-    const rows = Math.max(1, right.length - 2);
+    const rows = chat.length;
     const start = Math.max(0, Math.min(sel - Math.floor(rows / 2), Math.max(0, agents.length - rows)));
+
+    const lines: string[] = [];
+    const title = " Agents ";
+    const listSeg = CHAT_LIST_WIDTH + 2; // one padding column each side of the pane
+    lines.push(th.fg("border", `╭${title}${"─".repeat(listSeg - title.length)}┬${"─".repeat(chatW + 2)}╮`));
     for (let i = 0; i < rows; i++) {
       const record = agents[start + i];
-      left.push(record ? truncateToWidth(this.renderChatRow(record, start + i === sel), CHAT_LIST_WIDTH) : "");
+      const cell = record ? truncateToWidth(this.renderChatRow(record, start + i === sel), CHAT_LIST_WIDTH) : "";
+      const padded = cell + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(cell)));
+      lines.push(th.fg("border", "│") + ` ${padded} ` + th.fg("border", "│") + ` ${chat[i]} ` + th.fg("border", "│"));
     }
-
-    const sep = th.fg("dim", "│");
-    const lines: string[] = [];
-    for (let i = 0; i < Math.max(left.length, right.length); i++) {
-      const l = left[i] ?? "";
-      const padded = l + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(l)));
-      lines.push(padded + sep + (right[i] ?? ""));
-    }
+    lines.push(th.fg("border", `╰${"─".repeat(listSeg)}┴${"─".repeat(chatW + 2)}╯`));
     return lines;
   }
 
@@ -723,7 +748,7 @@ export class AgentHub implements Component {
     const name = renderAgentName(record.type, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
-    return ` ${marker} ${statusGlyph(record.status, th)} ${name}`;
+    return `${marker} ${statusGlyph(record.status, th)} ${name}`;
   }
 
   private headerTitle(width: number): string {

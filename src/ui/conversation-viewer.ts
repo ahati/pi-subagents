@@ -53,6 +53,15 @@ export interface ConversationViewerOptions {
    */
   scrollHint?: string | (() => string);
   /**
+   * Render without the `╭─╮` frame and side borders — content rows only,
+   * padded to the full render width. For a host that embeds the viewer inside
+   * its own overall frame (the hub's two-pane chat, whose border must span
+   * the agent list too). A function is re-read on every render, so the host
+   * can fall back to the framed box when it drops the side pane on narrow
+   * terminals. Defaults to framed.
+   */
+  frameless?: boolean | (() => boolean);
+  /**
    * Called for every key the viewer itself does not handle (after the composer,
    * which always wins while open). Return `true` to consume the key — this is
    * how the hub binds `f` without forking the viewer's key map.
@@ -454,7 +463,11 @@ export class ConversationViewer implements Component {
   render(width: number): string[] {
     if (width < 6) return []; // too narrow for any meaningful rendering
     const th = this.theme;
-    const innerW = width - 4; // border + padding
+    // Frameless: the host (the hub's two-pane chat) draws the overall border
+    // spanning its own panes, so this viewer contributes content rows only —
+    // no `╭─╮` top/bottom, no side `│`; every line pads to the full width.
+    const frameless = this.framelessNow();
+    const innerW = frameless ? width : width - 4; // border + padding
     this.lastInnerW = innerW;
     const lines: string[] = [];
 
@@ -463,13 +476,15 @@ export class ConversationViewer implements Component {
       return s + " ".repeat(Math.max(0, len - vis));
     };
     const row = (content: string) =>
-      th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW, "...", true) + " " + th.fg("border", "│");
+      frameless
+        ? truncateToWidth(pad(content, innerW), innerW, "...", true)
+        : th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW, "...", true) + " " + th.fg("border", "│");
     const hrTop = th.fg("border", `╭${"─".repeat(width - 2)}╮`);
     const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
     // Header
-    lines.push(hrTop);
+    if (!frameless) lines.push(hrTop);
     const modeLabel = getPromptModeLabel(this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
     const statusIcon = this.record.status === "running"
@@ -557,9 +572,15 @@ export class ConversationViewer implements Component {
       const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
       lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     }
-    lines.push(hrBot);
+    if (!frameless) lines.push(hrBot);
 
     return lines;
+  }
+
+  /** Whether the host asked for content-only rows (no frame of our own). */
+  private framelessNow(): boolean {
+    const flag = this.options?.frameless;
+    return typeof flag === "function" ? flag() : !!flag;
   }
 
   /** Stoppable only when a stop handler exists and the agent is still active. */
