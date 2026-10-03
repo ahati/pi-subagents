@@ -10,9 +10,11 @@
  *   opens the agent's conversation or the workflow inspector, `1`/`2`/Tab
  *   switch views, `q`/Esc closes the hub.
  * - Activity view: one line per agent describing what it is doing right now.
- * - Chat view: the existing `ConversationViewer` embedded at full height. Its
- *   quit keys come "back" to the table instead of closing the overlay, so the
- *   hub is one continuous surface: roster → transcript → roster → close.
+ * - Chat view: two panes, the workflow inspector's layout — the agent list on
+ *   the left (↑/↓ move the selection and the stream follows), the selected
+ *   agent's live `ConversationViewer` on the right. The viewer's quit keys come
+ *   "back" to the table instead of closing the overlay, so the hub is one
+ *   continuous surface: roster → transcript → roster → close.
  *
  * Purely a UI layer over the same runtime the fleet list drives: AgentManager
  * records, the activity tracker, workflow runs. All behavior — steering,
@@ -41,6 +43,10 @@ const MIN_BODY_ROWS = 3;
 const MAX_NAME_COL = 24;
 /** A terminal shorter than this renders the empty state instead of a broken table. */
 const MIN_TERMINAL_ROWS = 8;
+/** Chat pane: the agent list column's width (matches the workflow inspector's). */
+const CHAT_LIST_WIDTH = 18;
+/** Below this total width the chat drops the list pane and shows the conversation alone. */
+const CHAT_TWO_PANE_MIN_WIDTH = 60;
 
 /** Result of a wheel dispatch — structural subset of pi-tui's mouse types. */
 interface HubMouseEvent {
@@ -218,6 +224,8 @@ export class AgentHub implements Component {
   /** Chat view state — one viewer instance per opened agent. */
   private chatViewer: ConversationViewer | undefined;
   private chatRecordId: string | undefined;
+  /** Selection index into the chat pane's agent list (`chatAgents()`). */
+  private chatSelected = 0;
   /** Windowed popup vs full-screen hub; flipped by `f` via the reopen loop. */
   private readonly popup: boolean;
   /** Shared state object written back on close/toggle so the loop can resume. */
@@ -514,6 +522,9 @@ export class AgentHub implements Component {
     this.chatViewer?.dispose();
     this.view = "chat";
     this.chatRecordId = record.id;
+    // Keep the pane list's cursor on the agent now shown — Enter-on-row and the
+    // toggle loop land here too, not just ↑/↓ moves.
+    this.chatSelected = Math.max(0, this.chatAgents().findIndex(a => a.id === record.id));
     this.chatViewer = new ConversationViewer(
       this.tui,
       record.session!,
@@ -539,21 +550,25 @@ export class AgentHub implements Component {
         maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
         // Popup has no roster behind it — Esc closes. Full-screen walks back.
         onBack: () => (this.popup ? this.close() : this.leaveChat()),
-        backHint: () => (this.popup ? "←→ agent · Esc close · f expand" : "←→ agent · Esc back · f popup"),
+        backHint: () => (this.popup ? "↑↓ agent · Esc close · f expand" : "↑↓ agent · Esc back · f popup"),
+        // ↑/↓ are repurposed by the pane list, so the viewer must not
+        // advertise them as scroll keys.
+        scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
         // The hub's extra keys ride through the viewer's key stream: `f`
-        // flips popup/full-screen, ←/→ cycle the conversation across the
-        // roster's agents (wrapping).
+        // flips popup/full-screen, ↑/↓ move the pane list's selection and the
+        // stream follows. The composer check inside the viewer runs first, so
+        // a steering message still receives its arrow keys.
         onUnhandledKey: data => {
           if (matchesKey(data, "f")) {
             this.requestToggle();
             return true;
           }
-          if (matchesKey(data, "left")) {
-            this.cycleAgent(-1);
+          if (matchesKey(data, "up")) {
+            this.moveChatSelection(-1);
             return true;
           }
-          if (matchesKey(data, "right")) {
-            this.cycleAgent(1);
+          if (matchesKey(data, "down")) {
+            this.moveChatSelection(1);
             return true;
           }
           return false;
@@ -573,19 +588,34 @@ export class AgentHub implements Component {
   }
 
   /**
-   * ←/→ in the conversation: jump to the previous/next agent in roster order
-   * (earliest-launched first), wrapping around. Workflows are skipped — they
-   * have no conversation — and finished agents stay in the cycle so a wrap
-   * still reaches them for review. Re-entering the same agent is a no-op so
-   * scroll position survives a stray keypress.
+   * The chat pane's list: the roster's agents that have a session to show,
+   * filter-matched like every other view. Workflows are skipped — they have no
+   * conversation — and finished agents stay listed until the hub closes, so a
+   * selection never slides out from under the user mid-read.
    */
-  private cycleAgent(direction: 1 | -1): void {
-    const agents = this.roster().filter((e): e is AgentEntry => e.kind === "agent" && !!e.record.session);
-    if (agents.length < 2) return;
-    const current = agents.findIndex(e => e.record.id === this.chatRecordId);
-    const next = current === -1 ? 0 : (current + direction + agents.length) % agents.length;
-    const record = agents[next].record;
-    if (record.id === this.chatRecordId) return;
+  private chatAgents(): AgentRecord[] {
+    return this.entries()
+      .filter(e => e.kind === "agent" && !!e.record.session)
+      .map(e => (e as AgentEntry).record);
+  }
+
+  /**
+   * ↑/↓ in the conversation: move the pane list's selection and retarget the
+   * stream to that agent. Clamps at the ends — the list is visible next to the
+   * user, so wrapping would only break the spatial model. Re-entering the same
+   * agent is a no-op so scroll position survives a stray keypress.
+   */
+  private moveChatSelection(direction: 1 | -1): void {
+    const agents = this.chatAgents();
+    if (agents.length === 0) return;
+    const next = Math.min(agents.length - 1, Math.max(0, this.chatSelected + direction));
+    if (next === this.chatSelected) return;
+    const record = agents[next];
+    if (record.id === this.chatRecordId) {
+      this.chatSelected = next;
+      this.requestRender();
+      return;
+    }
     const fresh = this.deps.manager.listAgents().find(a => a.id === record.id) ?? record;
     if (fresh.session) this.enterChat(fresh);
   }
@@ -612,7 +642,7 @@ export class AgentHub implements Component {
 
   render(width: number): string[] {
     if (width < 6) return [];
-    if (this.view === "chat" && this.chatViewer) return this.chatViewer.render(width);
+    if (this.view === "chat" && this.chatViewer) return this.renderChat(width);
     const rows = this.tui.terminal.rows;
     if (rows < MIN_TERMINAL_ROWS) return [truncateToWidth(this.headerTitle(width), width)];
 
@@ -647,6 +677,53 @@ export class AgentHub implements Component {
     lines.push(row(this.footer(innerW)));
     lines.push(hrBot);
     return lines;
+  }
+
+  /**
+   * The chat view's two-pane layout: the agent list on the left (the workflow
+   * inspector's pane width, pointer and glyphs), the selected agent's live
+   * conversation on the right in its own frame. The viewer is
+   * width-parameterized, so it renders at the reduced width unchanged; the
+   * columns zip line-by-line, the shorter padded with blanks so the frame
+   * never changes height mid-stream. Below `CHAT_TWO_PANE_MIN_WIDTH` the list
+   * pane is dropped rather than squeezing the conversation to unreadable.
+   */
+  private renderChat(width: number): string[] {
+    const right = this.chatViewer!.render(Math.max(30, width - CHAT_LIST_WIDTH - 1));
+    if (width < CHAT_TWO_PANE_MIN_WIDTH) return right;
+    const th = this.theme;
+    const agents = this.chatAgents();
+    const sel = Math.min(this.chatSelected, Math.max(0, agents.length - 1));
+
+    const left: string[] = [];
+    left.push(truncateToWidth(th.fg("dim", " AGENTS"), CHAT_LIST_WIDTH));
+    left.push("");
+    // Window the rows to the conversation's height so the selection stays visible.
+    const rows = Math.max(1, right.length - 2);
+    const start = Math.max(0, Math.min(sel - Math.floor(rows / 2), Math.max(0, agents.length - rows)));
+    for (let i = 0; i < rows; i++) {
+      const record = agents[start + i];
+      left.push(record ? truncateToWidth(this.renderChatRow(record, start + i === sel), CHAT_LIST_WIDTH) : "");
+    }
+
+    const sep = th.fg("dim", "│");
+    const lines: string[] = [];
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const l = left[i] ?? "";
+      const padded = l + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(l)));
+      lines.push(padded + sep + (right[i] ?? ""));
+    }
+    return lines;
+  }
+
+  /** One row of the chat pane's list: `❯ ● name`, matching the inspector's. */
+  private renderChatRow(record: AgentRecord, selected: boolean): string {
+    const th = this.theme;
+    const marker = selected ? th.fg("accent", "❯") : " ";
+    const name = renderAgentName(record.type, th, selected
+      ? { fallbackColor: "text", bold: true }
+      : { fallbackColor: "muted" });
+    return ` ${marker} ${statusGlyph(record.status, th)} ${name}`;
   }
 
   private headerTitle(width: number): string {

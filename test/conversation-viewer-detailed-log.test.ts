@@ -49,8 +49,8 @@ function render(messages: any[], over: Partial<AgentRecord> = {}, viewerMarkdown
 
 describe("rich tool renderers (main-window quality)", () => {
   const richDef = {
-    renderCall: (args: any) => ({ render: (w: number) => [`RICH CALL ${JSON.stringify(args)}`] }),
-    renderResult: (result: any) => ({ render: (w: number) => [`RICH RESULT err=${result.isError}`] }),
+    renderCall: (args: any) => ({ render: (_w: number) => [`RICH CALL ${JSON.stringify(args)}`] }),
+    renderResult: (result: any) => ({ render: (_w: number) => [`RICH RESULT err=${result.isError}`] }),
   };
 
   it("uses the session definition's renderCall for the call row", () => {
@@ -105,7 +105,7 @@ describe("rich tool renderers (main-window quality)", () => {
     let component: any;
     const invocations: number[] = [];
     const editLike = {
-      renderCall: (args: any, _theme: any, ctx: any) => {
+      renderCall: (_args: any, _theme: any, ctx: any) => {
         invocations.push(Date.now());
         component ??= { children: ["header"], preview: undefined as string[] | undefined };
         ctx.state.callComponent = component;
@@ -158,6 +158,7 @@ describe("rich tool renderers — main-window state wiring", () => {
     const out = plain(viewer.render(120));
     expect(out).toContain("RESULT WITH HUNKS");
     expect(seenArgs).toEqual({ path: "x.ts", edits: [] });
+    expect(seenByResult).toEqual({ diff: "DIFF HUNK" });
   });
 
   it("invokes renderResult every frame, handing back the previous component", () => {

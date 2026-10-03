@@ -45,6 +45,14 @@ export interface ConversationViewerOptions {
    *  on every render. Defaults to `"Esc back"`. */
   backHint?: string | (() => string);
   /**
+   * Footer text for the scroll keys, when the host repurposes the viewer's
+   * defaults. A function is re-read on every render. Defaults to
+   * `"↑↓ scroll · PgUp/PgDn or Shift+↑↓"` — accurate only while ↑/↓ really
+   * scroll, so a host that intercepts them (the hub's agent list) supplies its
+   * own.
+   */
+  scrollHint?: string | (() => string);
+  /**
    * Called for every key the viewer itself does not handle (after the composer,
    * which always wins while open). Return `true` to consume the key — this is
    * how the hub binds `f` without forking the viewer's key map.
@@ -533,7 +541,7 @@ export class ConversationViewer implements Component {
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
       actions.push(th.fg("dim", `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`));
-      const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓ · ${this.backHintText()}`);
+      const footerRight = th.fg("dim", `${this.scrollHintText()} · ${this.backHintText()}`);
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
       // it's the first thing dropped so it never crowds out the hints.
@@ -569,6 +577,12 @@ export class ConversationViewer implements Component {
     if (!this.options?.onBack) return "Esc close";
     const hint = this.options.backHint;
     return (typeof hint === "function" ? hint() : hint) ?? "Esc back";
+  }
+
+  /** Footer text for the scroll keys; hosts that repurpose ↑/↓ override it. */
+  private scrollHintText(): string {
+    const hint = this.options?.scrollHint;
+    return (typeof hint === "function" ? hint() : hint) ?? "↑↓ scroll · PgUp/PgDn or Shift+↑↓";
   }
 
   /** Wrap `text` literally — the pre-Markdown path, and the fallback from it. */

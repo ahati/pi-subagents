@@ -326,7 +326,57 @@ describe("FleetList navigation", () => {
   it("passes non-nav keys through and cancels navigation", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN);
+    expect(h.press("x")).toBeUndefined();
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("→ while active dismisses the list entirely (bar included)", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN); // activate
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    // The bar goes away, not just the selection.
+    expect(h.render()).toEqual([]);
+  });
+
+  it("→ while inactive falls through (it is not an activator)", () => {
+    const h = harness([makeRecord()]);
     expect(h.press(RIGHT)).toBeUndefined();
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("↓/← recall a dismissed list", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+    expect(h.render()).toEqual([]);
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+  });
+
+  it("an empty roster clears the dismissal, so new agent activity re-shows the bar", () => {
+    const records = [makeRecord()];
+    const h = harness(records);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+    expect(h.render()).toEqual([]);
+    // Roster drains …
+    records.length = 0;
+    h.fleet.update();
+    // … and a fresh agent spawns: the bar is back without any key.
+    records.push(makeRecord({ id: "a2", description: "fresh" }));
+    h.fleet.update();
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    // Dismissal was cleared too: → closes the fresh bar again.
+    h.press(DOWN);
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    expect(h.render()).toEqual([]);
+  });
+
+  it("Esc still only deactivates — the bar stays visible", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    h.press(ESC);
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 

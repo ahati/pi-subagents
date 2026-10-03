@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The conversation panel and hub chat are now two-pane: `↑`/`↓` select the agent, the live stream follows.** The left pane lists the agents (the workflow inspector's pane width and pointer), the right shows the selected agent's conversation, and moving the selection retargets the stream instantly. This replaces `←`/`→` blind cycling, which moved through agents one at a time with no list in view; scrolling the conversation stays available on `PgUp`/`PgDn`, `Shift+↑↓`, `j`/`k` and the mouse wheel. `Enter` still opens the steer composer, `x` still stops the shown agent, and `f` still flips popup/full-screen.
+- **`→` now closes the FleetView.** `←` (or `↓`) opening the list had no mirror: any key deactivated the selection, but the bar stayed on screen below the editor for as long as agents ran, which read as "cannot close". `→` dismisses the list entirely; `↓`/`←` recall it, and a fresh batch of agents (after the roster empties) re-shows the bar on its own. `Esc` and `↑`-above-`main` keep their previous deactivate-only behavior.
+
 ### Fixed
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
 

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
+import { AgentHub, type AgentHubDeps, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
 import { type AgentActivity } from "../src/ui/agent-widget.js";
-import { AgentHub, openAgentHub, type AgentHubDeps, type HubUICtx } from "../src/ui/agent-hub.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const ESC = "\x1b";
@@ -230,8 +230,23 @@ describe("agent hub mouse in regular TUI mode", () => {
   });
 });
 
-describe("agent hub ←/→ agent cycling", () => {
-  it("right cycles to the next agent's conversation, left wraps backwards", async () => {
+describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
+  const DOWN = "\x1b[B";
+  const UP = "\x1b[A";
+
+  it("renders the pane list beside the conversation", () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task" }),
+    ]);
+    h.open({ agentId: "a1" });
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("AGENTS");
+    expect(frame).toContain("alpha task");
+    expect(frame).toContain("waiting for first message");
+  });
+
+  it("↓ moves to the next agent's conversation, ↑ back, clamped at the ends", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
       makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
@@ -239,18 +254,35 @@ describe("agent hub ←/→ agent cycling", () => {
     ]);
     h.open({ agentId: "a2" });
     expect(h.frame().join("\n")).toContain("beta task");
-    const RIGHT = "\x1b[C";
-    const LEFT = "\x1b[D";
-    h.press(RIGHT);
+    h.press(DOWN);
     expect(h.frame().join("\n")).toContain("gamma task");
-    h.press(RIGHT); // wraps to a1
+    h.press(DOWN); // clamps at the last agent (no wrap)
+    expect(h.frame().join("\n")).toContain("gamma task");
+    h.press(UP);
+    expect(h.frame().join("\n")).toContain("beta task");
+    h.press(UP);
     expect(h.frame().join("\n")).toContain("alpha task");
-    h.press(LEFT); // back to a3
-    expect(h.frame().join("\n")).toContain("gamma task");
+    h.press(UP); // clamps at the first
+    expect(h.frame().join("\n")).toContain("alpha task");
     expect(h.settled()).toBe(false);
   });
 
-  it("skips workflow rows in the cycle", async () => {
+  it("the pane list marks the selected row", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task" }),
+    ]);
+    h.open({ agentId: "a1" });
+    const firstIdx = h.frame().findIndex(l => l.includes("❯"));
+    expect(firstIdx).toBeGreaterThan(0);
+    h.press(DOWN);
+    const secondIdx = h.frame().findIndex(l => l.includes("❯"));
+    expect(secondIdx).toBeGreaterThan(firstIdx); // the pointer moved down the list
+    // The conversation header switched agents.
+    expect(h.frame().join("\n")).toContain("beta task");
+  });
+
+  it("skips workflow rows in the pane list", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
       makeRecord({ id: "a2", description: "beta task" }),
@@ -261,18 +293,28 @@ describe("agent hub ←/→ agent cycling", () => {
       }],
     });
     h.open({ agentId: "a1" });
-    const RIGHT = "\x1b[C";
-    h.press(RIGHT); // a1 → a2 (not the workflow)
+    h.press(DOWN); // a1 → a2 (the workflow has no conversation, so it is not listed)
     expect(h.frame().join("\n")).toContain("beta task");
   });
 
-  it("does not rebuild the viewer when cycling is a no-op (single agent)", () => {
+  it("does not rebuild the viewer when the move is a no-op (single agent)", () => {
     const h = harness([makeRecord({ id: "a1", description: "only task" })]);
     h.open({ agentId: "a1" });
     const before = h.components.length;
-    h.press("\x1b[C");
-    h.press("\x1b[D");
+    h.press(DOWN);
+    h.press(UP);
     expect(h.components.length).toBe(before); // same viewer instance, scroll kept
+  });
+
+  it("advertises the pane keys in the footer instead of ←/→ cycling", () => {
+    const h = harness([makeRecord({ id: "a1" })]);
+    h.open({ agentId: "a1" });
+    // Wide frame: at default widths the test theme's fake color markers (real
+    // ANSI is zero-width) push the footer past its truncation point.
+    const frame = h.frame(200).join("\n");
+    expect(frame).toContain("↑↓ agent");
+    expect(frame).toContain("Esc close");
+    expect(frame).not.toContain("←→ agent");
   });
 });
 

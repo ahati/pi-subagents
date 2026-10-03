@@ -4,6 +4,8 @@
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
  * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
+ * → mirrors ←: it dismisses the list entirely — bar included — until ↓/← recall it
+ * or fresh agent activity re-shows it.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
@@ -96,6 +98,12 @@ export class FleetList {
   private enabled = true;
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
+  /**
+   * Set when → dismisses the bar. The list stays hidden — ↓/← recall it (the
+   * activators are the "I want the fleet view" keys), and the flag clears when
+   * the roster empties so fresh agent activity shows the bar again on its own.
+   */
+  private dismissed = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
@@ -142,6 +150,9 @@ export class FleetList {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) this.active = false;
+    // Re-enabling the setting always shows the bar again — a dismissal made
+    // under the old session's keys says nothing about this toggle.
+    this.dismissed = false;
     this.update();
   }
 
@@ -181,6 +192,7 @@ export class FleetList {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.active = false;
+    this.dismissed = false;
     // Null last so a `viewerClose()` microtask above can't re-register the widget.
     this.ui = undefined;
   }
@@ -208,11 +220,25 @@ export class FleetList {
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
       this.selectedIndex = 0;
+      // Nothing left to keep hidden: the next batch of agents shows the bar
+      // again rather than inheriting a dismissal aimed at the last batch.
+      this.dismissed = false;
       return;
     }
 
     this.clampSelection();
     this.ensureTimer(); // keep stats ticking whenever the list is shown (e.g. after a re-enable)
+
+    if (this.dismissed) {
+      // The user closed the bar with →. Stay hidden while the roster lasts —
+      // only ↓/← (or this roster emptying out) bring it back.
+      if (this.widgetRegistered) {
+        this.ui.setWidget(FLEET_KEY, undefined);
+        this.widgetRegistered = false;
+        this.tui = undefined;
+      }
+      return;
+    }
 
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {
@@ -320,12 +346,14 @@ export class FleetList {
     }
 
     if (!this.active) {
-      // Activate: ↓ or ← at an empty prompt moves focus into the list.
+      // Activate: ↓ or ← at an empty prompt moves focus into the list — and
+      // recalls a bar dismissed with →, so the closing key's mirror reopens it.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
       // Gated on the roster, not the agents: a session whose only row is a
       // workflow run still has somewhere to go, and requiring an agent would
       // render the row but refuse to move into it.
       if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
+        this.dismissed = false;
         this.active = true;
         this.selectedIndex = 0;
         this.update();
@@ -334,7 +362,7 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
+    // Active — arrows navigate, Enter opens, → / Esc / Up-past-top leave the list.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
@@ -345,6 +373,14 @@ export class FleetList {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
       this.update();
+      return { consume: true };
+    }
+    // → mirrors ←: the key that called the list dismisses it again, bar
+    // included — deactivating alone would leave the rows on screen, which
+    // reads as "nothing closed". ↓/← bring it back.
+    if (matchesKey(data, "right")) {
+      this.dismissed = true;
+      this.deactivate();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
@@ -469,7 +505,7 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
+      ? "↑↓ select · enter view · → close · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));

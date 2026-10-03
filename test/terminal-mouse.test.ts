@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DISABLE_TERMINAL_MOUSE,
-  ENABLE_TERMINAL_MOUSE,
   disableTerminalMouse,
+  ENABLE_TERMINAL_MOUSE,
   enableTerminalMouse,
   parseMouseInput,
 } from "../src/ui/terminal-mouse.js";
