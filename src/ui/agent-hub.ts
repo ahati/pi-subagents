@@ -64,6 +64,7 @@ function chatGroupRank(status: AgentRecord["status"]): number {
   switch (status) {
     case "running":
     case "queued":
+    case "paused":
       return 0;
     case "completed":
     case "steered":
@@ -122,6 +123,14 @@ export interface AgentHubDeps {
   openWorkflow?: (id: string) => Promise<void> | void;
   /** Surface stop confirmations. Omitted → silent. */
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
+  /**
+   * Pause/resume for the `p` key, wired by the extension to the same funnel
+   * the `/agents` commands use. `pauseAgent` returns why the pause was
+   * refused, so the toast never claims a pause that did not land. Omitted →
+   * `p` does nothing.
+   */
+  pauseAgent?: (id: string) => string | undefined;
+  resumeAgent?: (id: string) => boolean;
 }
 
 // ---- Roster (module-level so the reopen loop can peek without an instance) ----
@@ -162,6 +171,8 @@ export function statusGlyph(status: AgentRecord["status"], th: Theme): string {
       return th.fg("error", "✗");
     case "queued":
       return th.fg("dim", "○");
+    case "paused":
+      return th.fg("dim", "‖");
     // aborted / stopped
     default:
       return th.fg("dim", "·");
@@ -474,6 +485,10 @@ export class AgentHub implements Component {
       this.stopSelected(items);
       return;
     }
+    if (matchesKey(data, "p")) {
+      this.pauseResumeSelected(items);
+      return;
+    }
 
     // Any other key disarms a pending stop.
     if (this.stopArmed) this.stopArmed = false;
@@ -583,7 +598,7 @@ export class AgentHub implements Component {
         maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
         // Popup has no roster behind it — Esc closes. Full-screen walks back.
         onBack: () => (this.popup ? this.close() : this.leaveChat()),
-        backHint: () => (this.popup ? "↑↓ agent · c copy · Esc close · f expand" : "↑↓ agent · c copy · Esc back · f popup"),
+        backHint: () => (this.popup ? "↑↓ agent · c copy · p pause · Esc close · f expand" : "↑↓ agent · c copy · p pause · Esc back · f popup"),
         // ↑/↓ are repurposed by the pane list, so the viewer must not
         // advertise them as scroll keys.
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
@@ -603,6 +618,10 @@ export class AgentHub implements Component {
           }
           if (matchesKey(data, "c")) {
             this.copyChatResult();
+            return true;
+          }
+          if (matchesKey(data, "p")) {
+            this.pauseResumeChat();
             return true;
           }
           if (matchesKey(data, "up")) {
@@ -674,6 +693,12 @@ export class AgentHub implements Component {
    * fallback emits the OSC 52 sequence directly, the same escape route pi's
    * own helper takes at the end of its chain.
    */
+  /** `p` in the chat pane: pause/resume the agent being viewed. */
+  private pauseResumeChat(): void {
+    const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
+    if (record) this.pauseResumeAgent(record);
+  }
+
   private copyChatResult(): void {
     const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
     if (!record) return;
@@ -718,6 +743,35 @@ export class AgentHub implements Component {
       }
     } else {
       this.stopArmed = true;
+    }
+    this.requestRender();
+  }
+
+  /**
+   * `p`: pause the selected agent if it is active, resume it if paused. One
+   * key because the two states are one lifecycle — a paused row is where a
+   * pause landed and the only thing a resume starts from. Settled agents stay
+   * put: continuing a finished run is `/agents resume`'s job, not a toggle's.
+   */
+  private pauseResumeSelected(items: HubEntry[]): void {
+    const entry = items[this.selected];
+    if (entry?.kind !== "agent") return;
+    this.pauseResumeAgent(entry.record);
+  }
+
+  private pauseResumeAgent(record: AgentRecord): void {
+    if (record.status === "running" || record.status === "queued") {
+      const why = this.deps.pauseAgent?.(record.id);
+      this.deps.notify?.(
+        why ? `Cannot pause "${record.description}" — ${why}.` : `Paused "${record.description}".`,
+        why ? "warning" : "info",
+      );
+    } else if (record.status === "paused") {
+      const started = this.deps.resumeAgent?.(record.id);
+      this.deps.notify?.(
+        started ? `Resuming "${record.description}".` : `Cannot resume "${record.description}".`,
+        started ? "info" : "warning",
+      );
     }
     this.requestRender();
   }
@@ -1001,8 +1055,8 @@ export class AgentHub implements Component {
     // Popup mode never renders the roster footer (it shows the conversation
     // only); "f popup" is therefore only offered where it applies.
     const keys = this.view === "activity"
-      ? ["↑↓ select", "Enter open", "x stop", "1 agents", "f popup", "q close"]
-      : ["↑↓ select", "Enter open", "x stop", "/ filter", "Tab activity", "f popup", "q close"];
+      ? ["↑↓ select", "Enter open", "x stop", "p pause", "1 agents", "f popup", "q close"]
+      : ["↑↓ select", "Enter open", "x stop", "p pause", "/ filter", "Tab activity", "f popup", "q close"];
     let footer = keys.join("·");
     // Drop hints right-to-left until the line fits, so the essential ones survive.
     while (keys.length > 1 && visibleWidth(footer) > width) {

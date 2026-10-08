@@ -121,6 +121,8 @@ export class FleetList {
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
   private openWorkflow: ((id: string) => Promise<void> | void) | undefined;
+  /** Injected pause/resume for the `p` key — see `setLifecycleActions`. */
+  private lifecycleActions: { pause: (id: string) => string | undefined; resume: (id: string) => boolean } | undefined;
   /**
    * Set while the workflow inspector is up.
    *
@@ -278,7 +280,7 @@ export class FleetList {
     const now = Date.now();
     return this.manager.listAgents()
       .filter(a => isTopLevelAgent(a) && a.session && (
-        a.status === "running" || a.status === "queued"
+        a.status === "running" || a.status === "queued" || a.status === "paused"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
@@ -299,6 +301,19 @@ export class FleetList {
   ): void {
     this.workflowSource = source;
     this.openWorkflow = open;
+  }
+
+  /**
+   * Wire the `p` key's pause/resume. Injected rather than taken in the
+   * constructor because the funnel lives in the extension closure (it is what
+   * emits `subagents:paused`) — the same reason `setWorkflowSource` exists.
+   * `pause` returns why a pause was refused; `resume` reports acceptance.
+   * Omitted → `p` does nothing.
+   */
+  setLifecycleActions(
+    actions: { pause: (id: string) => string | undefined; resume: (id: string) => boolean },
+  ): void {
+    this.lifecycleActions = actions;
   }
 
   /** Live runs, plus recently settled ones — the same linger the agents get. */
@@ -325,6 +340,21 @@ export class FleetList {
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
       ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
     ];
+  }
+
+  /**
+   * `p`: pause the selected agent if active, resume it if paused — the same
+   * one-lifecycle toggle the hub's roster uses. Settled agents stay put.
+   * The row re-renders from the record, so the glyph flip is the feedback;
+   * there is no toast surface down here.
+   */
+  private pauseResumeSelected(): void {
+    const entry = this.roster()[this.selectedIndex];
+    if (entry?.kind !== "agent" || !this.lifecycleActions) return;
+    const { status, id } = entry.record;
+    if (status === "running" || status === "queued") this.lifecycleActions.pause(id);
+    else if (status === "paused") this.lifecycleActions.resume(id);
+    this.update();
   }
 
   private clampSelection(): void {
@@ -395,6 +425,7 @@ export class FleetList {
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
+    if (matchesKey(data, "p")) { this.pauseResumeSelected(); return { consume: true }; }
 
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
@@ -458,6 +489,8 @@ export class FleetList {
         workflows: this.workflowSource,
         openWorkflow: id => this.openWorkflow?.(id),
         notify: (message, type) => ui.notify(message, type),
+        pauseAgent: id => this.lifecycleActions?.pause(id),
+        resumeAgent: id => this.lifecycleActions?.resume(id) ?? false,
       },
       { agentId },
     ).finally(() => {

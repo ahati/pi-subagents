@@ -559,6 +559,57 @@ describe("agent hub roster", () => {
     expect(h.manager.abort).toHaveBeenCalledWith("a1");
   });
 
+  it("p pauses the selected running agent and says so", () => {
+    const pauseAgent = vi.fn(() => undefined);
+    const notify = vi.fn();
+    const h = harness([makeRecord({ id: "a1", status: "running" })], { pauseAgent, notify });
+    h.open();
+    expect(h.frame().join("\n")).toContain("p pause");
+    h.press("p");
+    expect(pauseAgent).toHaveBeenCalledWith("a1");
+    expect(notify).toHaveBeenCalledWith('Paused "Sleep then report 1".', "info");
+  });
+
+  it("p resumes a paused agent, reports a refusal as a warning", () => {
+    const DOWN = "\x1b[B";
+    const resumeAgent = vi.fn(() => true);
+    const pauseAgent = vi.fn(() => "worktree-isolated runs cannot pause");
+    const notify = vi.fn();
+    const h = harness(
+      [makeRecord({ id: "a1", status: "paused" }), makeRecord({ id: "a2", status: "running" })],
+      { resumeAgent, pauseAgent, notify },
+    );
+    h.open();
+    h.press("p"); // a1 is paused → resume
+    expect(resumeAgent).toHaveBeenCalledWith("a1");
+    expect(notify).toHaveBeenCalledWith('Resuming "Sleep then report 1".', "info");
+
+    h.press(DOWN); // a2 is running → pause refused
+    h.press("p");
+    expect(pauseAgent).toHaveBeenCalledWith("a2");
+    expect(notify).toHaveBeenCalledWith('Cannot pause "Sleep then report 1" — worktree-isolated runs cannot pause.', "warning");
+  });
+
+  it("p leaves a settled agent alone — continuing a finished run is /agents resume's job", () => {
+    const pauseAgent = vi.fn(() => undefined);
+    const resumeAgent = vi.fn(() => true);
+    const h = harness([makeRecord({ id: "a1", status: "completed" })], { pauseAgent, resumeAgent });
+    h.open();
+    h.press("p");
+    expect(pauseAgent).not.toHaveBeenCalled();
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  it("p in the chat pane pauses the agent being viewed", () => {
+    const pauseAgent = vi.fn(() => undefined);
+    const notify = vi.fn();
+    const h = harness([makeRecord({ id: "a1", status: "running" })], { pauseAgent, notify });
+    h.open({ agentId: "a1" });
+    h.press("p");
+    expect(pauseAgent).toHaveBeenCalledWith("a1");
+    expect(notify).toHaveBeenCalledWith('Paused "Sleep then report 1".', "info");
+  });
+
   it("Enter on a workflow row opens the run inspector and the hub stays up", async () => {
     const openWorkflow = vi.fn();
     const h = harness([makeRecord({ id: "a1" })], {

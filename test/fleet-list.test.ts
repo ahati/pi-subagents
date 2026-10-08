@@ -227,6 +227,60 @@ describe("FleetList navigation", () => {
     expect(h.press(LEFT)).toEqual({ consume: true });
   });
 
+  it("p pauses the selected running agent and consumes the key", () => {
+    const h = harness([makeRecord({ id: "a1", status: "running" })]);
+    const pause = vi.fn(() => undefined);
+    const resume = vi.fn(() => true);
+    h.fleet.setLifecycleActions({ pause, resume });
+    h.press(DOWN); // activate; selection lands on main
+    h.press(DOWN); // onto a1
+    expect(h.press("p")).toEqual({ consume: true });
+    expect(pause).toHaveBeenCalledWith("a1");
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("p resumes a paused agent", () => {
+    const h = harness([makeRecord({ id: "a1", status: "paused" })]);
+    const pause = vi.fn(() => undefined);
+    const resume = vi.fn(() => true);
+    h.fleet.setLifecycleActions({ pause, resume });
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press("p");
+    expect(resume).toHaveBeenCalledWith("a1");
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it("p leaves settled agents — and main — alone, and is inert when never wired", () => {
+    const h = harness([
+      // completedAt set: the roster lingers finished agents only briefly, and a
+      // record without it would be filtered out entirely.
+      makeRecord({ id: "a1", status: "completed", completedAt: Date.now() }),
+      makeRecord({ id: "a2", status: "paused" }),
+    ]);
+    const pause = vi.fn(() => undefined);
+    const resume = vi.fn(() => true);
+    h.fleet.setLifecycleActions({ pause, resume });
+    h.press(DOWN); // main selected
+    h.press("p");
+    expect(pause).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+
+    h.press(DOWN); // a1: completed → neither
+    h.press("p");
+    expect(pause).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+
+    h.press(DOWN); // a2: paused → resumes
+    h.press("p");
+    expect(resume).toHaveBeenCalledWith("a2");
+
+    const unwired = harness([makeRecord({ id: "a3", status: "running" })]);
+    unwired.press(DOWN);
+    unwired.press(DOWN);
+    expect(unwired.press("p")).toEqual({ consume: true }); // no crash, no action
+  });
+
   it("does NOT activate when the prompt is non-empty (typing is preserved)", () => {
     const h = harness([makeRecord()]);
     h.setEditorText("hello");

@@ -36,7 +36,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type AgentTombstone, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -163,6 +163,7 @@ function getStatusLabel(status: string, error?: string): string {
     case "aborted": return "Aborted (max turns exceeded)";
     case "steered": return "Wrapped up (turn limit)";
     case "stopped": return "Stopped";
+    case "paused": return "Paused";
     default: return "Done";
   }
 }
@@ -572,6 +573,24 @@ export default function (pi: ExtensionAPI) {
     // notification, and UI channels.
     if (!isTopLevelAgent(record)) return;
 
+    // A pause is not an outcome: the run settled because pause() fired its
+    // controller, and everything downstream of a real settle — lifecycle
+    // event, notification, nudge, group join — would report a finished agent
+    // that is actually parked. History gets the record and the surfaces
+    // refresh; nothing announces it. The resume re-fires this callback with a
+    // real terminal status, which takes the normal path.
+    if (record.status === "paused") {
+      pi.appendEntry("subagents:record", {
+        id: record.id, type: record.type, description: record.description,
+        status: record.status, result: record.result, error: record.error,
+        startedAt: record.startedAt, completedAt: record.completedAt,
+      });
+      agentActivity.delete(record.id);
+      widget.update();
+      fleet.update();
+      return;
+    }
+
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -808,6 +827,18 @@ export default function (pi: ExtensionAPI) {
           // itself off `getRecord`, and reports the refusal instead of the
           // "Agent not found" a false from here used to be read as.
           abort: (id) => manager.abort(id),
+          // The event side of a pause lives in the funnel, so the RPC channel
+          // and every UI surface announce the same thing.
+          pauseAgent: (id) => {
+            const record = manager.getRecord(id);
+            return record !== undefined && pauseAgentRecord(record) === undefined;
+          },
+          resumeAgent: (id, prompt) => {
+            const record = manager.getRecord(id);
+            const ctx = currentCtx;
+            if (!record || !ctx) return Promise.resolve(false);
+            return resumeAgentById(ctx, record, prompt);
+          },
           consumeResult: (id) => {
             const record = resolveAgentRef(id);
             // Same guard as get_subagent_result: a running agent has no result
@@ -945,69 +976,15 @@ export default function (pi: ExtensionAPI) {
       // `no_transcript`.
     }
 
-    // Evicted, but its conversation is still on disk: reopen it. This is an
-    // ordinary spawn carrying a session file, so the new record picks up the
-    // widget, fleet row, transcript and completion notification unchanged —
-    // and `reclaim` hands it back the names the tombstone was holding.
+    // Evicted, but its conversation is still on disk: reopen it. The mechanics
+    // (spawn with a session file, reclaim the names) live in reviveTombstone,
+    // shared with `/agents revive`; a mention forwards the typed text as the
+    // continuation prompt. This is an ordinary spawn carrying a session file,
+    // so the new record picks up the widget, fleet row, transcript and
+    // completion notification unchanged — and `reclaim` hands it back the
+    // names the tombstone was holding.
     if (resolved?.kind === "tombstone") {
-      const entry = resolved.entry;
-      const target = `@${entry.alias ?? entry.handle}`;
-
-      // Checked here rather than left to SessionManager.open: that runs inside
-      // runAgent, whose rejection lands on the record as an agent error, not in
-      // the catch below. A `/new` in another pi window or a manual delete makes
-      // the conversation unrecoverable (Claude Code's `not_reachable`), so drop
-      // the entry — a row that can only ever fail is worse than none — and say
-      // so rather than quietly sending this message to an unrelated agent.
-      if (!existsSync(entry.sessionFile)) {
-        manager.dropTombstone(entry.handle);
-        ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
-        return { action: "handled" };
-      }
-
-      // The Agent tool deliberately falls back to general-purpose for a type it
-      // cannot resolve (#183), which covers a deleted file AND a merely
-      // disabled one. A resume must not inherit that: reopening this
-      // conversation under a different agent's prompt and tools is not
-      // continuing it, and the new record would re-tombstone under the
-      // substitute, so the handle would never find its way back.
-      reloadCustomAgents();
-      const dispatch = resolveSpawnType(entry.type);
-      if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
-        // The tombstone stays: re-enabling the agent makes the handle work
-        // again, which a drop would foreclose.
-        ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
-        return { action: "handled" };
-      }
-
-      try {
-        // spawnResolved, not spawnTopLevel: the latter strips
-        // `resumeSessionFile` and `reclaim` as untrusted. This path is the
-        // exception — both come from a tombstone this extension wrote.
-        const id = spawnResolved(pi, ctx, dispatch.type, mention.message, {
-          description: entry.description,
-          reclaim: { handle: entry.handle, alias: entry.alias },
-          resumeSessionFile: entry.sessionFile,
-          isBackground: true,
-        });
-        // The agent may still be starting — wait, so a startup failure lands in
-        // the catch below instead of being announced as a resume.
-        await manager.awaitStartup(id);
-        // The tombstone deliberately stays. `resolveMention` prefers the live
-        // record holding these same names, so it cannot shadow the resume — and
-        // if this run dies before establishing its own session, the original
-        // transcript is still the right thing for the next mention to reopen.
-        // Once the resumed record is evicted it overwrites this entry in place,
-        // keyed by the same handle, so nothing accumulates.
-        ctx.ui.notify(`Resuming ${target}`, "info");
-      } catch (err) {
-        // The type is already settled above, so what is left is a spawn-time
-        // failure: a strict worktree-isolation error, an unusable cwd.
-        ctx.ui.notify(
-          `Could not resume ${target}: ${err instanceof Error ? err.message : String(err)}`,
-          "warning",
-        );
-      }
+      await reviveTombstone(ctx, resolved.entry, mention.message, "Resuming");
       return { action: "handled" };
     }
 
@@ -1137,6 +1114,22 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same setting on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined));
+  // The `p` key rides the same funnel as `/agents pause|resume` — one place
+  // that emits `subagents:paused` and decides refusals. Refusals surface as
+  // the returned reason, which the surfaces turn into their own feedback.
+  fleet.setLifecycleActions({
+    pause: (id) => {
+      const record = manager.getRecord(id);
+      return record ? pauseAgentRecord(record) : "no such agent";
+    },
+    resume: (id) => {
+      const record = manager.getRecord(id);
+      const ctx = currentCtx;
+      if (!record || !ctx) return false;
+      void resumeAgentById(ctx, record);
+      return true;
+    },
+  });
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -2897,6 +2890,288 @@ Terse command-style prompts produce shallow, generic work.
     return `${label} (→ ${resolvedFull.replace(/-\d{8}$/, "")})`;
   }
 
+  /**
+   * Prompt sent to a paused or evicted agent when the user did not type one:
+   * the session carries the full task context, so a bare instruction to pick
+   * the work back up is all a continuation needs.
+   */
+  const CONTINUATION_PROMPT = "Continue from where you left off.";
+
+  /**
+   * Continue a settled agent's session in the background — the same wiring a
+   * `@handle` mention gets (transcript, activity tracking, completion
+   * notification), with `prompt` defaulting to CONTINUATION_PROMPT. Resumes
+   * re-enter the concurrency queue, so resuming a wall of paused agents just
+   * queues the tail. Returns false when the resume could not start.
+   */
+  function resumeAgentSession(ctx: ExtensionContext, record: AgentRecord, prompt = CONTINUATION_PROMPT): Promise<boolean> {
+    const config = getAgentConfig(record.type);
+    return startBackgroundResume(ctx, record, prompt, {
+      outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
+      maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
+    }).then(resumed => resumed !== undefined);
+  }
+
+  /**
+   * Continue a settled agent — the resume funnel behind `/agents resume`, the
+   * hub and fleet `p` keys, and the RPC channel. An agent paused out of the
+   * queue (no session) is re-queued; one with a session has that session
+   * continued. False when there is nothing to continue.
+   */
+  function resumeAgentById(ctx: ExtensionContext, record: AgentRecord, prompt?: string): Promise<boolean> {
+    if (record.session) return resumeAgentSession(ctx, record, prompt);
+    return Promise.resolve(manager.unpause(record.id));
+  }
+
+  /**
+   * Pause one agent and announce it: the single funnel behind `/agents pause`,
+   * the hub and fleet `p` keys, and the RPC channel — so the `subagents:paused`
+   * event cannot drift from any surface's idea of what happened. Returns why
+   * the pause was refused, or undefined when it landed. Silent on purpose:
+   * each caller's feedback shape differs (toast, row glyph, reply envelope).
+   */
+  function pauseAgentRecord(record: AgentRecord): string | undefined {
+    const refusal = record.isBackground === false
+      ? "it is blocking its caller"
+      : record.worktree
+        ? "worktree-isolated runs cannot pause"
+        : undefined;
+    if (refusal || !manager.pause(record.id)) return refusal ?? "not pausable";
+    pi.events.emit("subagents:paused", {
+      id: record.id,
+      type: record.type,
+      description: record.description,
+    });
+    return undefined;
+  }
+
+  /**
+   * Reopen an evicted agent's conversation (a tombstone) as a fresh background
+   * agent carrying the same handle. Shared by the `@handle` mention path and
+   * `/agents revive` — the only difference is the prompt (typed text vs
+   * CONTINUATION_PROMPT) and the verb in the toast.
+   *
+   * Returns false when the conversation could not be reopened; the failure
+   * paths notify, because each knows exactly why.
+   */
+  async function reviveTombstone(ctx: ExtensionContext, entry: AgentTombstone, prompt: string, verb: string): Promise<boolean> {
+    const target = `@${entry.alias ?? entry.handle}`;
+
+    // Checked here rather than left to SessionManager.open: that runs inside
+    // runAgent, whose rejection lands on the record as an agent error, not in
+    // the catch below. A `/new` in another pi window or a manual delete makes
+    // the conversation unrecoverable (Claude Code's `not_reachable`), so drop
+    // the entry — a row that can only ever fail is worse than none — and say
+    // so rather than quietly sending this message to an unrelated agent.
+    if (!existsSync(entry.sessionFile)) {
+      manager.dropTombstone(entry.handle);
+      ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
+      return false;
+    }
+
+    // The Agent tool deliberately falls back to general-purpose for a type it
+    // cannot resolve (#183), which covers a deleted file AND a merely
+    // disabled one. A resume must not inherit that: reopening this
+    // conversation under a different agent's prompt and tools is not
+    // continuing it, and the new record would re-tombstone under the
+    // substitute, so the handle would never find its way back.
+    reloadCustomAgents();
+    const dispatch = resolveSpawnType(entry.type);
+    if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
+      // The tombstone stays: re-enabling the agent makes the handle work
+      // again, which a drop would foreclose.
+      ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
+      return false;
+    }
+
+    try {
+      // spawnResolved, not spawnTopLevel: the latter strips
+      // `resumeSessionFile` and `reclaim` as untrusted. This path is the
+      // exception — both come from a tombstone this extension wrote.
+      const id = spawnResolved(pi, ctx, dispatch.type, prompt, {
+        description: entry.description,
+        reclaim: { handle: entry.handle, alias: entry.alias },
+        resumeSessionFile: entry.sessionFile,
+        isBackground: true,
+      });
+      // The agent may still be starting — wait, so a startup failure lands in
+      // the catch below instead of being announced as a resume.
+      await manager.awaitStartup(id);
+      // The tombstone deliberately stays. `resolveMention` prefers the live
+      // record holding these same names, so it cannot shadow the resume — and
+      // if this run dies before establishing its own session, the original
+      // transcript is still the right thing for the next mention to reopen.
+      // Once the resumed record is evicted it overwrites this entry in place,
+      // keyed by the same handle, so nothing accumulates.
+      ctx.ui.notify(`${verb} ${target}`, "info");
+      return true;
+    } catch (err) {
+      // The type is already settled above, so what is left is a spawn-time
+      // failure: a strict worktree-isolation error, an unusable cwd.
+      ctx.ui.notify(
+        `Could not resume ${target}: ${err instanceof Error ? err.message : String(err)}`,
+        "warning",
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Resolve a `/agents pause|resume|revive` target: handle, alias, or agent
+   * id, with the mention `@` optional — a command is typed, not picked from
+   * the completion menu, and demanding the grammar would just be a ritual.
+   * Live records and tombstones come back tagged; each command narrows.
+   */
+  function resolveCommandTarget(name: string): { record: AgentRecord } | { tombstone: AgentTombstone } | undefined {
+    const stripped = name.replace(/^@/, "").trim();
+    const alias = stripAgentPrefix(stripped);
+    const resolved = manager.resolveMention(stripped)
+      ?? (alias ? manager.resolveMention(alias) : undefined);
+    if (!resolved) return undefined;
+    return resolved.kind === "live" ? { record: resolved.record } : { tombstone: resolved.entry };
+  }
+
+  /** The `@name` a command message names a record by. */
+  function recordName(record: AgentRecord): string {
+    return record.alias ?? record.handle ?? record.id;
+  }
+
+  /**
+   * `/agents pause [handle]` — pause one active agent by name, or, with no
+   * argument, every active top-level agent. Pausing interrupts the run but
+   * keeps the record and session: `/agents resume` (or a `@handle` mention)
+   * continues the same conversation later. Foreground agents (a caller is
+   * blocked on them) and worktree-isolated runs refuse, in both forms.
+   */
+  async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
+    if (target !== undefined) {
+      const resolved = resolveCommandTarget(target);
+      const record = resolved && "record" in resolved ? resolved.record : undefined;
+      if (!record) {
+        ctx.ui.notify(`No active agent named @${target.replace(/^@/, "")}.`, "warning");
+        return;
+      }
+      const name = recordName(record);
+      if (record.status !== "running" && record.status !== "queued") {
+        ctx.ui.notify(`@${name} is not active (${record.status}).`, "warning");
+        return;
+      }
+      const refusal = pauseAgentRecord(record);
+      if (refusal) {
+        ctx.ui.notify(`Could not pause @${name} — ${refusal}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(`Paused @${name}.`, "info");
+      return;
+    }
+
+    const active = manager.listAgents().filter(isTopLevelAgent)
+      .filter(a => a.status === "running" || a.status === "queued");
+    if (active.length === 0) {
+      ctx.ui.notify("No active agents.", "info");
+      return;
+    }
+    let paused = 0;
+    let skipped = 0;
+    for (const record of active) {
+      if (pauseAgentRecord(record) === undefined) paused++;
+      else skipped++;
+    }
+    ctx.ui.notify(
+      `Paused ${paused} agent${paused === 1 ? "" : "s"}` +
+      (skipped > 0 ? ` — ${skipped} skipped (foreground or worktree-isolated)` : "") + ".",
+      "info",
+    );
+  }
+
+  /**
+   * `/agents resume [handle]` — continue one paused (or any settled) agent by
+   * name, or, with no argument, every paused agent. A paused agent that never
+   * started (paused from the queue) is re-queued; one with a session has that
+   * session continued with a synthetic continuation prompt.
+   */
+  async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
+    if (target !== undefined) {
+      const resolved = resolveCommandTarget(target);
+      const record = resolved && "record" in resolved ? resolved.record : undefined;
+      if (!record) {
+        const tombstone = resolved && "tombstone" in resolved ? resolved.tombstone : undefined;
+        ctx.ui.notify(tombstone
+          ? `@${tombstone.alias ?? tombstone.handle} was evicted — use /agents revive.`
+          : `No agent named @${target.replace(/^@/, "")}.`, "warning");
+        return;
+      }
+      const name = recordName(record);
+      if (record.status === "running" || record.status === "queued") {
+        ctx.ui.notify(`@${name} is already active.`, "warning");
+        return;
+      }
+      if (record.session) {
+        const ok = await resumeAgentById(ctx, record);
+        ctx.ui.notify(ok ? `Resumed @${name}.` : `Could not resume @${name}.`, ok ? "info" : "warning");
+        return;
+      }
+      if (manager.unpause(record.id)) {
+        ctx.ui.notify(`Resumed @${name} — queued.`, "info");
+        return;
+      }
+      ctx.ui.notify(`Could not resume @${name} — nothing to continue.`, "warning");
+      return;
+    }
+
+    const paused = manager.listAgents().filter(isTopLevelAgent)
+      .filter(a => a.status === "paused");
+    if (paused.length === 0) {
+      ctx.ui.notify("No paused agents.", "info");
+      return;
+    }
+    let resumed = 0;
+    for (const record of paused) {
+      if (await resumeAgentById(ctx, record)) resumed++;
+    }
+    ctx.ui.notify(
+      `Resumed ${resumed} of ${paused.length} agent${paused.length === 1 ? "" : "s"}.`,
+      "info",
+    );
+  }
+
+  /**
+   * `/agents revive [handle]` — reopen an evicted agent's conversation. With a
+   * name, revive that tombstone; without, pick from the evicted agents, newest
+   * first. Revive is for conversations whose record is gone: a live agent is
+   * continued with `/agents resume` or a `@handle` mention.
+   */
+  async function reviveAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
+    if (target !== undefined) {
+      const resolved = resolveCommandTarget(target);
+      const tombstone = resolved && "tombstone" in resolved ? resolved.tombstone : undefined;
+      if (!tombstone) {
+        const record = resolved && "record" in resolved ? resolved.record : undefined;
+        ctx.ui.notify(record
+          ? `@${recordName(record)} is still live — /agents resume continues it.`
+          : `No evicted agent named @${target.replace(/^@/, "")}.`, "warning");
+        return;
+      }
+      await reviveTombstone(ctx, tombstone, CONTINUATION_PROMPT, "Reviving");
+      return;
+    }
+
+    // listTombstones is newest-first: the conversation the user just evicted
+    // is the one they most likely want back.
+    const tombstones = manager.listTombstones();
+    if (tombstones.length === 0) {
+      ctx.ui.notify("No evicted agents to revive in this session.", "info");
+      return;
+    }
+    const entry = await selectItem(
+      ctx.ui,
+      "Revive evicted agent",
+      tombstones,
+      t => `@${t.alias ?? t.handle} — ${t.description}`,
+    );
+    if (entry) await reviveTombstone(ctx, entry, CONTINUATION_PROMPT, "Reviving");
+  }
+
   async function showAgentsMenu(ctx: ExtensionCommandContext) {
     reloadCustomAgents();
     const allNames = getAllTypes();
@@ -2906,11 +3181,20 @@ Terse command-style prompts produce shallow, generic work.
 
     // Running agents entry (only if there are active agents)
     const agents = manager.listAgents().filter(isTopLevelAgent);
+    const active = agents.filter(a => a.status === "running" || a.status === "queued").length;
     if (agents.length > 0) {
-      const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
-      options.push(`Running agents (${agents.length}) — ${running} running, ${done} done`);
+      options.push(`Running agents (${agents.length}) — ${active} running, ${done} done`);
     }
+
+    // Lifecycle commands, on the same terms as the menu's other conditional
+    // entries: shown only when they have something to act on, so the menu
+    // never advertises a no-op.
+    const pausedCount = agents.filter(a => a.status === "paused").length;
+    if (active > 0) options.push(`Pause active agents (${active})`);
+    if (pausedCount > 0) options.push(`Resume paused agents (${pausedCount})`);
+    const evicted = manager.listTombstones().length;
+    if (evicted > 0) options.push(`Revive evicted agents (${evicted})`);
 
     // Full-screen hub: the roster/activity surface (the windowed panel is the
     // default surface and opens from the fleet list / agent rows).
@@ -2954,6 +3238,15 @@ Terse command-style prompts produce shallow, generic work.
 
     if (choice.startsWith("Running agents (")) {
       await showRunningAgents(ctx);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Pause active agents")) {
+      await pauseAgentsCommand(ctx, undefined);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Resume paused agents")) {
+      await resumeAgentsCommand(ctx, undefined);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Revive evicted agents")) {
+      await reviveAgentsCommand(ctx, undefined);
       await showAgentsMenu(ctx);
     } else if (choice === "Agent hub (roster)") {
       fleet.openHub();
@@ -3963,7 +4256,17 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
   pi.registerCommand("agents", {
     description: "Manage agents",
-    handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+    handler: async (args, ctx) => {
+      // Subcommands: `/agents pause|resume|revive [handle]`. Anything else —
+      // including a bare `/agents` and unknown text, which has always been
+      // ignored — falls through to the menu.
+      const [action, ...rest] = args.trim().split(/\s+/);
+      const target = rest.join(" ").trim() || undefined;
+      if (action === "pause") { await pauseAgentsCommand(ctx, target); return; }
+      if (action === "resume") { await resumeAgentsCommand(ctx, target); return; }
+      if (action === "revive") { await reviveAgentsCommand(ctx, target); return; }
+      await showAgentsMenu(ctx);
+    },
   });
 
   /**

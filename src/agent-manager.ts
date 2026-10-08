@@ -155,8 +155,22 @@ function occupiesForegroundSlot(
   return !!record.blocking && isTopLevelAgent(record);
 }
 
+/**
+ * Whether an external halt already fixed this record's status — abort() or
+ * abortAll() setting "stopped", or pause() setting "paused". The run settles
+ * once its controller fires, and the settle path must not overwrite the status
+ * the halting path chose: a paused record would otherwise read "aborted", and
+ * resuming it would be indistinguishable from a run that died mid-turn.
+ */
+function externallyHalted(record: Pick<AgentRecord, "status">): boolean {
+  return record.status === "stopped" || record.status === "paused";
+}
+
 /** Which concurrency pool a spawn is charged to, if any. */
 type Pool = "background" | "foreground";
+
+/** One entry in the shared two-pool spawn queue. */
+interface QueueEntry { id: string; pool: Pool; start: () => Promise<void>; release: () => void }
 
 interface SpawnArgs {
   pi: ExtensionAPI;
@@ -406,7 +420,16 @@ export class AgentManager {
    * promise to await, and pi has no tool-execution timeout to bail the caller
    * out.
    */
-  private queue: { id: string; pool: Pool; start: () => Promise<void>; release: () => void }[] = [];
+  private queue: QueueEntry[] = [];
+
+  /**
+   * Queue entries removed by pause() on a QUEUED agent, keyed by agent id.
+   * A paused queued agent has no session yet — its only way back is replaying
+   * the original spawn — so the entry is parked here (not released: a queued
+   * background agent has no waiter, and a foreground one cannot be paused)
+   * until unpause() re-enqueues it, or the record leaves the map.
+   */
+  private pausedQueued = new Map<string, QueueEntry>();
   /** Number of currently running background agents. */
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
@@ -847,8 +870,8 @@ export class AgentManager {
       },
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        // Don't overwrite a status an external halt (stop/pause) already chose.
+        if (!externallyHalted(record)) {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
           // (provider error that pi resolved instead of rejecting, #144) is an
           // honest "error" — not a completion with an empty or stale result.
@@ -908,8 +931,8 @@ export class AgentManager {
         return responseText;
       })
       .catch(async (err) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        // Don't overwrite a status an external halt (stop/pause) already chose.
+        if (!externallyHalted(record)) {
           record.status = "error";
         }
         record.error = err instanceof Error ? err.message : String(err);
@@ -1283,8 +1306,8 @@ export class AgentManager {
       signal: abortController.signal,
     })
       .then(({ text, failure }) => {
-        // Don't overwrite status if externally stopped via abort().
-        if (record.status !== "stopped") {
+        // Don't overwrite a status an external halt (stop/pause) already chose.
+        if (!externallyHalted(record)) {
           // Same contract as the spawn path (#144): a failed final turn is an
           // error, not a completion — but the resumed text stays available.
           record.status = failure ? "error" : "completed";
@@ -1296,7 +1319,7 @@ export class AgentManager {
         return text;
       })
       .catch((err) => {
-        if (record.status !== "stopped") {
+        if (!externallyHalted(record)) {
           record.status = "error";
           record.error = err instanceof Error ? err.message : String(err);
         }
@@ -1425,6 +1448,79 @@ export class AgentManager {
     return true;
   }
 
+  /**
+   * Pause an active agent: interrupt its in-flight run (or dequeue it) while
+   * keeping the record and session so a later resume continues the same
+   * conversation. The companion of abort(), with a resumable outcome.
+   *
+   * A paused run settles like an aborted one — its slot is released, its
+   * output file flushed, its children stopped — but the settle path leaves the
+   * "paused" status alone (externallyHalted), so nothing downstream can mistake
+   * it for a finished or failed run. Pause is a statement of user intent, and
+   * only a deliberate unpause/resume lifts it.
+   *
+   * Refused, returning false, when pausing would lose work or strand a caller:
+   *
+   *   - still starting (worktree copy in flight) — the run has no session to
+   *     come back to and no queue entry to replay, so "paused" could never be
+   *     lifted;
+   *   - worktree-isolated and running — the settle path commits and removes
+   *     the tree, and a resumed session would hold tools bound to a deleted
+   *     directory;
+   *   - foreground (`isBackground === false`) — a caller is blocked in
+   *     spawnAndWait, and pausing would settle its tool call with a partial
+   *     result while implying the task might still continue;
+   *   - already terminal — nothing to pause.
+   *
+   * A QUEUED agent pauses by leaving the queue: its entry is parked on
+   * `pausedQueued` and replayed verbatim by unpause(), so nothing starts it
+   * when a concurrency slot frees.
+   */
+  pause(id: string): boolean {
+    const record = this.agents.get(id);
+    if (!record) return false;
+    if (this.startups.has(id) || record.worktree || record.isBackground === false) return false;
+
+    if (record.status === "queued") {
+      const i = this.queue.findIndex(e => e.id === id);
+      if (i !== -1) {
+        const [entry] = this.queue.splice(i, 1);
+        this.pausedQueued.set(id, entry);
+      }
+      record.status = "paused";
+      record.completedAt = Date.now();
+      return true;
+    }
+
+    if (record.status !== "running") return false;
+    record.abortController?.abort();
+    record.status = "paused";
+    record.completedAt = Date.now();
+    return true;
+  }
+
+  /**
+   * Re-queue a paused agent that never started (no session, paused from the
+   * queue). The parked entry replays the original spawn — original prompt and
+   * callbacks, exactly as if its drain had just come up — so the fresh run is
+   * indistinguishable from one that waited longer in the queue.
+   *
+   * Returns false for an agent with a session: that one resumes through
+   * `resume()`, which re-prompts the existing conversation instead.
+   */
+  unpause(id: string): boolean {
+    const record = this.agents.get(id);
+    if (record?.status !== "paused" || record.session) return false;
+    const entry = this.pausedQueued.get(id);
+    if (!entry) return false;
+    this.pausedQueued.delete(id);
+    record.status = "queued";
+    record.completedAt = undefined;
+    this.queue.push(entry);
+    this.drainQueue();
+    return true;
+  }
+
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
     this.tombstone(record);
@@ -1433,6 +1529,10 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    // A paused queued agent's parked entry dies with the record: there is no
+    // session to resume and no spawn to replay, so the entry could only start
+    // an orphan.
+    this.pausedQueued.delete(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
@@ -1470,7 +1570,11 @@ export class AgentManager {
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      // Paused is exempt: the whole point of pausing is coming back later —
+      // possibly much later — and eviction would tombstone a conversation the
+      // user explicitly parked. Session boundaries still sweep paused records
+      // (clearCompleted), so `/new` reclaims them like everything else.
+      if (record.status === "running" || record.status === "queued" || record.status === "paused") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -1562,6 +1666,7 @@ export class AgentManager {
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
     this.startups.clear();
+    this.pausedQueued.clear();
     if (pi) {
       // Prune any orphaned git worktrees (crash recovery). Detached: dispose runs
       // on the shutdown path, which cannot wait for git. Started before the awaited

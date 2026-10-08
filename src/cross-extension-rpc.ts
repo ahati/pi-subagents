@@ -32,12 +32,25 @@ export type RpcReply<T = void> =
 /** RPC protocol version — bumped when the envelope or method contracts change. */
 export const PROTOCOL_VERSION = 2;
 
-/** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
+/** Minimal AgentManager interface needed by the spawn/stop/consume/pause/resume RPCs. */
 export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
   /** Resolves once the spawned agent is running; rejects on a startup failure. */
   awaitStartup(id: string): Promise<void>;
   abort(id: string): boolean;
+  /**
+   * Pause an active agent: interrupt its run (or dequeue it) while keeping the
+   * record and session for a later resume. False when the agent cannot be
+   * paused — still starting, worktree-isolated, foreground, already settled.
+   */
+  pauseAgent(id: string): boolean;
+  /**
+   * Continue a settled agent's session in the background, with the same
+   * wiring a mention-resume gets. `prompt` defaults to a synthetic
+   * continuation. False when there is nothing to continue — unknown id,
+   * still running or queued, and no session to re-prompt.
+   */
+  resumeAgent(id: string, prompt?: string): Promise<boolean>;
   /**
    * The record behind an id, for the stop handler's ownership check. Narrowed
    * to the two fields `isTopLevelAgent` reads, so the RPC layer keeps its
@@ -63,6 +76,8 @@ export interface RpcHandle {
   unsubPing: () => void;
   unsubSpawn: () => void;
   unsubStop: () => void;
+  unsubPause: () => void;
+  unsubResume: () => void;
   unsubConsume: () => void;
 }
 
@@ -183,6 +198,27 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
+  // Pause and resume mirror stop's shape: the ownership guard first, then the
+  // capability, with the refusal surfaced as an error string rather than a
+  // silent false — a bus caller has no UI to read a no-op from.
+  const unsubPause = handleRpc<{ requestId: string; agentId: string }>(
+    events, "subagents:rpc:pause", ({ agentId }) => {
+      const record = manager.getRecord(agentId);
+      if (!record) throw new Error("Agent not found");
+      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      if (!manager.pauseAgent(agentId)) throw new Error("Agent is not pausable");
+    },
+  );
+
+  const unsubResume = handleRpc<{ requestId: string; agentId: string; prompt?: string }>(
+    events, "subagents:rpc:resume", async ({ agentId, prompt }) => {
+      const record = manager.getRecord(agentId);
+      if (!record) throw new Error("Agent not found");
+      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      if (!await manager.resumeAgent(agentId, prompt)) throw new Error("Agent cannot be resumed");
+    },
+  );
+
   // A caller that has already shown the model an agent's result — pi-tasks'
   // TaskOutput is the one in practice — says so here, so the completion
   // notification for that same result is not delivered on top of it and does
@@ -194,5 +230,5 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume };
+  return { unsubPing, unsubSpawn, unsubStop, unsubPause, unsubResume, unsubConsume };
 }

@@ -70,7 +70,7 @@ export interface AgentDetails {
   toolUses: number;
   tokens: string;
   durationMs: number;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
+  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "paused" | "background";
   /** Human-readable description of what the agent is currently doing. */
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
@@ -360,6 +360,10 @@ export class AgentWidget {
 
   /** Check if a finished agent should still be shown in the widget. */
   private shouldShowFinished(agentId: string, status: string): boolean {
+    // Paused never ages out: it is user intent, not a settling outcome — the
+    // line stays until the agent is resumed (markRunning clears it), evicted on
+    // a session boundary, or the extension unloads.
+    if (status === "paused") return true;
     const age = this.finishedTurnAge.get(agentId) ?? 0;
     const maxAge = ERROR_STATUSES.has(status) ? AgentWidget.ERROR_LINGER_TURNS : 1;
     return age < maxAge;
@@ -399,6 +403,9 @@ export class AgentWidget {
     } else if (a.status === "stopped") {
       icon = theme.fg("dim", "■");
       statusText = theme.fg("dim", " stopped");
+    } else if (a.status === "paused") {
+      icon = theme.fg("dim", "‖");
+      statusText = theme.fg("dim", " paused");
     } else if (a.status === "error") {
       icon = theme.fg("error", "✗");
       const errMsg = a.error ? `: ${a.error.slice(0, 60)}` : "";

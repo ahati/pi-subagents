@@ -32,6 +32,8 @@ describe("cross-extension RPC", () => {
       spawn: vi.fn().mockReturnValue("agent-42"),
       awaitStartup: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockReturnValue(true),
+      pauseAgent: vi.fn().mockReturnValue(true),
+      resumeAgent: vi.fn().mockResolvedValue(true),
       getRecord: vi.fn().mockReturnValue({}),
       consumeResult: vi.fn().mockReturnValue(true),
     };
@@ -284,6 +286,127 @@ describe("cross-extension RPC", () => {
       const reply = vi.fn();
       events.on("subagents:rpc:stop:reply:req-st4", reply);
       events.emit("subagents:rpc:stop", { requestId: "req-st4", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- pause ---
+
+  describe("pause RPC", () => {
+    it("returns success when agent is paused", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:pause:reply:req-p1", reply);
+      events.emit("subagents:rpc:pause", { requestId: "req-p1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.pauseAgent).toHaveBeenCalledWith("agent-42");
+    });
+
+    it("errors when the agent does not exist", async () => {
+      vi.mocked(manager.getRecord).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:pause:reply:req-p2", reply);
+      events.emit("subagents:rpc:pause", { requestId: "req-p2", agentId: "ghost" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.pauseAgent).not.toHaveBeenCalled();
+    });
+
+    it("refuses another agent's or a workflow's child, like stop", async () => {
+      vi.mocked(manager.getRecord).mockReturnValue({ parentAgentId: "parent-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:pause:reply:req-p3", reply);
+      events.emit("subagents:rpc:pause", { requestId: "req-p3", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is owned by another agent or workflow" });
+    });
+
+    it("surfaces a refusal as an error, not a silent success", async () => {
+      vi.mocked(manager.pauseAgent).mockReturnValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:pause:reply:req-p4", reply);
+      events.emit("subagents:rpc:pause", { requestId: "req-p4", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is not pausable" });
+    });
+
+    it("unsub stops responding to pauses", async () => {
+      const { unsubPause } = registerRpcHandlers(deps);
+      unsubPause();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:pause:reply:req-p5", reply);
+      events.emit("subagents:rpc:pause", { requestId: "req-p5", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- resume ---
+
+  describe("resume RPC", () => {
+    it("continues the agent, forwarding an optional prompt", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:resume:reply:req-r1", reply);
+      events.emit("subagents:rpc:resume", { requestId: "req-r1", agentId: "agent-42", prompt: "carry on" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.resumeAgent).toHaveBeenCalledWith("agent-42", "carry on");
+    });
+
+    it("errors when the agent does not exist", async () => {
+      vi.mocked(manager.getRecord).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:resume:reply:req-r2", reply);
+      events.emit("subagents:rpc:resume", { requestId: "req-r2", agentId: "ghost" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+    });
+
+    it("refuses another agent's or a workflow's child, like stop", async () => {
+      vi.mocked(manager.getRecord).mockReturnValue({ workflowId: "wf-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:resume:reply:req-r3", reply);
+      events.emit("subagents:rpc:resume", { requestId: "req-r3", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is owned by another agent or workflow" });
+    });
+
+    it("errors when there is nothing to continue", async () => {
+      vi.mocked(manager.resumeAgent).mockResolvedValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:resume:reply:req-r4", reply);
+      events.emit("subagents:rpc:resume", { requestId: "req-r4", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent cannot be resumed" });
+    });
+
+    it("unsub stops responding to resumes", async () => {
+      const { unsubResume } = registerRpcHandlers(deps);
+      unsubResume();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:resume:reply:req-r5", reply);
+      events.emit("subagents:rpc:resume", { requestId: "req-r5", agentId: "agent-42" });
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();

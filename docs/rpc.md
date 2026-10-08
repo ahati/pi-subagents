@@ -1,6 +1,6 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result and stop the run — all over the `pi.events` bus, without importing this package directly. Four request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`), eleven lifecycle events, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, stop the run, or pause it and pick it up later — all over the `pi.events` bus, without importing this package directly. Six request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:pause`, `subagents:rpc:resume`, `subagents:rpc:consume`), twelve lifecycle events, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
@@ -85,10 +85,12 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `SpawnOptions.cwd is not a directory: "<cwd>"` | `src/agent-manager.ts:94` |
 | `Cannot run with isolation: "worktree" — not a git repo, no commits yet, or 'git worktree add' failed.` | `src/agent-manager.ts:716-719`, surfaced through `awaitStartup` |
 | git plumbing failures | `src/worktree.ts:76` |
-| `Agent not found` | stop — `src/cross-extension-rpc.ts:170` |
-| `Agent is owned by another agent or workflow` | stop — `:178` |
-| `Agent is not running` | stop — `:182`. The record exists, so it has already settled |
-| `Agent not found or still running` | consume — `:193` |
+| `Agent not found` | stop, pause, resume — `src/cross-extension-rpc.ts` |
+| `Agent is owned by another agent or workflow` | stop, pause, resume — the ownership guard below |
+| `Agent is not running` | stop. The record exists, so it has already settled |
+| `Agent is not pausable` | pause — the agent is still starting, worktree-isolated, foreground (a caller is blocked on it), or already settled |
+| `Agent cannot be resumed` | resume — the agent is still running or queued, or has neither a session nor a parked queue position to replay |
+| `Agent not found or still running` | consume — |
 
 Three things the table cannot show:
 
@@ -98,7 +100,7 @@ Three things the table cannot show:
 
 ## Ownership
 
-`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts:122-126`). `subagents:rpc:stop` enforces it (`src/cross-extension-rpc.ts:178`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting it out from under that owner turns another extension's stop into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own.
+`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts:122-126`). `subagents:rpc:stop`, `:pause` and `:resume` all enforce it (`src/cross-extension-rpc.ts`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting — or pausing, or resuming — it out from under that owner turns another extension's call into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own.
 
 Two asymmetries to know about, stated as they are:
 
