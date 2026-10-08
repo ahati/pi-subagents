@@ -380,6 +380,52 @@ describe("FleetList navigation", () => {
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
+  it("holds the bar down while the hub is open, and restores it on close", async () => {
+    const h = harness([makeRecord()]);
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+
+    const hub = h.fleet.openHub();
+    expect(h.overlayOpened()).toBe(true);
+    // The hub owns the screen — the bar is gone for the overlay's whole life…
+    expect(h.render()).toEqual([]);
+    // …staying hidden across update() calls (roster ticks, timer refreshes).
+    h.fleet.update();
+    expect(h.render()).toEqual([]);
+
+    await h.closeOverlay();
+    await hub;
+    // …and back the moment it closes, without any key.
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("the popup entry (openHub with an agent) hides the bar the same way", async () => {
+    const agent = makeRecord();
+    const h = harness([agent]);
+    const hub = h.fleet.openHub(agent.id);
+    expect(h.overlayOpened()).toBe(true);
+    expect(h.render()).toEqual([]);
+    await h.closeOverlay();
+    await hub;
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("a → dismissal survives the hub: the bar stays hidden after it closes", async () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+    expect(h.render()).toEqual([]);
+
+    const hub = h.fleet.openHub();
+    expect(h.render()).toEqual([]);
+    await h.closeOverlay();
+    await hub;
+    // The hub must not undelete the user's →: still dismissed…
+    expect(h.render()).toEqual([]);
+    // …and ↓ still recalls it.
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+  });
+
   it("ignores all input while disabled and hides the widget", () => {
     const h = harness([makeRecord()]);
     h.fleet.setEnabled(false);
@@ -600,13 +646,16 @@ describe("FleetList overlay lifecycle", () => {
     const h = harness(agents);
     h.press(DOWN); // active (main)
     h.press(DOWN); // → the agent
-    h.press(ENTER); // opens overlay
+    h.press(ENTER); // opens the hub on that agent
     expect(h.overlayOpened()).toBe(true);
     // The agent finishes, well past the linger window...
     agents[0] = makeRecord({ id: "live", description: "the one", status: "completed", completedAt: Date.now() - 60_000 });
     h.fleet.onAgentFinished("live");
-    expect(h.overlayClosed()).toBe(false);                          // viewer stays open
-    expect(h.render().some(l => l.includes("the one"))).toBe(true); // and stays listed while viewed
+    expect(h.overlayClosed()).toBe(false); // the hub stays open — final output stays readable
+    // …and the agent is still on the roster while viewed (the linger window
+    // would otherwise have dropped it a minute ago), even though the hub
+    // holds the bar itself off screen.
+    expect(h.fleet.hasRows()).toBe(true);
   });
 
   it("lingers a finished agent in the list, then drops it after the window", () => {

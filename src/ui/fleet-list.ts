@@ -104,6 +104,15 @@ export class FleetList {
    * the roster empties so fresh agent activity shows the bar again on its own.
    */
   private dismissed = false;
+  /**
+   * Set while the agent hub overlay is up. Like `dismissed`, it holds the bar
+   * down without touching the roster — but it is the hub's state, not the
+   * user's: `openHub` sets it and clears it when the hub's promise settles,
+   * so the bar comes back exactly as it was. The popup panel covers most of
+   * the terminal but not the bar's row band, and a roster duplicated under
+   * it reads as clutter.
+   */
+  private hubOpen = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
@@ -229,9 +238,10 @@ export class FleetList {
     this.clampSelection();
     this.ensureTimer(); // keep stats ticking whenever the list is shown (e.g. after a re-enable)
 
-    if (this.dismissed) {
-      // The user closed the bar with →. Stay hidden while the roster lasts —
-      // only ↓/← (or this roster emptying out) bring it back.
+    if (this.dismissed || this.hubOpen) {
+      // The user closed the bar with →, or the hub overlay is up. Stay hidden
+      // while the roster lasts — only ↓/← (or this roster emptying out) bring
+      // a dismissal back; the hub's own close restores its case.
       if (this.widgetRegistered) {
         this.ui.setWidget(FLEET_KEY, undefined);
         this.widgetRegistered = false;
@@ -432,6 +442,11 @@ export class FleetList {
     const ui = uiOverride ?? this.ui;
     if (!ui) return Promise.resolve(undefined);
     if (agentId != null) this.viewingAgentId = agentId;
+    // The hub replaces the roster on screen: hold the bar down for the
+    // overlay's whole life — the popup ↔ full-screen toggles loop inside this
+    // promise — then restore it exactly as it was.
+    this.hubOpen = true;
+    this.update();
     return openAgentHub(
       ui,
       {
@@ -445,10 +460,10 @@ export class FleetList {
         notify: (message, type) => ui.notify(message, type),
       },
       { agentId },
-    ).then(
-      () => this.clearViewer(),
-      () => this.clearViewer(),
-    );
+    ).finally(() => {
+      this.hubOpen = false;
+      this.clearViewer();
+    });
   }
 
   private openSelected(): void {
