@@ -286,6 +286,13 @@ export class ConversationViewer implements Component {
   private closed = false;
   /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
   private stopArmed = false;
+  /**
+   * Rich-tool-output expansion, pi's `app.tools.expand` toggle. The rich
+   * renderers draw their own "ctrl+o to expand" hints while collapsed; this
+   * is the flag their key toggles. Viewer-local — it resets on reopen — and
+   * text-fallback blocks keep `m` as their full-output affordance.
+   */
+  private expanded = false;
   private keys: ViewerKeys;
   /** Steering composer — present while the user is typing a message to the agent. */
   private composer: Input | undefined;
@@ -430,6 +437,15 @@ export class ConversationViewer implements Component {
       const next = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(this.markdownMode()) + 1) % MARKDOWN_MODES.length];
       this.markdownModeOverride = next;
       this.onMarkdownMode?.(next);
+      this.tui.requestRender();
+      return;
+    }
+    // Expand/collapse rich tool output. Resolved through the user's
+    // app.tools.expand binding, so a remap stays in step with the hints the
+    // renderers print (their keyHint resolves the same binding).
+    if (this.keys.expand(data)) {
+      this.stopArmed = false;
+      this.expanded = !this.expanded;
       this.tui.requestRender();
       return;
     }
@@ -775,7 +791,7 @@ export class ConversationViewer implements Component {
       executionStarted: true,
       argsComplete: true,
       isPartial: false,
-      expanded: false,
+      expanded: this.expanded,
       showImages: true,
       isError: false,
       ...over,
@@ -836,7 +852,7 @@ export class ConversationViewer implements Component {
       const result = { content: msg.content, details: msg.details, isError };
       const component = renderers.renderResult(
         result,
-        { expanded: false, isPartial: false },
+        { expanded: this.expanded, isPartial: false },
         this.theme,
         this.renderContext(callId, callArgs, {
           state,

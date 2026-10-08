@@ -251,7 +251,7 @@ Individual agent results render Claude Code-style in the conversation:
 | **Error** | `✗ ↻3 · 3 tool uses · 12.4k token (8%)` / `⎿ Error: timeout` |
 | **Aborted** | `✗ ↻55≤50 · 55 tool uses · 102.3k token (95% · ⇊3)` / `⎿ Aborted (max turns exceeded)` |
 
-Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
+Completed results can be expanded (ctrl+o in pi) to show the full agent output inline. The conversation viewer honors the same toggle for the agent's own tool output: rich-rendered blocks collapse to a preview with pi's own "ctrl+o to expand" hint, and the key — resolved through the user's `app.tools.expand` binding — flips them to full output. Blocks rendered as text keep `m` as their full-output affordance.
 
 By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
 
@@ -1018,7 +1018,7 @@ src/
     agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
     fleet-list.ts         # FleetView: navigable agent list below the editor
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
-    viewer-keys.ts        # Viewer scroll keys resolved through user keybindings
+    viewer-keys.ts        # Viewer key matchers (scroll + app.tools.expand) resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
     schedule-menu.ts      # /agents → Scheduled jobs submenu
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)

@@ -7,6 +7,9 @@ import { createViewerKeys } from "../src/ui/viewer-keys.js";
 
 const CTRL_P = "\x10";
 const CTRL_N = "\x0e";
+const CTRL_O = "\x0f";
+const CTRL_E = "\x05";
+const ENTER = "\r";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 const SHIFT_UP = "\x1b[1;2A";
@@ -19,6 +22,20 @@ function createEmacsKeybindings(): KeybindingsManager {
     "tui.select.up": ["up", "ctrl+p"],
     "tui.select.down": ["down", "ctrl+n"],
   });
+}
+
+/**
+ * Manager whose definitions carry `app.tools.expand`. pi-tui's
+ * `TUI_KEYBINDINGS` does not define the id — the app-level defaults live in
+ * pi-coding-agent's map — so tests supply it explicitly, mirroring the
+ * manager the hub receives in production. A `remap` replaces the default
+ * ctrl+o, as a user's keybindings.json would.
+ */
+function createExpandKeybindings(remap?: string): KeybindingsManager {
+  return new KeybindingsManager(
+    { ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" } },
+    remap ? { "app.tools.expand": remap } : {},
+  );
 }
 
 function createViewer(keybindings?: ViewerKeybindings) {
@@ -101,6 +118,24 @@ describe("viewer-keys", () => {
     expect(keys.scrollUp(CTRL_P)).toBe(true);
     expect(keys.scrollUp(UP)).toBe(false);
   });
+
+  it("expands on ctrl+o without a manager (hardcoded fallback)", () => {
+    const keys = createViewerKeys();
+    expect(keys.expand(CTRL_O)).toBe(true);
+    expect(keys.expand("x")).toBe(false);
+  });
+
+  it("resolves app.tools.expand through a manager that defines it", () => {
+    const keys = createViewerKeys(createExpandKeybindings());
+    expect(keys.expand(CTRL_O)).toBe(true);
+    expect(keys.expand("x")).toBe(false);
+  });
+
+  it("honors a remapped app.tools.expand", () => {
+    const keys = createViewerKeys(createExpandKeybindings("ctrl+e"));
+    expect(keys.expand(CTRL_E)).toBe(true);
+    expect(keys.expand(CTRL_O)).toBe(false);
+  });
 });
 
 describe("ConversationViewer custom keybindings", () => {
@@ -136,5 +171,77 @@ describe("ConversationViewer custom keybindings", () => {
     expect(scrollOffset(viewer)).toBe(bottom);
     viewer.handleInput(UP);
     expect(scrollOffset(viewer)).toBe(bottom - 1);
+  });
+});
+
+describe("ConversationViewer expand toggle (ctrl+o)", () => {
+  /** Live viewer: running agent with stop/steer handlers, so composer and stop-arm interactions apply. */
+  function createLiveViewer(keybindings?: ViewerKeybindings, handlers: { onStop?: () => void; onSteer?: (message: string) => void } = {}) {
+    const tui = {
+      terminal: { rows: 20, columns: 80 },
+      requestRender: vi.fn(),
+    } as any;
+    const session = {
+      messages: [{ role: "user", content: "go" }],
+      subscribe: vi.fn(() => vi.fn()),
+    } as any;
+    const record = {
+      id: "test-1",
+      type: "general-purpose",
+      description: "test agent",
+      status: "running",
+      toolUses: 0,
+      startedAt: Date.now(),
+    } as AgentRecord;
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    } as any;
+    const viewer = new ConversationViewer(tui, session, record, undefined, theme, vi.fn(), handlers.onStop, keybindings, handlers.onSteer);
+    viewer.render(80);
+    return viewer;
+  }
+
+  function expanded(viewer: ConversationViewer): boolean {
+    return (viewer as any).expanded;
+  }
+
+  it("toggles expanded on ctrl+o without a keybindings manager", () => {
+    const viewer = createLiveViewer();
+    expect(expanded(viewer)).toBe(false);
+    viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(true);
+    viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(false);
+  });
+
+  it("honors a remapped app.tools.expand and ignores the old key", () => {
+    const viewer = createLiveViewer(createExpandKeybindings("ctrl+e"));
+    viewer.handleInput(CTRL_E);
+    expect(expanded(viewer)).toBe(true);
+    viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(true);
+  });
+
+  it("is inert while the steer composer is open", () => {
+    const viewer = createLiveViewer(undefined, { onSteer: vi.fn() });
+    viewer.handleInput(ENTER);
+    expect((viewer as any).composer).toBeTruthy();
+    viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(false);
+    expect((viewer as any).composer).toBeTruthy();
+  });
+
+  it("disarms a pending stop", () => {
+    const onStop = vi.fn();
+    const viewer = createLiveViewer(undefined, { onStop });
+    viewer.handleInput("x");
+    expect((viewer as any).stopArmed).toBe(true);
+    viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(true);
+    viewer.handleInput("x");
+    expect(onStop).not.toHaveBeenCalled();
+    // Re-armed rather than fired — proof the toggle disarmed the first press.
+    expect((viewer as any).stopArmed).toBe(true);
   });
 });

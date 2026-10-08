@@ -205,6 +205,57 @@ describe("rich tool renderers — main-window state wiring", () => {
   });
 });
 
+describe("expanded tool output (ctrl+o)", () => {
+  const CTRL_O = "\x0f";
+
+  interface Captured {
+    resultOptions: any[];
+    callContexts: any[];
+  }
+
+  function expandViewer(captured: Captured) {
+    const def = {
+      renderCall: (_args: any, _theme: any, ctx: any) => {
+        captured.callContexts.push(ctx);
+        return { render: () => [`CALL exp=${ctx.expanded}`] };
+      },
+      renderResult: (result: any, options: any) => {
+        captured.resultOptions.push(options);
+        return { render: () => [options.expanded ? `EXPANDED ${result.content[0].text}` : "COLLAPSED"] };
+      },
+    };
+    const session = mockSession([
+      { role: "assistant", content: [CALL] },
+      OK_RESULT,
+    ], () => def);
+    return new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
+  }
+
+  it("starts collapsed and threads the toggle into renderResult options and renderCall context", () => {
+    const captured: Captured = { resultOptions: [], callContexts: [] };
+    const viewer = expandViewer(captured);
+    const first = plain(viewer.render(120));
+    expect(first).toContain("COLLAPSED");
+    expect(first).toContain("CALL exp=false");
+    expect(captured.resultOptions[0].expanded).toBe(false);
+
+    viewer.handleInput(CTRL_O);
+    const second = plain(viewer.render(120));
+    expect(second).toContain(`EXPANDED ${(OK_RESULT.content[0] as any).text}`);
+    expect(second).toContain("CALL exp=true");
+    expect(captured.resultOptions.at(-1).expanded).toBe(true);
+  });
+
+  it("toggles back off with a second press", () => {
+    const captured: Captured = { resultOptions: [], callContexts: [] };
+    const viewer = expandViewer(captured);
+    viewer.handleInput(CTRL_O);
+    viewer.handleInput(CTRL_O);
+    expect(plain(viewer.render(120))).toContain("COLLAPSED");
+    expect(captured.resultOptions.at(-1).expanded).toBe(false);
+  });
+});
+
 const CALL = { type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls -la\nsrc" } };
 const OK_RESULT = {
   role: "toolResult",
