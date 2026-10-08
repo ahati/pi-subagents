@@ -134,6 +134,7 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
     // Absent when the session has no level of its own; the clone then takes the
     // settings level, which is what a session that never ran `/think` is on.
+
     const thinkingLevel = ctx.thinkingLevel;
     // The live system prompt, not the one the clone would build from cwd and
     // agentDir — extensions contribute to it per turn. Everything the loader

@@ -39,6 +39,7 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
   };
 });
 
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { agentMentionReminder } from "../src/mention.js";
 import { runMentionClone } from "../src/mention-clone.js";
 
@@ -63,6 +64,7 @@ function mainCtx(overrides: Record<string, unknown> = {}) {
     thinkingLevel: "high",
     modelRegistry: { runtime: { kind: "runtime" } },
     getSystemPrompt: vi.fn(() => "the live system prompt"),
+    isProjectTrusted: vi.fn(() => true),
     sessionManager: {
       getBranch: vi.fn(() => BRANCH),
     },
