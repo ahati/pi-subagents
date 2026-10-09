@@ -311,6 +311,24 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     expect(h.frame().join("\n")).toContain("beta task");
   });
 
+  it("ctrl+o toggles rich tool expansion in the chat pane — legacy and kitty encodings", () => {
+    // D3 regression guard: the expand key must survive the hub's own key
+    // funnel (mouse → filter → chat → viewer) in both the legacy byte (\x0f)
+    // and the kitty-protocol encoding (\x1b[111;5u) — the fleet-bar fix
+    // (eec6c4a) restored delivery; this pins the hub-side delegation.
+    const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
+    h.open({ agentId: "a1" });
+    const viewer = (h.components.at(-1) as any)?.chatViewer as { expanded: boolean } | undefined;
+    expect(viewer, "chat pane entered — the embedded viewer exists").toBeDefined();
+    expect(viewer!.expanded).toBe(false);
+
+    h.press("\x0f"); // legacy ctrl+o
+    expect(viewer!.expanded).toBe(true);
+
+    h.press("\x1b[111;5u"); // kitty ctrl+o — toggles back
+    expect(viewer!.expanded).toBe(false);
+  });
+
   it("skips workflow rows in the pane list", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
