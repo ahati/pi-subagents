@@ -67,6 +67,8 @@ pi install git:github.com/ahati/pi-subagents@master
 
 Update later with `pi update git:github.com/ahati/pi-subagents@master`.
 
+A `prepare` script compiles `dist/` during that install, and pi loads the compiled `./dist/index.js` entry instead of transpiling `./src/index.ts` on every boot ([tintinweb/pi-subagents#279](https://github.com/tintinweb/pi-subagents/pull/279) — thanks [@tobymao](https://github.com/tobymao)). The path-derived extension name is `[dist]`; refer to this extension as `[pi-subagents]` in `extensions:` lists.
+
 **Upstream release** (npm package, without the fork's UI additions):
 
 ```bash
