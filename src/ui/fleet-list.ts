@@ -399,7 +399,10 @@ export class FleetList {
       if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
         this.dismissed = false;
         this.active = true;
-        this.selectedIndex = 0;
+        // No cursor reset here: recall resumes where the bar was left. A
+        // plain → dismissal zeroed the cursor on the way out (deactivate),
+        // and a hub close left it on the agent you were viewing — which the
+        // now-dismissed bar preserves until you come back.
         this.update();
         return { consume: true };
       }
@@ -483,9 +486,10 @@ export class FleetList {
     if (agentId != null) this.viewingAgentId = agentId;
     // The hub replaces the roster on screen: hold the bar down for the
     // overlay's whole life — the popup ↔ full-screen toggles loop inside this
-    // promise — then restore it exactly as it was.
+    // promise — and leave it down after close: the hub collapse reads as a
+    // dismissal (the user's last word on the bar was "go away"), so only ↓ or
+    // a fresh roster brings it back.
     this.hubOpen = true;
-    const wasDismissed = this.dismissed;
     this.update();
     return openAgentHub(
       ui,
@@ -511,12 +515,21 @@ export class FleetList {
       // instead (its own finally runs it); this timer stands down.
       setTimeout(() => {
         if (this.hubOpen) return;
+        // Dismiss BEFORE clearViewer so its update() never re-registers the
+        // bar. clearViewer's own update() may then reset the dismissal on an
+        // empty roster (the no-hub "next batch starts fresh" rule) — but the
+        // hub collapse is the user's last word on the bar, so it is
+        // re-asserted after: it outlives the drain. ↓ recalls it; a roster
+        // that later fully drains on its own still gives the next batch a
+        // fresh bar.
+        this.dismissed = true;
+        // Drop `active` too — ENTER-on-a-row opened the hub without leaving
+        // the list, and a stale active here would send the recalling ↓ into
+        // invisible navigation instead of the recall branch. Hand-rolled
+        // rather than deactivate() so the viewed-agent cursor survives.
+        this.active = false;
         this.clearViewer();
-        // Restore the dismissal exactly as it was at open — AFTER clearViewer(),
-        // whose own update() on a still-empty roster would otherwise reset it
-        // (the no-hub "next batch starts fresh" rule). A → issued before
-        // opening stays dismissed after closing, and vice versa.
-        this.dismissed = wasDismissed;
+        this.dismissed = true;
       }, 0);
     });
   }

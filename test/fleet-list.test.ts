@@ -176,8 +176,13 @@ function harness(
     overlayOpened: () => opened,
     overlayClosed: () => closed,
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
-    /** Let the deferred bar re-registration (post-hub-close timer) run. */
-    settleBar: async () => { await new Promise(r => setTimeout(r, 0)); },
+    /** Let the deferred bar re-registration (post-hub-close timer) run. The real close path takes a few macrotasks to schedule it, so flush several rounds. */
+    settleBar: async () => {
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setImmediate(r));
+        await new Promise(r => setTimeout(r, 0));
+      }
+    },
     widgetTui: fakeTui,
   };
 }
@@ -438,7 +443,27 @@ describe("FleetList navigation", () => {
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
-  it("holds the bar down while the hub is open, and restores it on close", async () => {
+  it("REPRO D4: a bar that was visible when the hub opened stays closed after the hub closes", async () => {
+    // User flow: agents running, bar showing; opening the hub collapses it;
+    // closing the hub with Esc must leave it closed. The current code
+    // "restores it exactly as it was" and brings the bar back — the defect.
+    const h = harness([makeRecord(), makeRecord({ id: "a2" })]);
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true); // visible pre-open
+
+    const hub = h.fleet.openHub();
+    expect(h.render()).toEqual([]); // collapsed while the hub is up
+
+    await h.closeOverlay();
+    await hub;
+    await h.settleBar();
+    expect(h.render()).toEqual([]); // stays closed — the defect reopens it
+
+    // ↓ brings it back on demand.
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
+  });
+
+  it("keeps the bar down after the hub closes; ↓ recalls it", async () => {
     const h = harness([makeRecord()]);
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
 
@@ -453,11 +478,14 @@ describe("FleetList navigation", () => {
     await h.closeOverlay();
     await hub;
     await h.settleBar();
-    // …and back the moment it closes, without any key.
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    // …and it stays gone after the hub closes: the collapse was a dismissal.
+    expect(h.render()).toEqual([]);
+    // ↓ recalls it on demand.
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
   });
 
-  it("the popup entry (openHub with an agent) hides the bar the same way", async () => {
+  it("the popup entry (openHub with an agent) leaves the bar down after close too", async () => {
     const agent = makeRecord();
     const h = harness([agent]);
     const hub = h.fleet.openHub(agent.id);
@@ -466,7 +494,9 @@ describe("FleetList navigation", () => {
     await h.closeOverlay();
     await hub;
     await h.settleBar();
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
   });
 
   it("a → dismissal survives the hub: the bar stays hidden after it closes", async () => {
@@ -745,7 +775,10 @@ describe("FleetList overlay lifecycle", () => {
     agents.splice(0, 1);
     await h.closeOverlay();
     await h.settleBar();
-    // Selection follows a2 ("two") to its new position, not whatever is at idx 2 now.
+    // The hub leaves the bar closed now; ↓ recalls it — and the cursor
+    // still follows a2 ("two") to its new position, not whatever is at idx 2.
+    expect(h.render()).toEqual([]);
+    expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");
   });
