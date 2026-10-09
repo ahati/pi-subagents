@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
 
-> **This is a fork** of [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) with UI enhancements on top — see [What this fork adds](#what-this-fork-adds). Install instructions for the fork are in [Install](#install); everything else in this README describes the shared feature set.
+> **This is a fork** of [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents), carrying UI-layer enhancements **and** functional additions upstream does not have — most notably global [`/pause`](#commands) and [`/continue`](#commands), which park every running agent across a quit and reload. See [What this fork adds](#what-this-fork-adds). Install instructions for the fork are in [Install](#install).
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -14,9 +14,11 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## What this fork adds
 
+Functional additions, then UI-layer enhancements:
 
+- **Global `/pause` and `/continue` that survive quitting pi** — `/pause` parks every active top-level agent (same funnel as bare `/agents pause`) and writes the disk-resumable ones to a per-session manifest at `<cwd>/.pi/subagent-pauses/<sessionId>.json`, so the session can be exited right after; `/continue` resumes them in this session, or — after the session is loaded again — revives each one from its persisted session file with handles and aliases reclaimed. Loading a session with parked agents hints `N subagents paused here — /continue to resume`. Upstream has no pause, resume, or revive at all — the whole family, and everything that crosses a process boundary, is fork-only
 
-UI-layer enhancements over upstream — no changes to agent behavior, tools, steering, workflows, or settings:
+UI-layer enhancements over upstream:
 
 - **Full-screen agent hub** — a full-terminal roster of every agent plus workflow runs: status glyph, name, task, live activity, tools/tokens/cost/context/elapsed columns, an activity tab (`1`/`2`/`Tab`), `/` filtering, two-press `x` to stop, and `p` to pause/resume the selection. `Enter` opens the conversation, `q`/`Esc` closes
 - **Windowed panel stays the default** — opening an agent (fleet `Enter`, `/agents`, workflow inspector `c`) shows the familiar 90%×70% live conversation; **`f`** expands it to the full-screen hub and **`f`** collapses back, with view/selection/filter state carried across
@@ -330,7 +332,7 @@ All fields are optional — sensible defaults for everything.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `description` | filename | Agent description shown in tool listings |
+| `description` | the agent's name | Agent description shown in tool listings |
 | `name` | filename | **The agent's type** — what `subagent_type` and `@handle` address. Claude Code's rule: the filename doesn't have to match, so `blubb.md` with `name: code-review` dispatches as `code-review`. Omit it and the filename is used. Any value works except one containing `:`, which Claude Code reserves for plugin-scoped identifiers — such a file is skipped with a warning. Two files may declare the same name; the later load wins, as a filename clash always did |
 | `display_name` | the type | Label shown in the UI (widget, agent list, badges) — cosmetic only, and independent of `name`. Claude Code has no equivalent; a file that sets only `name` badges as its type, unchanged |
 | `color` | — | Background color for the agent name badge in the Agent tool header, widget, FleetView, and conversation viewer. Supports Claude Code's `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (the values its own default theme uses); quoted six-digit hex such as `"#8B5CF6"`; and Agency Agents aliases (`amber`, `teal`, `indigo`, `gold`, `neon-green`, `neon-cyan`, `metallic-blue`, `violet`, `rose`, `lime`, `gray`/`grey`, `fuchsia`, `slate`, `navy`). Badge text is black or white, whichever clears 4.5:1 against the rendered background — Claude Code uses one inverse color for every badge. Invalid values render no badge and preserve each surface's existing theme foreground |
@@ -450,6 +452,7 @@ Launch a sub-agent.
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
+| `schedule` | string | no | Fire later instead of now: 6-field cron, interval (`"5m"`), or one-shot (`"+10m"` / ISO). Background only; incompatible with `inherit_context` and `resume` — see [Scheduling](#scheduling) |
 
 ### `SubagentWorkflow`
 
@@ -560,9 +563,15 @@ The `/agents` command opens an interactive menu:
 
 ```
 Running agents (2) — 1 running, 1 done     ← only shown when agents exist
+Pause active agents (1)                     ← shown only when agents are active
+Resume paused agents (1)                    ← shown only when agents are paused
+Revive evicted agents (1)                   ← shown only when evicted agents exist
+Agent hub (roster)                          ← full-screen roster + activity
 Agent types (6)                             ← unified list: defaults + custom
+Scheduled jobs (2)                          ← shown when the scheduler is active
+Workflows (1)                               ← shown when workflows are enabled
 Create new agent                            ← manual wizard or AI-generated
-Settings                                    ← max concurrency (background + foreground), max turns, grace turns, join mode
+Settings                                    ← every persistent setting, at runtime
 ```
 
 - **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
@@ -570,11 +579,11 @@ Settings                                    ← max concurrency (background + fo
   - **Default agents** (no override): Eject (export as `.md`), Disable
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
   - **Custom agents**: Edit, Disable, Delete
-  - **Disabled agents**: Enable, Edit, Delete
+  - **Disabled agents**: Enable, Edit, Delete — a disabled *default* that has an override file also offers Reset to default
 - **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
-- **Settings** — configure max concurrency (background and foreground), default max turns, grace turns, and join mode at runtime
+- **Settings** — every [persistent setting](#persistent-settings) at runtime: concurrency (background and foreground), turn limits, nesting depth, fallback agent, join mode, scheduling, workflows, scope models, strict agent files, agent mentions, background-by-default, remember agents, output transcripts, worktree isolation, widget, fleet view, usage/cost/model display, viewer markdown, tool description mode
 
 ## Graceful Max Turns
 
@@ -645,7 +654,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, workflows on/off, scope models on/off, disable defaults on/off, strict agent files on/off, background spawns on/off, remember agents on/off, worktree isolation on/off, agent mentions model/direct/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, fleet view on/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -760,16 +769,16 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 
 | Event | When | Key fields |
 |-------|------|------------|
-| `subagents:created` | `Agent`-tool background spawn, or a detached resume — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started` | `id`, `type`, `description`, `isBackground` (always `true`) |
+| `subagents:created` | `Agent`-tool background spawn, or a detached resume. A [`@handle` mention in `model` mode](#agent-mentions) rides the registered Agent tool and emits too; **not** cross-extension RPC, scheduler, or `direct`-mode mention starts, which are first seen at `subagents:started` | `id`, `type`, `description`, `isBackground` (always `true`) |
 | `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
 | `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `description`, `status`, `durationMs`, `tokens` (display total, `{ input, output, total }` — see the note below), `usage` (the run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD; absent when nothing was spent), `toolUses`, `result` |
-| `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | identical payload to `subagents:completed` — both are built by the same formatter, so `error` and `status` are present on that row too, just empty |
+| `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | identical payload to `subagents:completed` — both are built by the same formatter, so `status` is populated there too and `error` carries the message only when there is one |
 | `subagents:steered` | Steering message accepted — fires for a *queued* steer as well as a delivered one | `id`, `message` |
 | `subagents:paused` | Agent paused by the user or a cross-extension caller — the run was interrupted but its session kept for a later resume; no completion notification or event follows | `id`, `type`, `description` |
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | `id`, `type`, `description`, `model` (`provider/id`), `thinking` (the effective level), `requestedThinking` (present only when the agent did not get the level it asked for), `depth`, `parentAgentId`, `workflowId`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing) |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here | `{}` |
-| `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
+| `subagents:scheduled` | Schedule lifecycle change | `type` (`"added"` / `"removed"` / `"updated"` / `"fired"` / `"error"`) plus: `added`/`updated` → `job`; `removed` → `jobId`; `fired` → `jobId`, `agentId`, `name`; `error` → `jobId`, `error` |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
 | `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | `{}` (empty object) |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
@@ -1011,6 +1020,7 @@ src/
   abortable.ts        # Race a wait against Esc without cancelling the background child
   group-join.ts       # Group join manager: batched completion notifications with timeout
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
+  xml.ts              # Escaping for the <task-notification> payloads
   usage.ts            # Token usage shapes, accumulators, session-stats readers
 
   # Invocation surface
@@ -1025,6 +1035,9 @@ src/
   # Scheduling
   schedule.ts         # SubagentScheduler: cron / +10m / interval / ISO dispatch
   schedule-store.ts   # PID-locked, session-scoped, atomic schedule persistence
+
+  # Cross-restart pause
+  pause-store.ts      # /pause manifest: parked agents that survive quit + reload
 
   # Context & environment
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
@@ -1044,9 +1057,18 @@ src/
     host.ts           # WorkflowHost adapter over AgentManager
     task.ts           # local_workflow task record and batched progress updates
     tool-description.ts # Model-facing description carrying the orchestration patterns
+    collisions.ts     # Stand-down policy when another extension offers a workflow tool
+    saved.ts          # Resolve SubagentWorkflow({ name }) to a script on disk
+    json-schema.ts    # Validate a script-supplied JSON Schema
+    structured-output.ts # The synthetic tool behind agent(prompt, { schema })
+    journal.ts        # Per-run record a later resume uses to skip finished work
+    entry.ts          # The transcript entry a finished workflow leaves behind
   ui/
     agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
     fleet-list.ts         # FleetView: navigable agent list below the editor
+    agent-hub.ts          # Full-screen agent hub: roster + activity, popup or full-screen
+    workflow-menu.ts      # /agents → Workflows entry and the run inspector behind it
+    terminal-mouse.ts     # Wheel support for regular TUI mode (mouse capture/restore)
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer key matchers (scroll + app.tools.expand) resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
