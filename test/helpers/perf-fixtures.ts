@@ -181,9 +181,15 @@ export function makeSession(n: number) {
       });
     }
   }
+  let listener: ((event: any) => void) | undefined;
   return {
     messages,
-    subscribe: () => () => {},
+    subscribe: (l: any) => {
+      listener = l;
+      return () => {};
+    },
+    /** Fire the session event a real pi session fires for a transcript change. */
+    emit: (event: any = { type: "message_update" }) => listener?.(event),
     dispose: () => {},
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
   } as any;

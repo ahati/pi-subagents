@@ -11,8 +11,9 @@
  * first — the encodings below are the exact ones pi-tui 1.1.0 delivers, as
  * verified empirically against the installed package.
  */
-import { describe, expect, it } from "vitest";
+
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
+import { describe, expect, it } from "vitest";
 
 describe("pi-tui key contract", () => {
   it("legacy escape sequences match their key names", () => {

@@ -335,6 +335,17 @@ export class ConversationViewer implements Component {
   private readonly partials = new Map<string, string>();
   /** Most a stored partial keeps — bash output can stream megabytes. */
   private static readonly PARTIAL_CAP = 100_000;
+  /**
+   * Cache for `buildContentLines` — the transcript is O(messages) to rebuild
+   * (Markdown re-render, ANSI truncation of every line) yet unchanged between
+   * session events: a 5000-message agent measured ~1.3 s per rebuild, and the
+   * hub's 200 ms tick kept one in flight on every frame, which read as a
+   * freeze on close. Rebuilt only when a session event dirties it, or when a
+   * key input changes (width, status, markdown mode, expand, message count).
+   * Streaming stays live: every delta fires a session event, which dirties.
+   */
+  private contentCache: { key: string; lines: string[] } | undefined;
+  private contentDirty = true;
   /** Built-in tool renderers, best-effort — see `loadBuiltinRenderers`. */
   private builtinRenderers: Record<string, ToolRenderers> | undefined;
 
@@ -378,11 +389,15 @@ export class ConversationViewer implements Component {
     void loadBuiltinRenderers().then(renderers => {
       if (renderers && !this.closed) {
         this.builtinRenderers = renderers;
+        this.contentDirty = true; // text fallbacks upgrade to rich renderers
         this.tui.requestRender();
       }
     });
     this.unsubscribe = session.subscribe(event => {
       if (this.closed) return;
+      // Any transcript change — a new message, a streaming delta, a tool
+      // partial — invalidates the cached content lines below.
+      this.contentDirty = true;
       // Capture streaming tool output so a running call can show it live.
       if (event.type === "tool_execution_update") {
         const content = (event.partialResult as { content?: unknown } | undefined)?.content;
@@ -803,7 +818,14 @@ export class ConversationViewer implements Component {
     return {
       args,
       toolCallId,
-      invalidate: () => this.tui.requestRender(),
+      // A renderer's async fill (pi's edit diff preview, say) lands between
+      // frames and has no session event to dirty the content-lines cache —
+      // this hook is its channel. Re-invoking every frame used to be the only
+      // way those previews ever showed; now invalidation is explicit.
+      invalidate: () => {
+        this.contentDirty = true;
+        this.tui.requestRender();
+      },
       lastComponent: undefined,
       state: undefined,
       cwd: process.cwd(),
@@ -997,6 +1019,24 @@ export class ConversationViewer implements Component {
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
 
+    // Cached between session events: a clean render reuses the lines instead
+    // of re-walking the whole transcript. The key carries every input that
+    // changes output without a session event (scrolling is not in it — it only
+    // picks a different slice of the same lines).
+    const key = `${width}|${this.record.status}|${this.markdownMode()}|${this.expanded}|${this.session.messages.length}`;
+    if (!this.contentDirty && this.contentCache?.key === key) {
+      return this.contentCache.lines;
+    }
+
+    const lines = this.buildContentLinesUncached(width);
+    this.contentCache = { key, lines };
+    this.contentDirty = false;
+    return lines;
+  }
+
+  private buildContentLinesUncached(width: number): string[] {
+    if (width <= 0) return [];
+
     const th = this.theme;
     // Stream the in-flight assistant message live: pi keeps the partial in
     // `state.streamingMessage` until the turn's step completes and the final
@@ -1129,6 +1169,10 @@ export class ConversationViewer implements Component {
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    // Clamp every line to width — but skip the ANSI-aware walk for lines that
+    // already fit: that walk is the single most expensive step per rebuild
+    // (measured 74% of profile), and most lines come out of the Markdown/
+    // wrap paths already at or under width.
+    return lines.map(l => (visibleWidth(l) <= width ? l : truncateToWidth(l, width)));
   }
 }

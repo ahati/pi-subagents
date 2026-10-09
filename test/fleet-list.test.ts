@@ -96,6 +96,8 @@ interface Harness {
   overlayClosed: () => boolean;
   /** Simulate the viewer closing itself (Esc → done); flushes the close microtask. */
   closeOverlay: () => Promise<void>;
+  /** Let the deferred bar re-registration (post-hub-close timer) run. */
+  settleBar: () => Promise<void>;
   /** The fake `tui` handed to the widget factory; tests set `focusedComponent` on it. */
   widgetTui: { requestRender(): void; focusedComponent?: unknown };
 }
@@ -174,6 +176,8 @@ function harness(
     overlayOpened: () => opened,
     overlayClosed: () => closed,
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
+    /** Let the deferred bar re-registration (post-hub-close timer) run. */
+    settleBar: async () => { await new Promise(r => setTimeout(r, 0)); },
     widgetTui: fakeTui,
   };
 }
@@ -448,6 +452,7 @@ describe("FleetList navigation", () => {
 
     await h.closeOverlay();
     await hub;
+    await h.settleBar();
     // …and back the moment it closes, without any key.
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
@@ -460,6 +465,7 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
     await h.closeOverlay();
     await hub;
+    await h.settleBar();
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
@@ -524,6 +530,7 @@ describe("FleetList navigation", () => {
     h.fleet.update();
     await h.closeOverlay();
     await hub;
+    await h.settleBar();
 
     // A fresh agent after close must inherit the pre-hub dismissal, not a
     // drain-reset bar: the dismissal outlives the hub, exactly as promised.
@@ -737,6 +744,7 @@ describe("FleetList overlay lifecycle", () => {
     // a1 finishes and drops out while viewing → a2 shifts from idx 2 to idx 1.
     agents.splice(0, 1);
     await h.closeOverlay();
+    await h.settleBar();
     // Selection follows a2 ("two") to its new position, not whatever is at idx 2 now.
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");

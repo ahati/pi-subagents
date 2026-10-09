@@ -504,12 +504,20 @@ export class FleetList {
       { agentId },
     ).finally(() => {
       this.hubOpen = false;
-      this.clearViewer();
-      // Restore the dismissal exactly as it was at open — AFTER clearViewer(),
-      // whose own update() on a still-empty roster would otherwise reset it
-      // (the no-hub "next batch starts fresh" rule). A → issued before
-      // opening stays dismissed after closing, and vice versa.
-      this.dismissed = wasDismissed;
+      // The Esc keystroke already pays for hideOverlay's immediate full
+      // render; re-registering the bar here would stack a second one on the
+      // same synchronous frame. Let the keystroke land first — the bar comes
+      // back a tick later. A hub opened in the meantime owns the restore
+      // instead (its own finally runs it); this timer stands down.
+      setTimeout(() => {
+        if (this.hubOpen) return;
+        this.clearViewer();
+        // Restore the dismissal exactly as it was at open — AFTER clearViewer(),
+        // whose own update() on a still-empty roster would otherwise reset it
+        // (the no-hub "next batch starts fresh" rule). A → issued before
+        // opening stays dismissed after closing, and vice versa.
+        this.dismissed = wasDismissed;
+      }, 0);
     });
   }
 

@@ -56,12 +56,16 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer — cost stays linear in transcript length", () => {
-  /** Leaf calls one render makes over a transcript of `n` messages. */
+  /** Leaf calls one rebuild makes over a transcript of `n` messages. */
   function wrapsFor(n: number, mode: string): number {
-    const viewer = mountViewer(ConversationViewer, makeSession(n), undefined, () => mode);
+    const session = makeSession(n);
+    const viewer = mountViewer(ConversationViewer, session, undefined, () => mode);
     viewer.render(120); // prime, so caches are warm and only steady state counts
     counts.wrap = 0;
     counts.markdownRender = 0;
+    // The content-lines cache reuses lines between session events; the rebuild
+    // this measures is the event-driven one (a new message, a streaming delta).
+    session.emit();
     viewer.render(120);
     return counts.wrap + counts.markdownRender;
   }

@@ -56,9 +56,15 @@ function mockTui(rows = 40, columns = 80) {
 }
 
 function mockSession(messages: any[] = []) {
+  let listener: ((event: any) => void) | undefined;
   return {
     messages,
-    subscribe: vi.fn(() => vi.fn()),
+    subscribe: vi.fn((l: any) => {
+      listener = l;
+      return () => {};
+    }),
+    /** Fire the session event a real pi session would fire for a transcript change. */
+    emit: (event: any = { type: "message_update" }) => listener?.(event),
     dispose: vi.fn(),
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
   } as any;
@@ -382,11 +388,17 @@ describe("ConversationViewer", () => {
       /** Tall enough that the assertion reads the whole transcript, not the scrolled window. */
       rows = 200,
     ) {
-      return new ConversationViewer(
-        mockTui(rows, 80), mockSession(messages), mockRecord({ status: "completed" }), undefined,
+      const session = mockSession(messages);
+      const viewer = new ConversationViewer(
+        mockTui(rows, 80), session, mockRecord({ status: "completed" }), undefined,
         ansiTheme(), vi.fn(), undefined, undefined, undefined, false,
         mode ? () => mode : undefined, onMode,
       );
+      // Tests that mutate `messages` in place fire the session event pi
+      // always fires for a transcript change — the content-lines cache keys
+      // off those events.
+      (viewer as any).emitSession = session.emit;
+      return viewer;
     }
 
     const assistant = (text: string) => [{ role: "assistant", content: [{ type: "text", text }] }];
@@ -630,6 +642,7 @@ describe("ConversationViewer", () => {
       // An append-only delta keeps the unsafe prefix, so it must stay literal
       // without retrying the recursive parser on every streamed update.
       messages[0].content[0].text += "\nmore";
+      (viewer as any).emitSession();
       expect(strip(viewer.render(80).join("\n"))).toContain("more");
       expect(markdownRenderCalls).toBe(1);
 
@@ -640,6 +653,7 @@ describe("ConversationViewer", () => {
       // Replacing the failed content can remove the unsafe prefix, so it gets
       // one fresh Markdown attempt instead of staying literal forever.
       messages[0].content[0].text = "## safe";
+      (viewer as any).emitSession();
       const replaced = strip(viewer.render(80).join("\n"));
       expect(markdownRenderCalls).toBe(2);
       expect(replaced).toContain("safe");
@@ -659,6 +673,7 @@ describe("ConversationViewer", () => {
 
       const before = elided();
       msg.content[0].text += "row\n".repeat(1000);
+      (viewer as any).emitSession();
       const after = elided();
 
       expect(before).toBeGreaterThan(0);
@@ -714,12 +729,32 @@ describe("ConversationViewer", () => {
       expect(markdownConstructions).toBe(afterFirst);
     });
 
+    it("reuses the built content lines between session events, rebuilds on one", () => {
+      // D8 regression guard: the transcript walk (Markdown re-parse, ANSI
+      // truncation of every line) is O(messages); rendering twice per frame
+      // without an event must not redo it. A session event (the only way the
+      // transcript changes) must invalidate.
+      const messages = assistant("# heading");
+      const viewer = viewerFor(messages, "all");
+      viewer.render(80);
+      const afterFirst = markdownRenderCalls;
+
+      viewer.render(80);
+      viewer.render(80);
+      expect(markdownRenderCalls).toBe(afterFirst); // no event → cached
+
+      (viewer as any).emitSession();
+      viewer.render(80);
+      expect(markdownRenderCalls).toBe(afterFirst + 1); // event → rebuilt
+    });
+
     it("re-renders a message whose text is still streaming", () => {
       const messages = assistant("# One");
       const viewer = viewerFor(messages);
       expect(strip(viewer.render(80).join("\n"))).toContain("One");
 
       messages[0].content[0].text = "# Two";
+      (viewer as any).emitSession();
       const out = strip(viewer.render(80).join("\n"));
 
       expect(out).toContain("Two");

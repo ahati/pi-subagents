@@ -14,7 +14,17 @@ function mockTui(rows = 40, columns = 120) {
 }
 
 function mockSession(messages: any[], getToolDefinition?: (name: string) => unknown) {
-  return { subscribe: () => () => {}, messages, getToolDefinition } as any;
+  let listener: ((event: any) => void) | undefined;
+  return {
+    subscribe: (l: any) => {
+      listener = l;
+      return () => {};
+    },
+    /** Fire the session event a real pi session fires for a transcript change. */
+    emit: (event: any = { type: "message_update" }) => listener?.(event),
+    messages,
+    getToolDefinition,
+  } as any;
 }
 
 function mockRecord(over: Partial<AgentRecord> = {}): AgentRecord {
@@ -179,6 +189,9 @@ describe("rich tool renderers — main-window state wiring", () => {
     ], () => def);
     const viewer = new ConversationViewer(mockTui(), session, mockRecord(), undefined, theme as any, vi.fn());
     viewer.render(120);
+    // Renderers are re-invoked when the frame is invalidated — a session event
+    // (or a renderer's own ctx.invalidate), not blindly every frame anymore.
+    session.emit();
     viewer.render(120);
     expect(lastComponents).toHaveLength(2);
     expect(lastComponents[0]).toBeUndefined();
