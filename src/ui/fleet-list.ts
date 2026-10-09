@@ -488,6 +488,8 @@ export class FleetList {
       );
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+    // pi stacks below-editor widgets directly on its footer with no spacer (#351).
+    lines.push("");
 
     return lines;
   }

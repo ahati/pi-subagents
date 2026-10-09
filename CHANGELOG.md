@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The FleetView list no longer sits flush against pi's footer** (fixes [#351](https://github.com/tintinweb/pi-subagents/issues/351) — thanks [@KKinsz](https://github.com/KKinsz)). pi places below-editor widgets directly on its status bar with no gap, so the last agent row ran into the model/context line. The list now ends with a blank line, matching the one above `main`.
+
 ## [0.20.0] - 2026-10-09
 
 > **⚠️ Breaking — this release requires pi 1.1.0 or newer** (`peerDependencies` moves from `>=0.84.0`; [#384](https://github.com/tintinweb/pi-subagents/pull/384)). pi 0.86 and 0.87 moved the system prompt and conversation history into the session transcript, and the fixes below are built on that model. On an older pi, a mention clone starts its agent without the conversation history.
