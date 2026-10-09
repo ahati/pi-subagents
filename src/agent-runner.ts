@@ -882,6 +882,23 @@ export async function runAgent(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
+  // An agent-file model pin that cannot run must not fail silently. The
+  // availability list is auth-gated, so a pin whose provider lost credentials —
+  // or whose id is a typo — resolves to the parent model without a word, and
+  // the agent runs (and bills) on a model its author never chose. Surface it
+  // beside the other agent-file misconfigurations above (tools-error,
+  // extension-error); the spawn itself proceeds, as it always did. Probing
+  // with a null parent turns resolveDefaultModel into a pure pin test.
+  if (!options.model && agentConfig?.model && resolveDefaultModel(undefined, ctx.modelRegistry, agentConfig.model) === undefined) {
+    const slashIdx = agentConfig.model.indexOf("/");
+    const notFound = slashIdx === -1
+      || !ctx.modelRegistry.find(agentConfig.model.slice(0, slashIdx), agentConfig.model.slice(slashIdx + 1));
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `model-error:model "${agentConfig.model}" pinned by agent "${type}" is ${notFound ? "not a known model" : "unavailable (provider not authenticated or model disabled)"} — running on the parent model instead`,
+    });
+  }
+
   // Resolve thinking level: explicit option > agent config > parent session level.
   // Without the parent step, an unset level falls through to pi's
   // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.

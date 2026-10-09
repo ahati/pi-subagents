@@ -1851,7 +1851,10 @@ Terse command-style prompts produce shallow, generic work.
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
+          // config-specified: silent fallback to parent here — runAgent re-resolves
+          // the pin itself and warns there (model-error activity), so a broken
+          // frontmatter pin is surfaced once, in the transcript where the agent
+          // actually runs.
         } else {
           model = resolved;
         }
