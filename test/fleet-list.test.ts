@@ -406,6 +406,23 @@ describe("FleetList vs other focused components (#123)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true });
   });
 
+  it("activates under another extension's editor that is not an Editor subclass (#374)", () => {
+    // ui.setEditorComponent accepts any EditorComponent; pi-voice-stt's
+    // VoiceEditorWrapper implements the interface without extending Editor.
+    const h = harness([makeRecord()]);
+    focusInHarness(h, {
+      render: () => [], invalidate: () => {}, handleInput: () => {},
+      getText: () => "", setText: () => {},
+    });
+    expect(h.press(DOWN)).toEqual({ consume: true });
+  });
+
+  it("does not steal ↓ from a selector that handles input but holds no text (#374)", () => {
+    const h = harness([makeRecord()]);
+    focusInHarness(h, { render: () => [], invalidate: () => {}, handleInput: () => {} });
+    expect(h.press(DOWN)).toBeUndefined();
+  });
+
   it("assumes the editor when focus is unknowable (no tui yet / nothing focused)", () => {
     const h = harness([makeRecord()]);
     // No render yet → the list has never seen a tui: activation must still work.
