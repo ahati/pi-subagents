@@ -375,7 +375,11 @@ export class FleetList {
     // While an overlay is open, let it own all input. Checked before the focus
     // test below, which would otherwise read the dialog holding the keyboard as
     // "the user left the list" and reset the selection out from under it.
-    if (this.viewerClose || this.viewingWorkflowId) return undefined;
+    // `hubOpen` included: the held-down bar has zeroed `this.tui`, so
+    // `editorHasFocus()` reads true ("unknowable = editor") and this listener
+    // would otherwise eat the hub's ↓/← as bar activators — wiping a →
+    // dismissal with each press — and swallow one Esc per activation.
+    if (this.viewerClose || this.viewingWorkflowId || this.hubOpen) return undefined;
     // Input listeners fire BEFORE the focused component, and dialogs
     // (ctx.ui.select/confirm/input, pi's own menus) swap the prompt editor out
     // while getEditorText() still reads the detached — empty — editor. So when
@@ -470,7 +474,8 @@ export class FleetList {
    *
    * Shared by the fleet list and `/agents` so both entry points drive the same
    * overlay lifecycle: while the hub is up the list keeps its keys to itself
-   * (`viewerClose`), and on close the cursor returns to the viewed agent.
+   * (the `hubOpen` input gate), and on close the cursor returns to the viewed
+   * agent.
    */
   openHub(agentId?: string, uiOverride?: FleetUICtx): Promise<void> {
     const ui = uiOverride ?? this.ui;
@@ -480,6 +485,7 @@ export class FleetList {
     // overlay's whole life — the popup ↔ full-screen toggles loop inside this
     // promise — then restore it exactly as it was.
     this.hubOpen = true;
+    const wasDismissed = this.dismissed;
     this.update();
     return openAgentHub(
       ui,
@@ -499,6 +505,11 @@ export class FleetList {
     ).finally(() => {
       this.hubOpen = false;
       this.clearViewer();
+      // Restore the dismissal exactly as it was at open — AFTER clearViewer(),
+      // whose own update() on a still-empty roster would otherwise reset it
+      // (the no-hub "next batch starts fresh" rule). A → issued before
+      // opening stays dismissed after closing, and vice versa.
+      this.dismissed = wasDismissed;
     });
   }
 

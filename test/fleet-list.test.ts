@@ -480,6 +480,59 @@ describe("FleetList navigation", () => {
     expect(h.render().some(l => l.includes("enter view"))).toBe(true);
   });
 
+  it("the bar's input listener stays out of the hub's keys: ↓/←/Esc reach the hub", async () => {
+    const h = harness([makeRecord(), makeRecord({ id: "a2" })]);
+    const hub = h.fleet.openHub();
+    expect(h.overlayOpened()).toBe(true);
+    // Regression (pi 1.1.0 runtime): while the hub overlay held the screen,
+    // the hidden bar still answered keys — ↓/← as activators ({consume:true}),
+    // one Esc swallowed per invisible activation — so the hub's selection
+    // never moved and Esc needed many presses. Every key must now flow to the
+    // focused overlay untouched.
+    expect(h.press(DOWN)).toBeUndefined();
+    expect(h.press(LEFT)).toBeUndefined();
+    expect(h.press(ESC)).toBeUndefined();
+    await h.closeOverlay();
+    await hub;
+  });
+
+  it("a mid-hub ↓ must not wipe the → dismissal: the bar stays hidden after the hub closes", async () => {
+    const h = harness([makeRecord(), makeRecord({ id: "a2" })]);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss the bar
+    expect(h.render()).toEqual([]);
+
+    const hub = h.fleet.openHub();
+    h.press(DOWN); // user navigating the hub's own list
+    await h.closeOverlay();
+    await hub;
+    // The bar restores exactly as it was at open: still dismissed.
+    expect(h.render()).toEqual([]);
+    // …and ↓ recalls it afterwards, as before.
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+  });
+
+  it("a roster that drains mid-hub does not resurrect the bar", async () => {
+    const agents = [makeRecord(), makeRecord({ id: "a2" })];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(RIGHT); // dismiss
+
+    const hub = h.fleet.openHub();
+    agents.length = 0; // roster empties while the hub is up (agents settling)
+    h.fleet.update();
+    await h.closeOverlay();
+    await hub;
+
+    // A fresh agent after close must inherit the pre-hub dismissal, not a
+    // drain-reset bar: the dismissal outlives the hub, exactly as promised.
+    agents.push(makeRecord({ id: "a3" }));
+    h.fleet.update();
+    expect(h.render()).toEqual([]);
+    expect(h.press(DOWN)).toEqual({ consume: true }); // still recallable
+  });
+
   it("ignores all input while disabled and hides the widget", () => {
     const h = harness([makeRecord()]);
     h.fleet.setEnabled(false);
