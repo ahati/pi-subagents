@@ -134,6 +134,13 @@ export interface RunPrintModeOptions {
   /** Abort the parent (and forwarded children) externally. */
   signal?: AbortSignal;
   /**
+   * Parent session manager. Defaults to an in-memory one. Pass
+   * `SessionManager.create(cwd, dir)` for a real session file, or
+   * `SessionManager.open(<file>, dir)` to resume one across boots — what the
+   * /pause → /continue suite needs to prove cross-restart state.
+   */
+  sessionManager?: SessionManager;
+  /**
    * Force live mode against a specific provider/model (overrides PI_E2E_LIVE).
    * When omitted, live mode is on iff `PI_E2E_LIVE` is truthy. In live mode, if
    * neither this nor `PI_PROVIDER`+`PI_MODEL` is set, the model is left for pi to
@@ -362,7 +369,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     modelRegistry: modelRegistry as any,
     modelRuntime: modelRuntime as any,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
     // (settingsManager.getDefaultModel) and retries/compaction match your config.
     // Faux: in-memory, deterministic, no disk.

@@ -32,6 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { type PausedAgentEntry, PauseStore, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -573,6 +574,12 @@ export default function (pi: ExtensionAPI) {
     // notification, and UI channels.
     if (!isTopLevelAgent(record)) return;
 
+    // Keep the cross-restart pause manifest in step: a pause lands its entry,
+    // any terminal settle removes it. Safe during shutdown — abortAll settles
+    // running/queued records only and never touches a paused one, so a
+    // `/pause` manifest survives quit.
+    if (currentCtx) syncPauseManifest(currentCtx);
+
     // A pause is not an outcome: the run settled because pause() fired its
     // controller, and everything downstream of a real settle — lifecycle
     // event, notification, nudge, group join — would report a finished agent
@@ -893,6 +900,21 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:ready", {});
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
+    // Surface parked work after a reload. The manifest is keyed by sessionId,
+    // so it only ever matches the session that wrote it — a fresh session or
+    // `/new` finds nothing. Hint only: reviving a wall of agents is the
+    // user's call, via /continue.
+    try {
+      const sid = ctx.sessionManager?.getSessionId?.();
+      if (sid) {
+        const parked = new PauseStore(resolvePauseStorePath(ctx.cwd, sid)).list();
+        if (parked.length > 0) {
+          ctx.ui.notify(`${parked.length} subagent${parked.length === 1 ? "" : "s"} paused here — /continue to resume.`, "info");
+        }
+      }
+    } catch {
+      // A hint, never a blocker.
+    }
     // Stack `@handle` suggestions on pi's built-in autocomplete. Registered at
     // most once per activation: pi appends wrappers to a list it never prunes,
     // so a second call would layer a duplicate provider on the first. TUI only
@@ -2993,6 +3015,150 @@ Terse command-style prompts produce shallow, generic work.
     return undefined;
   }
 
+  // ---- Global pause (/pause) + cross-restart continue (/continue) ----
+
+  /**
+   * Rewrite the session's pause manifest from the live records: exactly the
+   * top-level agents currently paused WITH a persisted session file. The
+   * settle callback calls this on every transition so the manifest never
+   * lists an agent that is no longer parked; `/pause` and `/continue` also
+   * call it directly around their batch work. Best-effort — an unwritable
+   * `.pi/` must never break pausing itself.
+   */
+  function syncPauseManifest(ctx: ExtensionContext): void {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (!sessionId) return;
+    try {
+      const store = new PauseStore(resolvePauseStorePath(ctx.cwd, sessionId));
+      // Keep each entry's original pausedAt across rewrites: the snapshot is
+      // derived from live records, which don't carry it.
+      const previous = new Map(store.list().map(e => [e.id, e.pausedAt]));
+      const entries: PausedAgentEntry[] = manager.listAgents()
+        .filter(isTopLevelAgent)
+        .filter((a): a is AgentRecord & { sessionFile: string } => a.status === "paused" && typeof a.sessionFile === "string")
+        .map(a => ({
+          id: a.id,
+          type: a.type,
+          handle: a.handle,
+          alias: a.alias,
+          description: a.description,
+          sessionFile: a.sessionFile,
+          pausedAt: previous.get(a.id) ?? new Date().toISOString(),
+        }));
+      store.replace(entries);
+    } catch {
+      // Manifest write failed — in-session pause/resume still works.
+    }
+  }
+
+  /**
+   * `/pause` — the global park: pause every active top-level agent (the same
+   * funnel as bare `/agents pause`) and write the disk-resumable ones to the
+   * session's pause manifest, so quitting is safe and a later `/continue` —
+   * in this session or after a reload — brings them back. The main model is
+   * left alone: pi has no paused-turn state that survives a reload, so while
+   * it is mid-turn the command refuses rather than half-park the session.
+   */
+  async function pauseAllCommand(ctx: ExtensionCommandContext) {
+    if (!ctx.isIdle()) {
+      ctx.ui.notify("Main model is streaming — press Esc (or let the turn finish) before /pause.", "warning");
+      return;
+    }
+    const active = manager.listAgents().filter(isTopLevelAgent)
+      .filter(a => a.status === "running" || a.status === "queued");
+    if (active.length === 0) {
+      ctx.ui.notify("No active agents to pause.", "info");
+      return;
+    }
+    let paused = 0;
+    let ephemeral = 0;
+    const refused: string[] = [];
+    for (const record of active) {
+      const refusal = pauseAgentRecord(record);
+      if (refusal !== undefined) {
+        refused.push(`@${recordName(record)} (${refusal})`);
+        continue;
+      }
+      paused++;
+      // Paused with no session on disk: the manifest cannot carry it, so
+      // quitting would lose it. Say so rather than let the split go unnoticed.
+      if (!record.sessionFile) ephemeral++;
+    }
+    syncPauseManifest(ctx);
+    const parts = [`Paused ${paused} agent${paused === 1 ? "" : "s"}`];
+    if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
+    if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
+    ctx.ui.notify(parts.join("; ") + ".", "info");
+  }
+
+  /**
+   * What one manifest entry does on `/continue`. "resumed" — a live paused
+   * record continued in place, or a gone one revived from its session file;
+   * "stale" — the live record already moved on after the pause (resumed,
+   * stopped, finished), so the entry is dropped; "failed" — revival was
+   * refused (session file gone, agent type unavailable) and the entry stays
+   * for a later attempt.
+   */
+  async function continuePausedEntry(ctx: ExtensionContext, entry: PausedAgentEntry): Promise<"resumed" | "stale" | "failed"> {
+    // A live record outranks the manifest: pausing without quitting leaves
+    // the record in memory, where resume is cheaper and exact.
+    const live = manager.listAgents().find(a => a.id === entry.id);
+    if (live) {
+      if (live.status !== "paused") return "stale";
+      return (await resumeAgentById(ctx, live)) ? "resumed" : "failed";
+    }
+    // Records and tombstones die with the process; only the manifest
+    // remains. Reopen the conversation from its session file — the revive
+    // path, which verifies the file exists and the agent type still resolves
+    // before spawning, and reclaims the handle and alias.
+    const tombstone: AgentTombstone = {
+      handle: entry.handle ?? entry.id,
+      alias: entry.alias,
+      id: entry.id,
+      type: entry.type,
+      description: entry.description,
+      sessionFile: entry.sessionFile,
+      completedAt: Date.now(),
+    };
+    return (await reviveTombstone(ctx, tombstone, CONTINUATION_PROMPT, "Continuing")) ? "resumed" : "failed";
+  }
+
+  /**
+   * `/continue` — resume what `/pause` parked. In the same session (no quit
+   * in between) the live paused records resume in place; after a reload the
+   * manifest is all that remains, so each entry revives from its session
+   * file. Entries that could not be revived stay in the manifest, so a
+   * temporarily unavailable agent type still continues once re-enabled.
+   */
+  async function continuePausedCommand(ctx: ExtensionCommandContext) {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (!sessionId) {
+      ctx.ui.notify("No active session.", "warning");
+      return;
+    }
+    const store = new PauseStore(resolvePauseStorePath(ctx.cwd, sessionId));
+    const entries = store.list();
+    if (entries.length === 0) {
+      ctx.ui.notify("Nothing paused in this session.", "info");
+      return;
+    }
+    let resumed = 0;
+    let stale = 0;
+    const failed: PausedAgentEntry[] = [];
+    for (const entry of entries) {
+      const outcome = await continuePausedEntry(ctx, entry);
+      if (outcome === "resumed") resumed++;
+      else if (outcome === "stale") stale++;
+      else failed.push(entry);
+    }
+    store.replace(failed);
+    const parts: string[] = [];
+    if (resumed > 0) parts.push(`Continued ${resumed} agent${resumed === 1 ? "" : "s"}`);
+    if (stale > 0) parts.push(`${stale} already handled`);
+    if (failed.length > 0) parts.push(`${failed.length} could not be revived (kept in the manifest)`);
+    ctx.ui.notify(parts.join("; ") + ".", resumed === 0 && failed.length > 0 ? "warning" : "info");
+  }
+
   /**
    * Reopen an evicted agent's conversation (a tombstone) as a fresh background
    * agent carrying the same handle. Shared by the `@handle` mention path and
@@ -4314,6 +4480,30 @@ Write the file using the write tool. Only write the file, nothing else.`;
       if (action === "resume") { await resumeAgentsCommand(ctx, target); return; }
       if (action === "revive") { await reviveAgentsCommand(ctx, target); return; }
       await showAgentsMenu(ctx);
+    },
+  });
+
+  // Global park and resume, across quit + reload. Both are deliberately
+  // zero-argument — per-agent control stays on `/agents pause|resume` —
+  // and /continue rides the manifest /pause wrote, keyed by sessionId.
+  pi.registerCommand("pause", {
+    description: "Pause all subagents (safe to quit; /continue resumes)",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("/pause takes no argument — for one agent use /agents pause [handle].", "warning");
+        return;
+      }
+      await pauseAllCommand(ctx);
+    },
+  });
+  pi.registerCommand("continue", {
+    description: "Resume agents parked by /pause (works after quit + reload)",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("/continue takes no argument — for one agent use /agents resume [handle].", "warning");
+        return;
+      }
+      await continuePausedCommand(ctx);
     },
   });
 
