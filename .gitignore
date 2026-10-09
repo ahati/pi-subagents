@@ -41,3 +41,7 @@ test/perf/.results/
 # Pi internal files
 progress.md
 CLAUDE.md
+
+# Session conversation artifacts (task lists, analyses) — not project code
+.pi/*/
+!.pi/agents/
