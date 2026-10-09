@@ -89,6 +89,8 @@ const MARKDOWN_MODES: readonly ViewerMarkdownMode[] = ["off", "assistant", "all"
 const RESULT_PREVIEW_LINES = 4;
 const ERROR_PREVIEW_LINES = 10;
 const THINKING_PREVIEW_LINES = 6;
+/** Lines of a running tool's streamed output shown under its call. */
+const LIVE_OUTPUT_LINES = 4;
 
 /**
  * Tool-argument keys worth showing on a call line, most identifying first —
@@ -324,6 +326,15 @@ export class ConversationViewer implements Component {
    * degrade to their no-state output (that is why edit hunks went missing).
    */
   private readonly toolExecState = new Map<string, Record<string, unknown>>();
+  /**
+   * Live tool output while a call runs, keyed by toolCallId: the latest
+   * `tool_execution_update`'s text, tail-capped. Rendered under the pending
+   * call in place of the static "awaiting result" line; dropped on
+   * `tool_execution_end`, when the real result message takes over.
+   */
+  private readonly partials = new Map<string, string>();
+  /** Most a stored partial keeps — bash output can stream megabytes. */
+  private static readonly PARTIAL_CAP = 100_000;
   /** Built-in tool renderers, best-effort — see `loadBuiltinRenderers`. */
   private builtinRenderers: Record<string, ToolRenderers> | undefined;
 
@@ -370,8 +381,16 @@ export class ConversationViewer implements Component {
         this.tui.requestRender();
       }
     });
-    this.unsubscribe = session.subscribe(() => {
+    this.unsubscribe = session.subscribe(event => {
       if (this.closed) return;
+      // Capture streaming tool output so a running call can show it live.
+      if (event.type === "tool_execution_update") {
+        const content = (event.partialResult as { content?: unknown } | undefined)?.content;
+        const text = Array.isArray(content) ? extractText(content as any) : "";
+        this.partials.set(event.toolCallId, text.length > ConversationViewer.PARTIAL_CAP ? text.slice(-ConversationViewer.PARTIAL_CAP) : text);
+      } else if (event.type === "tool_execution_end") {
+        this.partials.delete(event.toolCallId);
+      }
       this.tui.requestRender();
     });
   }
@@ -882,6 +901,24 @@ export class ConversationViewer implements Component {
   }
 
   /**
+   * A running tool's streamed output, under its call: the tail — the part
+   * still being written — capped at a few lines, dim like the placeholder it
+   * replaces. Kept plain on purpose: the call above is already rendered with
+   * the tool's own renderer where one exists, and a rich partial would
+   * re-render (and re-parse) on every `tool_execution_update`.
+   */
+  private liveOutputLines(partial: string, width: number): string[] {
+    const th = this.theme;
+    const all = partial.split("\n");
+    const kept = all.slice(-LIVE_OUTPUT_LINES);
+    const lines = kept.map(l => th.fg("dim", `    ${l}`));
+    if (all.length > kept.length) {
+      lines.unshift(th.fg("dim", `    … ${all.length - kept.length} earlier lines`));
+    }
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  /**
    * Result rendered under its call: `✓`/`✗` plus a preview. `assistant` mode
    * (the default) shows the first lines and an elision note; `all` shows the
    * full result as Markdown; `off` shows it raw — the old escape hatches keep
@@ -961,7 +998,16 @@ export class ConversationViewer implements Component {
     if (width <= 0) return [];
 
     const th = this.theme;
-    const messages = this.session.messages;
+    // Stream the in-flight assistant message live: pi keeps the partial in
+    // `state.streamingMessage` until the turn's step completes and the final
+    // message lands in `messages` — so it is never listed twice. Without
+    // content yet there is nothing to draw but the working indicator below.
+    const streaming = this.session.state?.streamingMessage;
+    const completed = this.session.messages;
+    const messages = streaming?.role === "assistant"
+      ? [...completed, streaming as (typeof completed)[number]]
+      : completed;
+    const streamingRef = streaming?.role === "assistant" ? streaming : undefined;
     const lines: string[] = [];
 
     if (messages.length === 0) {
@@ -1003,6 +1049,11 @@ export class ConversationViewer implements Component {
       } else if (msg.role === "assistant") {
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
+        // Streaming, nothing legible yet: show the working state pi's own
+        // transcript shows, instead of a bare header over an empty block.
+        if (msg === streamingRef && !msg.content.some(c => (c.type === "text" && c.text.trim()) || (c as any).type === "thinking" || c.type === "toolCall")) {
+          lines.push(truncateToWidth(th.fg("dim", "  ✻ thinking…"), width));
+        }
         // Text, thinking and tool calls render in content order (consecutive
         // text blocks join, matching the old joined-text behavior).
         let textRun: string[] = [];
@@ -1032,7 +1083,15 @@ export class ConversationViewer implements Component {
               consumedResults.add(callId as string);
               lines.push(...this.toolResultLines(result, callArgs, width));
             } else if (this.record.status === "running" || this.record.status === "queued") {
-              lines.push(truncateToWidth(th.fg("dim", "  ○ awaiting result"), width));
+              // Still executing: show the streamed output so far, tail-first —
+              // the part a running command is writing right now — and fall
+              // back to the placeholder until the first update arrives.
+              const partial = typeof callId === "string" ? this.partials.get(callId)?.trim() : undefined;
+              if (partial) {
+                lines.push(...this.liveOutputLines(partial, width));
+              } else {
+                lines.push(truncateToWidth(th.fg("dim", "  ○ awaiting result"), width));
+              }
             }
           }
         }

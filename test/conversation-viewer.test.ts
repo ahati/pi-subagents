@@ -392,6 +392,77 @@ describe("ConversationViewer", () => {
     const assistant = (text: string) => [{ role: "assistant", content: [{ type: "text", text }] }];
     const result = (text: string) => [{ role: "toolResult", toolUseId: "t1", content: [{ type: "text", text }] }];
 
+    /** A session that streams: `state.streamingMessage` plus a captured event listener. */
+    function streamingSession(messages: any[], streamingMessage: any) {
+      let listener: ((event: any) => void) | undefined;
+      const session = {
+        messages,
+        state: { streamingMessage },
+        subscribe: vi.fn((l: any) => {
+          listener = l;
+          return () => {};
+        }),
+        dispose: vi.fn(),
+        getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
+      } as any;
+      return { session, emit: (event: any) => listener?.(event) };
+    }
+
+    it("renders the in-flight streaming message after the completed ones", () => {
+      const { session } = streamingSession(assistant("final part"), {
+        role: "assistant",
+        content: [{ type: "text", text: "streaming part" }],
+      });
+      const viewer = new ConversationViewer(
+        mockTui(200, 80), session, mockRecord({ status: "running" }), undefined,
+        ansiTheme(), vi.fn(),
+      );
+      const content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
+
+      expect(content.join("\n")).toContain("final part");
+      expect(content.join("\n")).toContain("streaming part");
+    });
+
+    it("shows a working indicator while the streaming message has nothing legible yet", () => {
+      const { session } = streamingSession(assistant("earlier done"), { role: "assistant", content: [] });
+      const viewer = new ConversationViewer(
+        mockTui(200, 80), session, mockRecord({ status: "running" }), undefined,
+        ansiTheme(), vi.fn(),
+      );
+      const content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
+
+      expect(content.join("\n")).toContain("✻ thinking…");
+    });
+
+    it("shows a running tool's streamed output under its call, tail first", () => {
+      const messages = [{
+        role: "assistant",
+        content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "yes" } }],
+      }];
+      const { session, emit } = streamingSession(messages, undefined);
+      const viewer = new ConversationViewer(
+        mockTui(200, 80), session, mockRecord({ status: "running" }), undefined,
+        ansiTheme(), vi.fn(),
+      );
+      // First frame: no update yet — the placeholder stands.
+      let content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
+      expect(content.join("\n")).toContain("○ awaiting result");
+
+      emit({ type: "tool_execution_update", toolCallId: "t1", partialResult: { content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6" }] } });
+      content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
+      const joined = content.join("\n");
+      expect(joined).not.toContain("○ awaiting result");
+      expect(joined).toContain("l6");
+      expect(joined).toContain("l3"); // the tail four survive
+      expect(joined).not.toContain("l1"); // everything earlier is elided
+      expect(joined).toContain("2 earlier lines");
+
+      // The end event clears it; with no result message yet the placeholder returns.
+      emit({ type: "tool_execution_end", toolCallId: "t1" });
+      content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
+      expect(content.join("\n")).toContain("○ awaiting result");
+    });
+
     it("renders assistant Markdown by default instead of raw source markers", () => {
       const out = strip(viewerFor(assistant("# Heading\n\n- first\n- second\n\n**bold**")).render(80).join("\n"));
 

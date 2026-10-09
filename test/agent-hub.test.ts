@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import * as piHost from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 import { AgentHub, type AgentHubDeps, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
