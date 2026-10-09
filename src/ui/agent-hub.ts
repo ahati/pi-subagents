@@ -50,13 +50,13 @@ const CHAT_LIST_WIDTH = 18;
 const CHAT_TWO_PANE_MIN_WIDTH = 60;
 
 /**
- * The host's clipboard helper, when this pi has one — it landed after the
- * 0.84.0 peer floor (0.84.2 has it), so a named import would fail the whole
- * extension on the floor version. A namespace import never throws for a
- * missing binding; the property is simply `undefined` there and the OSC 52
- * fallback below takes over.
+ * The host's clipboard helper, resolved at call time — pi ships one since
+ * 0.84.2, but resolving lazily (not at module load) keeps a test's
+ * `vi.spyOn(piHost, "copyToClipboard")` effective and honors any runtime
+ * patching. A namespace import never throws for a missing binding; when the
+ * property is absent the OSC 52 fallback in `copyChatResult` takes over.
  */
-const hostCopyToClipboard: ((text: string) => Promise<void>) | undefined =
+const hostCopyToClipboard = (): ((text: string) => Promise<void>) | undefined =>
   (piHost as { copyToClipboard?: (text: string) => Promise<void> }).copyToClipboard;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
@@ -713,8 +713,9 @@ export class AgentHub implements Component {
     }
     const report = () =>
       this.deps.notify?.(`Copied "${record.description}" (${text.length.toLocaleString()} chars) to the clipboard.`, "info");
-    if (hostCopyToClipboard) {
-      void hostCopyToClipboard(text).then(report, () => {
+    const copy = hostCopyToClipboard();
+    if (copy) {
+      void copy(text).then(report, () => {
         this.deps.notify?.("Clipboard copy failed — no clipboard tool or terminal support.", "warning");
       });
       return;

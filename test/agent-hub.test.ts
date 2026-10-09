@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as piHost from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 import { AgentHub, type AgentHubDeps, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
@@ -397,6 +398,9 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
   });
 
   it("c copies a completed agent's response to the clipboard", async () => {
+    // Stub the host helper pi 1.x exports; without the stub the real
+    // clipboard chain runs and the Copied notification lands after flush.
+    const copy = vi.spyOn(piHost, "copyToClipboard").mockResolvedValue(undefined);
     const notify = vi.fn();
     const h = harness(
       [makeRecord({ id: "a1", description: "done task", status: "completed", result: "the final answer" })],
@@ -405,7 +409,9 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     h.open({ agentId: "a1" });
     h.press("c");
     await h.flush();
+    expect(copy).toHaveBeenCalledWith("the final answer");
     expect(notify).toHaveBeenCalledWith(expect.stringContaining("Copied \"done task\""), "info");
+    copy.mockRestore();
   });
 
   it("c on a running agent explains there is nothing to copy yet", () => {
