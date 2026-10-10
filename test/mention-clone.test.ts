@@ -39,7 +39,6 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
   };
 });
 
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { agentMentionReminder } from "../src/mention.js";
 import { runMentionClone } from "../src/mention-clone.js";
 
