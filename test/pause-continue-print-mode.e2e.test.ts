@@ -21,8 +21,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PauseStore, resolvePauseStorePath } from "../src/pause-store.js";
 import { agentCall, conversationText, routeBySession, runPrintMode, toolResultsNamed } from "./helpers/print-mode-runner.js";
 

@@ -17,12 +17,12 @@
  * fleet's deferred restore deliberately issues no further render. Assertions
  * decode the emitted ANSI into a virtual screen — what a user actually sees.
  */
-import { Container, TuiMainScreen, type Component } from "@earendil-works/pi-tui";
+import { type Component, Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { openAgentHub } from "../src/ui/agent-hub.js";
-import { FleetList } from "../src/ui/fleet-list.js";
-import type { AgentActivity } from "../src/ui/agent-widget.js";
 import type { AgentManager, AgentRecord } from "../src/types.js";
+import { openAgentHub } from "../src/ui/agent-hub.js";
+import type { AgentActivity } from "../src/ui/agent-widget.js";
+import { FleetList } from "../src/ui/fleet-list.js";
 
 /** Capturing terminal stub — just enough surface for TuiBase. */
 class FakeTerminal {
