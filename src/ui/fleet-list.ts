@@ -255,6 +255,16 @@ export class FleetList {
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {
         this.tui = tui;
+        // Bridge renderer-version drift: the hub hold-down clears this bar
+        // while the hub overlay masks the layout shrink, so the overlay-close
+        // render is what reclaims the bar's row band. Older TuiMainScreens do
+        // not erase rows a shrunken frame vacated, leaving stale pixels below
+        // the editor — the "bottom doesn't go back to the actual bottom"
+        // report. clear-on-shrink is the renderer's own fix for exactly that
+        // (full redraw whenever the frame shrinks), pi carries the flag
+        // across TUI-mode switches, and it is duck-typed so hosts without it
+        // just keep their current behavior.
+        if (typeof tui.setClearOnShrink === "function") tui.setClearOnShrink(true);
         return {
           render: (w: number) => this.renderBar(w, theme),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },
