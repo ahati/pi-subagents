@@ -877,10 +877,29 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
+  // Resolve model: explicit option > config.model > the session's configured
+  // default > parent model. One tier sits between config.model and the parent:
+  // the subagent session's OWN pi settings (defaultProvider/defaultModel). pi
+  // would apply them itself via findInitialModel — but only when the caller
+  // passes no model, and the parent-inheritance fallback below always does, so
+  // the configured default never got a turn and "inherit parent" silently
+  // outranked it. Consulted only when no pin is in play: an agent file that
+  // pins a model owns the choice entirely, including its failure mode (an
+  // unrunnable pin falls to the parent with the model-error probe below, as it
+  // always has).
+  let model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
+  if (!options.model && !agentConfig?.model) {
+    // Optional chaining, not defensiveness: test mocks stub only `create` on
+    // this object (the same shape `getSessionDir?.()` reads below).
+    const defaultModel = settingsManager.getDefaultModel?.();
+    if (defaultModel) {
+      const provider = settingsManager.getDefaultProvider?.() ?? ctx.model?.provider ?? "";
+      const found = ctx.modelRegistry.find(provider, defaultModel);
+      if (found) model = found;
+    }
+  }
 
   // An agent-file model pin that cannot run must not fail silently. The
   // availability list is auth-gated, so a pin whose provider lost credentials —
