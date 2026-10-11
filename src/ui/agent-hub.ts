@@ -22,14 +22,14 @@
  */
 
 import * as piHost from "@earendil-works/pi-coding-agent";
-import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Input, matchesKey, type ScrollViewScrollbar, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
 import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
@@ -131,6 +131,13 @@ export interface AgentHubDeps {
    */
   pauseAgent?: (id: string) => string | undefined;
   resumeAgent?: (id: string) => boolean;
+  /** Pi's fullscreen scrollbar preference, for the embedded conversation viewer. */
+  scrollbarMode?: () => ScrollViewScrollbar;
+  /**
+   * The viewer's `b` for a row's run, supplied by the extension: only it knows
+   * which runs have a tool call waiting to be released. Omitted → no `b`.
+   */
+  backgroundAction?: (record: AgentRecord, notify: (message: string) => void) => ViewerBackgroundAction;
 }
 
 // ---- Roster (module-level so the reopen loop can peek without an instance) ----
@@ -264,6 +271,8 @@ export class AgentHub implements Component {
   private stopArmed = false;
   /** Chat view state — one viewer instance per opened agent. */
   private chatViewer: ConversationViewer | undefined;
+  /** The embedded conversation viewer while the hub is on its chat view. */
+  get chatView(): ConversationViewer | undefined { return this.chatViewer; }
   private chatRecordId: string | undefined;
   /**
    * Whether the embedded viewer renders frameless — true in the two-pane
@@ -592,6 +601,8 @@ export class AgentHub implements Component {
       this.deps.showCost,
       this.deps.viewerMarkdown,
       this.deps.onViewerMarkdown,
+      this.deps.scrollbarMode?.() ?? "auto",
+      this.deps.backgroundAction?.(record, message => this.deps.notify?.(message, "info")),
       {
         // Viewport tracks the mode live: popup caps at the windowed height,
         // full-screen uses the whole terminal.

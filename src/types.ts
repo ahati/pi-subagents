@@ -153,6 +153,9 @@ export type MentionResolution =
   | { kind: "live"; record: AgentRecord }
   | { kind: "tombstone"; entry: AgentTombstone };
 
+/** Which concurrency pool a run is charged to. */
+export type Pool = "background" | "foreground";
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
@@ -186,8 +189,22 @@ export interface AgentRecord {
    * which says only that the agent has an inline result surface: a detached
    * cross-extension RPC spawn is foreground by that measure and yet blocks
    * nobody, so it takes no slot.
+   *
+   * Cleared when the inline caller stops waiting: by `sendToBackground`, or
+   * when the run settles.
    */
   blocking?: boolean;
+  /**
+   * The concurrency pool this run's slot is charged to, set once when it
+   * starts. `settleRun` releases exactly this; `sendToBackground` is the only
+   * thing that moves it, together with the counters.
+   */
+  chargedPool?: Pool;
+  /**
+   * Removes the listener that stops this run when its caller's signal aborts.
+   * At most one is armed at a time — queueing arms one, starting replaces it.
+   */
+  detachParentAbort?: () => void;
   /**
    * Present only while the record is "queued": resolves when it leaves the
    * queue, started or aborted. `spawnAndWait` waits on this because a queued
@@ -228,8 +245,9 @@ export interface AgentRecord {
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**
-   * Whether this agent was spawned to run in the background. Tri-state, set at
-   * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
+   * Whether this agent runs in the background. Tri-state, initialized at spawn
+   * from `SpawnOptions.isBackground` and flipped `false` → `true` (once, never
+   * back) by `sendToBackground`: `true` = background, `false` =
    * foreground (has an inline Agent tool-result surface), `undefined` = the
    * caller never declared it (e.g. a cross-extension RPC spawn, which is detached
    * and has no inline surface). The widget's background-only filter keys off this

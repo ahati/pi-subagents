@@ -1,9 +1,10 @@
-import { Editor, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, type OverlayOptions, type TuiMode, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord, ViewerMarkdownMode } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-widget.js";
+import type { ViewerBackgroundAction } from "../src/ui/conversation-viewer.js";
 import {
   FleetList,
   type FleetUICtx,
@@ -83,8 +84,12 @@ interface Harness {
   openedWorkflows: () => string[];
   /** Settle the workflow dialog the list last opened; flushes the close microtask. */
   closeWorkflowDialog: () => Promise<void>;
+  /** Notices the fleet pushed through `ui.notify`, as `level: message`. */
+  notices: () => string[];
   /** The overlay component (a real ConversationViewer) once one is opened. */
   overlayComponent: () => { handleInput(data: string): void } | undefined;
+  /** Overlay options resolved after the custom factory runs. */
+  overlayOptions: () => OverlayOptions | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -118,10 +123,13 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
 function harness(
   agents: AgentRecord[],
   opts: {
+    tuiMode?: TuiMode;
     viewerMarkdown?: () => ViewerMarkdownMode;
     onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
+    backgroundAction?: (record: AgentRecord, notify: (message: string) => void) => ViewerBackgroundAction;
   } = {},
 ): Harness {
+  const notices: string[] = [];
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
@@ -129,14 +137,15 @@ function harness(
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
   let overlayComponent: { handleInput(data: string): void } | undefined;
-  const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  let overlayOptions: OverlayOptions | undefined;
+  const fakeTui = { mode: opts.tuiMode ?? "regular", handleMouse: () => undefined, requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
-    notify: () => {},
-    custom: ((factory: any) => {
+    notify: (message, level) => { notices.push(`${level}: ${message}`); },
+    custom: ((factory: any, options?: { overlayOptions?: OverlayOptions | (() => OverlayOptions) }) => {
       opened = true;
       return new Promise<undefined>((resolve) => {
         const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
@@ -144,12 +153,13 @@ function harness(
         // Construct the overlay component so the controller wires viewerClose,
         // and keep it so tests can drive the real ConversationViewer's input.
         overlayComponent = factory(fakeTui, theme, undefined, done);
+        overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
       });
     }) as FleetUICtx["custom"],
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown);
+  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown, undefined, opts.backgroundAction);
   fleet.setUICtx(ui);
   let workflows: FleetWorkflow[] = [];
   const openedWorkflows: string[] = [];
@@ -169,7 +179,9 @@ function harness(
     closeWorkflowDialog: async () => { closeWorkflowDialog?.(); await Promise.resolve(); },
     ui,
     manager,
+    notices: () => notices,
     overlayComponent: () => overlayComponent,
+    overlayOptions: () => overlayOptions,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
@@ -751,6 +763,24 @@ describe("FleetList rendering", () => {
 });
 
 describe("FleetList overlay lifecycle", () => {
+  it("opens the agent hub from Enter, with the hub's popup geometry in either TUI mode", async () => {
+    for (const mode of ["regular", "fullscreen"] as const) {
+      const h = harness([makeRecord()], { tuiMode: mode });
+      try {
+        h.press(DOWN); // activate (main)
+        h.press(DOWN); // select the agent
+        h.press(ENTER);
+
+        // The fork's entry points open the two-pane hub, not a bare viewer;
+        // with an initial agent it starts windowed regardless of pi's mode.
+        expect(h.overlayOptions()).toEqual({ anchor: "center", width: "90%", maxHeight: "70%" });
+      } finally {
+        await h.closeOverlay();
+        h.fleet.dispose();
+      }
+    }
+  });
+
   it("Enter on 'main' just deactivates (no overlay)", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // active, index 0 (main)
@@ -781,6 +811,33 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");
+  });
+
+  it("wires the viewer's b to the extension's action for that row, notifying through the session UI", () => {
+    const agents = [makeRecord({ id: "live", description: "the one" })];
+    const backgroundAction = vi.fn((record: AgentRecord, notify: (message: string) => void) => ({
+      available: () => true,
+      send: () => notify(`sent ${record.id}`),
+    }));
+    const h = harness(agents, { backgroundAction });
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // → the agent
+    h.press(ENTER); // open the conversation viewer
+
+    expect(backgroundAction).toHaveBeenCalledWith(agents[0], expect.any(Function));
+    h.overlayComponent()!.handleInput("b");
+    expect(h.notices()).toEqual(["info: sent live"]);
+  });
+
+  it("offers no b when the extension supplies no action", () => {
+    const agents = [makeRecord({ id: "live", description: "the one" })];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+
+    expect(() => h.overlayComponent()!.handleInput("b")).not.toThrow();
+    expect(h.notices()).toEqual([]);
   });
 
   it("wires the viewer's steer composer to manager.steer with the agent id", () => {

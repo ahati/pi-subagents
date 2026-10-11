@@ -133,6 +133,10 @@ export interface RunPrintModeOptions {
   timeoutMs?: number;
   /** Abort the parent (and forwarded children) externally. */
   signal?: AbortSignal;
+  /** Additional extension paths loaded only for this test run. */
+  extensionPaths?: string[];
+  /** Called once after the real parent session is created and extensions are bound. */
+  onParentSession?: (session: AgentSession, manager: ManagerHandle | undefined) => void;
   /**
    * Parent session manager. Defaults to an in-memory one. Pass
    * `SessionManager.create(cwd, dir)` for a real session file, or
@@ -348,7 +352,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
-    additionalExtensionPaths: [EXTENSION_PATH],
+    additionalExtensionPaths: [EXTENSION_PATH, ...(options.extensionPaths ?? [])],
     systemPromptOverride: () => options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
     appendSystemPromptOverride: () => [],
     noPromptTemplates: true,
@@ -386,6 +390,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const manager = (globalThis as Record<symbol, unknown>)[MANAGER_KEY] as
     | ManagerHandle
     | undefined;
+  options.onParentSession?.(session, manager);
 
   // --- subagent hold condition (the pi-chonky-step monkey-patch) ---
   // Block the parent agent loop while background subagents are still running, so

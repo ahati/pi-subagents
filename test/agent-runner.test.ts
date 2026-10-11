@@ -289,6 +289,26 @@ describe("agent-runner final output capture", () => {
     expect(createAgentSession.mock.calls[0][0].settingsManager).toBe(settingsManager);
   });
 
+  it("a cross-directory spawn keeps the parent project's settings but reports its cwd untrusted", async () => {
+    const { session } = createSession("CROSS");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/target", configCwd: "/project" });
+
+    // Both managers read the parent project's settings with the parent's trust…
+    expect(settingsManagerCreate).toHaveBeenCalledTimes(2);
+    for (const call of settingsManagerCreate.mock.calls) {
+      expect(call).toEqual(["/project", "/mock/agent-dir", { projectTrusted: true }]);
+    }
+    // …the loader's still loads the parent project's extensions, while the
+    // session's tells extensions (pi's MCP reading `<cwd>/.pi/mcp.json`) that
+    // its cwd is not a trusted project.
+    const loaderManager = lastLoaderOpts().settingsManager;
+    const sessionManager = createAgentSession.mock.calls[0][0].settingsManager;
+    expect(sessionManager).not.toBe(loaderManager);
+    expect(sessionManager.isProjectTrusted()).toBe(false);
+  });
+
   it("forwards worktreeBase to the prompt builder, and omits it otherwise", async () => {
     const { buildAgentPrompt } = await import("../src/prompts.js");
     const { session } = createSession("ISOLATED");
@@ -1624,6 +1644,29 @@ describe("agent-runner async extension tool registration", () => {
     expect(session.getActiveToolNames()).toContain("mcp_search");
   });
 
+  it("a deferred tool stays inactive until activated, then survives turn_end", async () => {
+    setup();
+    withExtensions({ "/ext/mcp.ts": ["mcp__srv__lookup"] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    // pi's MCP registers server tools with non-declared exposure by default.
+    const registry = session.getAllTools.getMockImplementation();
+    session.getAllTools.mockImplementation(() =>
+      (registry?.() ?? []).map((t: { name: string }) =>
+        t.name === "mcp__srv__lookup" ? { ...t, exposure: "deferred" } : t,
+      ),
+    );
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(session.getActiveToolNames()).not.toContain("mcp__srv__lookup");
+
+    // tool_search loads it mid-run; the next renarrow must not take it back.
+    session.setActiveToolsByName([...session.getActiveToolNames(), "mcp__srv__lookup"]);
+    for (const l of listeners) l({ type: "turn_end" });
+
+    expect(session.getActiveToolNames()).toContain("mcp__srv__lookup");
+  });
+
   it("ext: admits a late tool from the selected extension but not from others", async () => {
     setup({ extSelectors: ["ext:foo"] });
     withExtensions({ "/ext/foo.ts": [], "/ext/bar.ts": [] });
@@ -1798,7 +1841,15 @@ describe("pi built-in extensions in the child loader", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(lastLoaderOpts().extensionFactories).toEqual([
+    // The nested-call scope gate rides along as a fourth factory whenever
+    // extensions load; the three built-ins are what this pins.
+    const factories = (lastLoaderOpts().extensionFactories as Array<{
+      name: string;
+      factory: unknown;
+      replaceable?: boolean;
+      builtin?: boolean;
+    }>).filter((f) => f.name !== "pi-subagents-scope");
+    expect(factories).toEqual([
       { name: "codemode", factory: "codemode-factory", replaceable: true, builtin: true },
       { name: "tool-search", factory: "tool-search-factory", replaceable: true, builtin: true },
       { name: "mcp", factory: "mcp-factory", replaceable: true, builtin: true },
@@ -1973,6 +2024,26 @@ describe("agent-runner extension allowlist", () => {
     expect(tools).toContain("mcp");
     expect(tools).toContain("mcp_call");
     expect(tools).not.toContain("other_tool");
+  });
+
+  it("['builtin:mcp'] keeps pi's built-in MCP and drops the other built-ins", async () => {
+    setupArrayAgent(["builtin:mcp"]);
+    withExtensions({
+      "builtin:mcp": ["mcp_builtin_tool"],
+      "builtin:codemode": ["codemode"],
+      "/ext/mcp.ts": ["mcp_ext_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("mcp_builtin_tool");
+    expect(tools).not.toContain("codemode");
+    expect(tools).not.toContain("mcp_ext_tool");
+    expect(onToolActivity.mock.calls.map((c) => c[0]?.toolName).filter((n) => n?.startsWith("extension-error:"))).toEqual([]);
   });
 
   it("matches a package-installed extension by its package short name, not just its src dir (#143)", async () => {
@@ -2155,6 +2226,24 @@ describe("agent-runner exclude_extensions", () => {
     const tools = lastToolsPassed();
     expect(tools).not.toContain("notify_send");
     expect(tools).toContain("mcp_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([]);
+  });
+
+  it("extensions: true + exclude builtin:mcp — pi's built-in MCP is dropped, no typo warning", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["builtin:mcp"] });
+    withExtensions({
+      "builtin:mcp": ["mcp_builtin_tool"],
+      "builtin:codemode": ["codemode"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    const tools = lastToolsPassed();
+    expect(tools).not.toContain("mcp_builtin_tool");
+    expect(tools).toContain("codemode");
     expect(extensionErrors(onToolActivity)).toEqual([]);
   });
 
@@ -2836,6 +2925,31 @@ describe("agent-runner turn limits", () => {
 // nothing checked that the signal actually reaches the session, so a child could
 // be marked stopped while it keeps running and burning tokens.
 describe("agent-runner abort signal forwarding", () => {
+  // A signal that fired BEFORE the child was prompted. `addEventListener` never
+  // fires on an already-aborted signal, and pi's `session.abort()` is a no-op
+  // until a run is active — so the only way to honor it is not to prompt.
+  it("does not prompt when the signal fired before session creation", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const controller = new AbortController();
+    controller.abort();
+    const { session } = createSession("SHOULD NOT RUN");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, signal: controller.signal });
+
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("resumeAgent does not prompt when its signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { session } = createSession("SHOULD NOT RUN");
+
+    await resumeAgent(session as any, "continue", { signal: controller.signal });
+
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
   it("aborts the session when the parent signal fires mid-run", async () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
     const controller = new AbortController();

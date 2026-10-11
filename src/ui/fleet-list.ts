@@ -13,13 +13,14 @@
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { openAgentHub } from "./agent-hub.js";
 import { type AgentActivity, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
+import { type ViewerBackgroundAction } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -153,6 +154,13 @@ export class FleetList {
      * point. Omitted → `m` still cycles, viewer-locally.
      */
     private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
+    private scrollbarMode: () => ScrollViewScrollbar = () => "auto",
+    /**
+     * The viewer's `b` for this row's run, supplied by the extension: only it
+     * knows which runs have a tool call waiting to be released, and it owns the
+     * widget this list shares with. Omitted → no `b` affordance.
+     */
+    private backgroundAction?: (record: AgentRecord, notify: (message: string) => void) => ViewerBackgroundAction,
   ) {}
 
   // ---- Lifecycle ----
@@ -458,7 +466,7 @@ export class FleetList {
    * peek: unknowable focus (no tui seen yet, nothing focused) counts as the
    * editor so activation keeps working.
    */
-  private editorHasFocus(): boolean {
+  editorHasFocus(): boolean {
     const focused = (this.tui as { focusedComponent?: unknown } | undefined)?.focusedComponent;
     if (focused == null) return true;
     const c = focused as { getText?: unknown; setText?: unknown };
@@ -514,6 +522,8 @@ export class FleetList {
         notify: (message, type) => ui.notify(message, type),
         pauseAgent: id => this.lifecycleActions?.pause(id),
         resumeAgent: id => this.lifecycleActions?.resume(id) ?? false,
+        scrollbarMode: this.scrollbarMode,
+        backgroundAction: this.backgroundAction,
       },
       { agentId },
     ).finally(() => {
@@ -563,7 +573,8 @@ export class FleetList {
       return;
     }
     // Agents open in the full-screen hub, straight into the conversation —
-    // Esc comes back to the hub roster instead of closing the overlay.
+    // Esc comes back to the hub roster instead of closing the overlay. The
+    // hub's chat viewer carries this row's `b` handoff and scrollbar mode.
     this.openHub(entry.record.id);
   }
 
