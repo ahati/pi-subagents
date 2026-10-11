@@ -130,16 +130,13 @@ function errorToolResultMessage(toolCall: AgentToolCall, error: unknown): ToolRe
 }
 
 /**
- * Heal the parked turn's unanswered tool calls, then continue the session
- * bare. Never throws for executor failures; the returned counts report them.
+ * The branch's last assistant message (the turn the continuation heals) and
+ * the tool calls in it that no later `toolResult` answers. Undefined when the
+ * branch holds no assistant message at all.
  */
-export async function continueSessionBare(
-  session: BareContinueSession,
-  opts: ContinueSessionBareOptions = {},
-): Promise<ContinueSessionBareResult> {
-  const { agent, sessionManager } = session;
-  const branch = sessionManager.getBranch();
-
+function unansweredToolCalls(
+  branch: readonly unknown[],
+): { assistantMessage: AssistantMessage; calls: AgentToolCall[] } | undefined {
   let assistantIndex = -1;
   let assistantMessage: AssistantMessage | undefined;
   for (let i = branch.length - 1; i >= 0; i--) {
@@ -150,21 +147,48 @@ export async function continueSessionBare(
       break;
     }
   }
+  if (!assistantMessage) return undefined;
+
+  const answered = new Set<string>();
+  for (let i = assistantIndex + 1; i < branch.length; i++) {
+    const message = branchMessage(branch[i]);
+    if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+      answered.add(message.toolCallId);
+    }
+  }
+
+  const calls: AgentToolCall[] = [];
+  const content = Array.isArray(assistantMessage.content) ? assistantMessage.content : [];
+  for (const block of content) {
+    if (block.type !== "toolCall" || answered.has(block.id)) continue;
+    calls.push(block);
+  }
+  return { assistantMessage, calls };
+}
+
+/** Count assistant tool calls in the branch that never received a toolResult. */
+export function countUnansweredToolCalls(branch: unknown[]): number {
+  return unansweredToolCalls(branch)?.calls.length ?? 0;
+}
+
+/**
+ * Heal the parked turn's unanswered tool calls, then continue the session
+ * bare. Never throws for executor failures; the returned counts report them.
+ */
+export async function continueSessionBare(
+  session: BareContinueSession,
+  opts: ContinueSessionBareOptions = {},
+): Promise<ContinueSessionBareResult> {
+  const { agent, sessionManager } = session;
+  const pending = unansweredToolCalls(sessionManager.getBranch());
 
   let executed = 0;
   let errors = 0;
-  if (assistantMessage) {
-    const answered = new Set<string>();
-    for (let i = assistantIndex + 1; i < branch.length; i++) {
-      const message = branchMessage(branch[i]);
-      if (message?.role === "toolResult") answered.add(message.toolCallId);
-    }
-
-    for (const block of assistantMessage.content) {
-      if (block.type !== "toolCall" || answered.has(block.id)) continue;
+  if (pending) {
+    for (const block of pending.calls) {
       const options: RunToolCallOptions = {
         tools: agent.state.tools,
-        assistantMessage,
+        assistantMessage: pending.assistantMessage,
         context: { messages: agent.state.messages, tools: agent.state.tools },
         beforeToolCall: agent.beforeToolCall,
         afterToolCall: agent.afterToolCall,

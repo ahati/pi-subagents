@@ -21,7 +21,7 @@ import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, loca
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
-import { inChildSessionContext } from "./child-context.js";
+import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
@@ -35,8 +35,9 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { type PausedAgentEntry, type PausedMainTurn, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { continueSessionBare } from "./session-continue.js";
+import { continueSessionBare, countUnansweredToolCalls } from "./session-continue.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { shadowToolsFactory } from "./shadow-tools.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type AgentTombstone, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -805,6 +806,15 @@ export default function (pi: ExtensionAPI) {
       const record = manager.getRecord(id);
       return record !== undefined && isTopLevelAgent(record) ? record : undefined;
     },
+    // Internal seam, not part of the cross-package contract (docs/rpc.md):
+    // revive one parked manifest entry in THIS activation. `/continue`'s
+    // `withSession` callback belongs to the activation the session switch is
+    // tearing down, so it cannot spawn; it resolves the replacement
+    // activation off the global registry and calls here instead. Not `spawn`:
+    // that is the safety-stripped cross-package door, while this revive must
+    // carry `resumeSessionFile` and `reclaim`
+    // (docs/pause-quit-resume-continue.md §10.1.3, §10.2.3).
+    revivePausedEntry: continuePausedEntry,
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
@@ -854,6 +864,7 @@ export default function (pi: ExtensionAPI) {
     // died with the old session, and held nudges belong to it. The manifest is
     // the only park that crosses a session boundary.
     armedPause = false;
+    mainTurnSwitchInProgress = false;
     openMainTurnGate();
     heldNudges.length = 0;
     if (ctx.hasUI) {
@@ -1142,7 +1153,26 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event, shutdownCtx) => {
+    // Our own /continue-driven switch (the resumed activation takes over):
+    // skip the teardown entirely — abortAll/dispose here would kill the
+    // revived agents and clear the manager the revival is using.
+    // Optional chaining: harness afterEach hooks invoke this handler without
+    // an event; production always supplies one with a required reason.
+    if (event?.reason === "resume" && mainTurnSwitchInProgress) {
+      mainTurnSwitchInProgress = false;
+      // Release the registry slot for the replacement activation: its
+      // `session_start` runs next, and the `/continue` revival in
+      // `withSession` must resolve its fresh closures — this activation's
+      // runner is invalidated the moment the switch disposes the old session.
+      // Only the slot goes; the manager stays fully usable (teardown is what
+      // this branch is skipping), because disposing it would kill the agents
+      // the revival is about to continue.
+      if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
+        delete (globalThis as any)[MANAGER_KEY];
+      }
+      return;
+    }
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1159,6 +1189,25 @@ export default function (pi: ExtensionAPI) {
     // as well as its children, and only its own signal terminates that.
     for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
+    // Quit while /pause is still armed (the main model never reached its
+    // boundary): land the park best-effort so the manifest carries the parked
+    // subagents and the interrupted main turn (docs §10.1.4) — BEFORE abortAll,
+    // which would otherwise lose all of it.
+    if (armedPause) {
+      armedPause = false;
+      try {
+        await landPark(shutdownCtx);
+        // The window that landed the park is going away: release the claim, or
+        // a resumed session's /continue is refused as "another window holds the
+        // claim" — pid liveness cannot tell a quit from a live holder when the
+        // same process resumes, and pid reuse makes it a lie across restarts.
+        const store = pauseStoreFor(shutdownCtx);
+        const parked = store.getMainTurn();
+        if (parked) store.setMainTurn({ ...parked, claim: { pid: -1, at: new Date().toISOString() } });
+      } catch {
+        // Best-effort: a failed landing must not block shutdown.
+      }
+    }
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -2985,6 +3034,13 @@ Terse command-style prompts produce shallow, generic work.
 
   /** `/pause` typed while the main model streams; the park lands at the next boundary. */
   let armedPause = false;
+  /**
+   * True while OUR OWN /continue-driven switchSession is in flight: the
+   * replacement activation must take over without the shutdown handler
+   * aborting/disposing the manager the withSession revival needs
+   * (docs/pause-quit-resume-continue.md §10.1.3).
+   */
+  let mainTurnSwitchInProgress = false;
   /** The park landed in this session: the main run is suspended behind `mainGate`. */
   let parkedMain = false;
   /** The suspended main run waits on this; `/continue` opens it, the run signal races it. */
@@ -3010,6 +3066,8 @@ Terse command-style prompts produce shallow, generic work.
   /** True when the pid that claimed the parked turn is still running. */
   function claimLive(claim: { pid: number } | undefined): boolean {
     if (!claim) return false;
+    // A released claim is written as pid -1: not a live holder.
+    if (claim.pid <= 0) return false;
     if (claim.pid === process.pid) return true;
     try {
       process.kill(claim.pid, 0);
@@ -3054,7 +3112,14 @@ Terse command-style prompts produce shallow, generic work.
    * — the transcript itself carries the pending calls — and announce it. The
    * main run is NOT aborted here; the boundary it is suspended at holds it.
    */
-  async function landPark(ctx: ExtensionContext, pendingTools: number): Promise<void> {
+  async function landPark(ctx: ExtensionContext, boundaryCount = 0): Promise<void> {
+    // The gate suspends at the assistant message's unanswered tool calls; the
+    // transcript tail carries them (the previous count captured only the call
+    // the gate stopped at — docs §10.2.5). A host with no transcript view (a
+    // read-only context, the shutdown landing) falls back to the boundary's own
+    // count.
+    const branch = ctx.sessionManager?.getBranch?.() ?? [];
+    const pendingTools = branch.length > 0 ? countUnansweredToolCalls(branch) : boundaryCount;
     armedPause = false;
     parkedMain = true;
     let paused = 0;
@@ -3353,7 +3418,13 @@ Terse command-style prompts produce shallow, generic work.
       return false;
     }
     try {
-      const sessionManager = SessionManager.open(sessionFile);
+      // The current session is normally the parked one itself (pi /resume
+      // opened it): continue it in place, so the healed branch is the live
+      // session's own branch. Reopening the file would heal a second writer's
+      // copy that the adopted session never sees. A read-only host view (or a
+      // different session) still gets the file reopened.
+      const current = ctx.sessionManager;
+      const sessionManager = current instanceof SessionManager ? current : SessionManager.open(sessionFile);
       const cwd = sessionManager.getCwd();
       const agentDir = getAgentDir();
       const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: ctx.isProjectTrusted?.() ?? true });
@@ -3370,8 +3441,16 @@ Terse command-style prompts produce shallow, generic work.
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
+        // Factories load even under noExtensions: the shadow session gets a
+        // working `get_subagent_result` (resolving through the live manager
+        // registry) without activating the whole extension a second time
+        // (docs §10.1.1, §10.2.1).
+        extensionFactories: [shadowToolsFactory],
       });
-      await loader.reload();
+      // Inside a child-session context a second full activation is a no-op;
+      // the guard keeps any accidental discovery from writing process-global
+      // state (docs §10.2.1).
+      await runInChildSessionContext(() => loader.reload());
       const { session } = await createAgentSession({
         sessionManager,
         cwd,
@@ -3388,19 +3467,75 @@ Terse command-style prompts produce shallow, generic work.
         ctx.ui.notify("Continuing the parked main turn — pi reloads the session when it finishes.", "info");
       }
       const failed: PausedAgentEntry[] = [];
-      await ctx.switchSession(sessionFile, {
-        withSession: async fresh => {
-          // The host always supplies the replacement context; fall back to the
-          // current one when a host (or test double) invokes the callback bare.
-          const runCtx = fresh ?? ctx;
-          for (const entry of entries) {
-            const outcome = await continuePausedEntry(runCtx, entry);
-            if (outcome !== "resumed") failed.push(entry);
-          }
-          store.setMainTurn(undefined);
-          store.replace(failed);
-        },
-      });
+      // A host without a session-switch handler calls `withSession` never and
+      // resolves as if it had: without this flag the claim would be stranded
+      // and the entry fallback suppressed (docs §10.1.2, §10.2.2).
+      let adopted = false;
+      mainTurnSwitchInProgress = true;
+      try {
+        await ctx.switchSession(sessionFile, {
+          withSession: async fresh => {
+            adopted = true;
+            // The host always supplies the replacement context; fall back to the
+            // current one when a host (or test double) invokes the callback bare.
+            const runCtx = fresh ?? ctx;
+            const notify = (message: string, level: "info" | "warning") => {
+              // A host that invokes the callback bare leaves this activation's
+              // ctx in place; on a real switch it is stale, and a notification
+              // must never be what rejects out of `withSession`.
+              try {
+                runCtx.ui.notify(message, level);
+              } catch {
+                /* stale ctx after replacement — the toast is best-effort */
+              }
+            };
+            // A real switch leaves the replacement activation's entry in the
+            // registry: its `session_start` ran before this callback, and the
+            // shutdown guard above released the slot so it could publish.
+            // Revive through that — the switch invalidated this activation's
+            // own closures, so spawning from them would run in a manager whose
+            // `pi` and ctx are gone (docs §10.1.3, §10.2.3). A host that never
+            // replaced the activation (a bare callback, an event-replay
+            // harness, a switch double) has no fresh entry, and there this
+            // activation is still live — the local path is correct.
+            const freshRegistry = (globalThis as any)[MANAGER_KEY] as typeof registryEntry | undefined;
+            const revive = freshRegistry?.revivePausedEntry ?? (fresh ? undefined : continuePausedEntry);
+            if (!revive) {
+              // A real switch with no registry: pi-subagents is not active in
+              // the resumed session. Keep every entry parked for a later
+              // /continue rather than spawn into a manager that is gone.
+              notify("Could not revive the parked agents — pi-subagents is not active in the resumed session.", "warning");
+              for (const entry of entries) failed.push(entry);
+            } else {
+              for (const entry of entries) {
+                let outcome: "resumed" | "stale" | "failed" = "failed";
+                try {
+                  outcome = await revive(runCtx, entry);
+                } catch (err) {
+                  // A revive must not reject out of `withSession`: the switch
+                  // is already committed, and an escaped rejection would fail
+                  // an adoption that actually succeeded.
+                  notify(`Could not revive a parked agent: ${err instanceof Error ? err.message : String(err)}`, "warning");
+                }
+                if (outcome !== "resumed") failed.push(entry);
+              }
+            }
+            store.setMainTurn(undefined);
+            store.replace(failed);
+          },
+        });
+      } finally {
+        mainTurnSwitchInProgress = false;
+      }
+      if (!adopted) {
+        // Nothing was adopted: release the claim so a retry is not refused as
+        // "another window" holds it, and let the caller run the entry-only
+        // fallback.
+        const mainTurnRef = store.getMainTurn();
+        if (mainTurnRef) store.setMainTurn({ ...mainTurnRef, claim: { pid: -1, at: new Date().toISOString() } });
+        ctx.ui.notify("The parked main turn could not be adopted in this host — continuing the subagents only.", "warning");
+        return false;
+      }
       return true;
     } catch (err) {
       ctx.ui.notify(
