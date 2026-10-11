@@ -20,6 +20,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
@@ -869,8 +870,15 @@ export class AgentManager {
     // The project switch is enforced here as well as at the tool boundary
     // because cross-extension RPC forwards its options unvalidated — a schema
     // that omits the field can't stop a caller that never saw the schema.
+    // The agent file's `isolation:` is resolved here too, not by each caller:
+    // mentions pass none, and RPC forwards only its caller's value. Workflow
+    // children are the exception, as in Claude Code, whose workflow agent()
+    // reads only the script's option and ignores the definition's.
+    const isolation = options.workflowId !== undefined
+      ? options.isolation
+      : getAgentConfig(type)?.isolation ?? options.isolation;
     let worktreeCwd: string | undefined;
-    if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
+    if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
       if (!wt) {
         releaseSlot();
@@ -888,6 +896,10 @@ export class AgentManager {
       // subdirectory, silently dropping extensions/skills.
       worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
       this.worktreeRepos.add(baseCwd);
+      // The widget's "worktree" tag reads this; only callers that resolve the
+      // agent file themselves seed it.
+      record.invocation ??= {};
+      record.invocation.isolation = "worktree";
 
       // No longer "running" means a stop landed while the copy was being made
       // (abort(), abortAll()) — a window that did not exist when creation was
