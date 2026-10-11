@@ -28,6 +28,7 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { type BareToolExecutor, continueSessionBare } from "./session-continue.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -651,9 +652,14 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
-  prompt: string,
+  prompt: string | undefined,
   options: RunOptions,
 ): Promise<RunResult> {
+  // A fresh conversation needs a prompt; only a revive (reopening a session
+  // file) may start bare — it heals the transcript and continues it.
+  if (prompt === undefined && options.resumeSessionFile === undefined) {
+    throw new Error("runAgent requires a prompt unless resumeSessionFile is set");
+  }
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
 
@@ -1182,31 +1188,38 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context
-  let effectivePrompt = prompt;
-  if (options.inheritContext) {
-    const parentContext = buildParentContext(ctx);
-    if (parentContext) {
-      effectivePrompt = parentContext + prompt;
-    }
-  }
-
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
   let structuredRetried = false;
   try {
-    await session.prompt(effectivePrompt);
+    if (prompt === undefined) {
+      // Reviving a conversation with no new prompt: heal any unanswered tool
+      // calls and continue the transcript bare — no synthetic prompt of any
+      // kind (docs/pause-quit-resume-continue.md §3.5).
+      await continueSessionBare(session, { signal: options.signal });
+    } else {
+      // Build the effective prompt: optionally prepend parent context
+      let effectivePrompt = prompt;
+      if (options.inheritContext) {
+        const parentContext = buildParentContext(ctx);
+        if (parentContext) {
+          effectivePrompt = parentContext + prompt;
+        }
+      }
 
-    // One more prompt when a schema was asked for and nothing usable came back
-    // — the model answered in prose, or only ever called the tool invalidly.
-    // Inside this `try`, so the turn tracking, the text collector and above all
-    // the abort forwarding are still live: torn down first, a retry would be
-    // unkillable.
-    if (structuredCapture !== undefined && structuredCapture.json === undefined
-      && !aborted && options.signal?.aborted !== true) {
-      structuredRetried = true;
-      await session.prompt(structuredRetryPrompt(structuredCapture));
+      await session.prompt(effectivePrompt);
+
+      // One more prompt when a schema was asked for and nothing usable came back
+      // — the model answered in prose, or only ever called the tool invalidly.
+      // Inside this `try`, so the turn tracking, the text collector and above all
+      // the abort forwarding are still live: torn down first, a retry would be
+      // unkillable.
+      if (structuredCapture !== undefined && structuredCapture.json === undefined
+        && !aborted && options.signal?.aborted !== true) {
+        structuredRetried = true;
+        await session.prompt(structuredRetryPrompt(structuredCapture));
+      }
     }
   } finally {
     unsubTurns();
@@ -1235,21 +1248,42 @@ export async function runAgent(
 }
 
 /**
- * Send a new prompt to an existing session (resume).
+ * Options for {@link resumeAgent}. The event callbacks are the same per-run
+ * wiring the spawn path uses; `execute` is a `continueSessionBare` passthrough.
+ */
+export interface ResumeAgentOptions {
+  onToolActivity?: (activity: ToolActivity) => void;
+  onAssistantUsage?: (usage: LifetimeUsage) => void;
+  onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  signal?: AbortSignal;
+  /** Override tool execution for the bare continuation (healing/seam injection). */
+  execute?: BareToolExecutor;
+}
+
+/**
+ * Continue an existing session.
+ *
+ * With no prompt the resume is BARE: the transcript as it stands is healed and
+ * continued through `continueSessionBare` — pending tool calls execute, the
+ * results persist, and the next model request sees no new message of any kind
+ * (docs/pause-quit-resume-continue.md §3.5). A string in the second position is
+ * a caller-supplied prompt — the user's own typed text from an `@handle <text>`
+ * mention, never a library-generated continuation — and keeps the historical
+ * prompt-bearing resume.
  */
 export async function resumeAgent(
   session: AgentSession,
-  prompt: string,
-  options: {
-    onToolActivity?: (activity: ToolActivity) => void;
-    onAssistantUsage?: (usage: LifetimeUsage) => void;
-    onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
-    signal?: AbortSignal;
-  } = {},
+  promptOrOptions?: string | ResumeAgentOptions,
+  optionsArg?: ResumeAgentOptions,
 ): Promise<{ text: string; failure?: string }> {
+  const prompt = typeof promptOrOptions === "string" ? promptOrOptions : undefined;
+  const options: ResumeAgentOptions = typeof promptOrOptions === "string"
+    ? (optionsArg ?? {})
+    : (promptOrOptions ?? optionsArg ?? {});
+
   // Boundary for the history fallback: the session already holds prior turns,
-  // so only assistant text produced by THIS resume prompt counts as its output
-  // — a failed resume must not surface the previous turn's answer (#144).
+  // so only assistant text produced by THIS resume counts as its output — a
+  // failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
@@ -1274,8 +1308,20 @@ export async function resumeAgent(
       })
     : () => {};
 
+  let failure: string | undefined;
   try {
-    await session.prompt(prompt);
+    if (prompt !== undefined) {
+      await session.prompt(prompt);
+    } else {
+      try {
+        await continueSessionBare(session, { execute: options.execute, signal: options.signal });
+      } catch (err) {
+        // A continuation that could not even start (provider error, dead
+        // session) is reported as the failed turn, like the spawn path's
+        // `failure` — never thrown past the manager's status mapping.
+        failure = err instanceof Error ? err.message : String(err);
+      }
+    }
   } finally {
     collector.unsubscribe();
     unsubEvents();
@@ -1284,7 +1330,7 @@ export async function resumeAgent(
 
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
-    failure: finalTurnError(session, startLen),
+    failure: finalTurnError(session, startLen) ?? failure,
   };
 }
 

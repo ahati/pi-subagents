@@ -183,19 +183,23 @@ describe("/pause", () => {
     expect(manifest().list()).toEqual([]);
   });
 
-  it("refuses while the main model is streaming", async () => {
+  it("arms while the main model is streaming instead of refusing", async () => {
     const b = boot();
     const id = await spawnRunning(b, resumableSession);
 
     const { cmdCtx } = runCommand(b, "pause", "", { isIdle: () => false });
     await flush();
 
+    // The park lands at the main turn's next boundary, which never arrives in
+    // this test — so nothing is parked yet: the subagent keeps running and the
+    // manifest stays untouched.
     expect(manager().getRecord(id).status).toBe("running");
-    expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
-      "Main model is streaming — press Esc (or let the turn finish) before /pause.",
-      "warning",
-    );
     expect(manifest().list()).toEqual([]);
+    // A pause that only arms acknowledges, it does not refuse.
+    const notifies = vi.mocked(cmdCtx.ui.notify).mock.calls.map(c => String(c[0]));
+    expect(notifies.length).toBeGreaterThan(0);
+    expect(notifies.some(t => t.includes("press Esc") || t.includes("before /pause"))).toBe(false);
+    expect(vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:paused")).toEqual([]);
   });
 
   it("reports when there is nothing active", async () => {
@@ -283,19 +287,18 @@ describe("/continue", () => {
   it("resumes live paused records in place and clears the manifest", async () => {
     const b = boot();
     const id = await spawnRunning(b, resumableSession);
-    const session = manager().getRecord(id).session;
     await runCommand(b, "pause").result;
     await flush();
     expect(manifest().list()).toHaveLength(1);
 
-    controllableResume(resumableSession); // held — stays running
     const { cmdCtx } = runCommand(b, "continue");
     await flush();
 
-    expect(vi.mocked(resumeAgent)).toHaveBeenCalledWith(
-      session,
+    // The record's run is alive behind its gate: resume reopens the gate and the
+    // original run continues — no resumeAgent, and no prompt of any kind.
+    expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(b.pi.sendMessage).mock.calls)).not.toContain(
       "Continue from where you left off.",
-      expect.anything(),
     );
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
@@ -507,21 +510,46 @@ describe("/continue", () => {
     const b = boot();
     // Bind currentCtx: the settle hook (not the commands) owns this removal.
     await b.lifecycle.get("session_start")({ type: "session_start", reason: "startup" }, ctx());
-    const id = await spawnRunning(b, resumableSession);
+    // Gate resume continues the ORIGINAL held run, so settling that run is what
+    // settles the record — capture its resolve instead of mocking resumeAgent.
+    let settleRun: (result?: unknown) => void = () => {};
+    vi.mocked(runAgent).mockImplementation(
+      (_ctx: any, _type: any, _prompt: any, opts: any) =>
+        new Promise(resolve => {
+          settleRun = () =>
+            resolve({
+              responseText: "resumed answer",
+              session: resumableSession(),
+              aborted: false,
+              steered: false,
+              failure: undefined,
+            });
+          opts.onSessionCreated?.(resumableSession());
+        }) as any,
+    );
+    const spawned = await b.tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "find flaky tests", subagent_type: "Explore", run_in_background: true },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    await flush();
+    const id = /Agent ID: (\S+)/.exec(textOf(spawned))![1];
+
     await runCommand(b, "pause").result;
     await flush();
     expect(manifest().list()).toHaveLength(1);
 
     // /agents resume does NOT touch the manifest (the settle hook owns it),
     // so the entry is still there while the resumed run is live...
-    const settleResume = controllableResume(resumableSession);
     await b.commands.get("agents").handler("resume @explore", idleCtx());
     await flush();
     expect(manager().getRecord(id).status).toBe("running");
     expect(manifest().list()).toHaveLength(1);
 
     // ...and is gone once the run reaches a terminal state.
-    settleResume();
+    settleRun();
     await flush();
     await flush();
     expect(manager().getRecord(id).status).toBe("completed");

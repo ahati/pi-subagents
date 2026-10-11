@@ -37,6 +37,11 @@ async function waitFor(what: () => boolean, ms = 10_000): Promise<void> {
   }
 }
 
+/** How many messages of `role` a session JSONL holds — the transcript's own count. */
+function countMessages(text: string, role: string): number {
+  return (text.match(new RegExp(`"role":"${role}"`, "g")) ?? []).length;
+}
+
 describe("/pause → quit → reload → /continue (real pi sessions, faux model)", () => {
   let cwd: string;
   let sessionDir: string;
@@ -106,6 +111,10 @@ describe("/pause → quit → reload → /continue (real pi sessions, faux model
       // Quit must not have scrubbed the manifest — the cross-restart premise.
       expect(new PauseStore(manifestPath).list()).toHaveLength(1);
 
+      // The child transcript as it stands before the continuation: the resumed
+      // turn must add output only — never a user message of its own.
+      const childTranscriptBefore = readFileSync(childSessionFile, "utf-8");
+
       // --- run 2: fresh boot, resumed session, /continue --------------------
       const run2 = await runPrintMode({
         live: false,
@@ -123,13 +132,17 @@ describe("/pause → quit → reload → /continue (real pi sessions, faux model
         // /continue clears the manifest: the parked entry is now a live run.
         await waitFor(() => new PauseStore(manifestPath).list().length === 0);
 
-        // The child's REAL session file was reopened and continued: the
-        // synthetic continuation prompt and the new exchange are on disk
-        // alongside the first run's conversation.
+        // The child's REAL session file was reopened and continued bare: the
+        // new exchange lands on disk with no synthetic continuation prompt.
         await waitFor(() => readFileSync(childSessionFile, "utf-8").includes("continued work"));
         const childTranscript = readFileSync(childSessionFile, "utf-8");
         expect(childTranscript).toContain("long child task");
-        expect(childTranscript).toContain("Continue from where you left off.");
+        expect(childTranscript).not.toContain("Continue from where you left off.");
+        // The transcript grew by the continuation's output only: no new user
+        // message was written by the resume.
+        expect(countMessages(childTranscript, "user")).toBe(countMessages(childTranscriptBefore, "user"));
+        expect(countMessages(childTranscript, "assistant"))
+          .toBeGreaterThan(countMessages(childTranscriptBefore, "assistant"));
         expect(childTranscript).toContain("continued work");
 
         // The completion nudge reached the resumed parent and was processed

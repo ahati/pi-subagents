@@ -1,79 +1,219 @@
 /**
- * pause-store.test.ts — Persistence for the cross-restart pause manifest.
+ * pause-store.test.ts — manifest v2: the paused-agent rows PLUS the parked
+ * main-turn record (`mainTurn`), and the cwd-independent manifest lookup.
  *
- * Mirrors schedule-store.test.ts: path shape, round-trip, clear, and
- * parse-error self-heal. No lock to test — writes are whole-file atomic
- * snapshots (see pause-store.ts header for why there is deliberately none).
+ * Pure fs: every test gets its own temp dir, no extension, no process.cwd
+ * games. The v2 surface does not exist yet, so the tests fail on the missing
+ * exports/behaviour, not on syntax.
+ *
+ * Pinned contract (from docs/pause-quit-resume-continue.md §5.1/§7):
+ *   - PauseStoreData { version: 2, entries, mainTurn? }
+ *   - store.getMainTurn() / store.setMainTurn(turn | undefined)
+ *   - replace(entries) never deletes a present mainTurn; replace([]) still
+ *     clears a file that has only entries.
+ *   - resolvePauseManifestPath(cwd, sessionId) — the fallback lookup helper
+ *     (adapt the name if the implementation lands on `findPauseStore`; the
+ *     test binds whichever exists, in that order).
  */
-
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type PausedAgentEntry, PauseStore, resolvePauseStorePath } from "../src/pause-store.js";
+import { afterEach, describe, expect, it } from "vitest";
+import * as pauseStoreModule from "../src/pause-store.js";
+import { type PausedAgentEntry, PauseStore } from "../src/pause-store.js";
 
-function makeEntry(overrides: Partial<PausedAgentEntry> = {}): PausedAgentEntry {
+/**
+ * Namespace access, not named imports: a missing v2 export must fail the test
+ * that needs it with a readable message instead of failing the whole file at
+ * module-load time.
+ */
+const storeModule = pauseStoreModule as any;
+
+/** A v2 main-turn row. */
+function mainTurn(overrides: Record<string, unknown> = {}) {
   return {
-    id: "agent-abc123",
-    type: "Explore",
-    handle: "explore",
-    description: "find flaky tests",
-    sessionFile: "/tmp/some-session.jsonl",
+    parked: true,
+    pendingTools: 1,
+    claim: { pid: process.pid, at: "2026-01-01T00:00:00.000Z" },
     pausedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
 }
 
-describe("PauseStore", () => {
-  let tmp: string;
+/** An entry row; `sessionFile` need not exist for store-level tests. */
+function entry(overrides: Partial<PausedAgentEntry> = {}): PausedAgentEntry {
+  return {
+    id: "agent-1",
+    type: "Explore",
+    handle: "explore",
+    description: "find flaky tests",
+    sessionFile: "/tmp/agent-session.jsonl",
+    pausedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
-  beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "pause-store-test-"));
+let dir: string | undefined;
+
+function tempDir(): string {
+  dir = mkdtempSync(join(tmpdir(), "pi-pause-store-"));
+  return dir;
+}
+
+afterEach(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+  dir = undefined;
+});
+
+/** The v2 lookup helper: preferred export first, the originally proposed
+ * `findPauseStore` name as a fallback. */
+function resolveManifestPath(cwd: string, sessionId: string): string {
+  const fn = storeModule.resolvePauseManifestPath ?? storeModule.findPauseStore;
+  expect(
+    fn,
+    "the cwd-independent manifest lookup (resolvePauseManifestPath) is not exported",
+  ).toBeTypeOf("function");
+  return fn(cwd, sessionId);
+}
+
+describe("PauseStore mainTurn (v2)", () => {
+  it("reports no main turn for a manifest that was never written", () => {
+    const file = join(tempDir(), "missing.json");
+    expect(new PauseStore(file).getMainTurn()).toBeUndefined();
   });
 
-  afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
+  it("round-trips a main turn and writes version 2", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const turn = mainTurn({ pendingTools: 3 });
+
+    store.setMainTurn(turn);
+
+    expect(store.getMainTurn()).toEqual(turn);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.version).toBe(2);
+    expect(onDisk.mainTurn).toEqual(turn);
+    expect(onDisk.entries).toEqual([]);
   });
 
-  it("resolvePauseStorePath produces session-scoped path under .pi/subagent-pauses/", () => {
-    expect(resolvePauseStorePath("/repo", "abc123")).toBe("/repo/.pi/subagent-pauses/abc123.json");
+  it("preserves the cancelled flag and the claim when set", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const turn = mainTurn({ cancelled: true, pendingTools: 0 });
+
+    store.setMainTurn(turn);
+
+    expect(store.getMainTurn()).toEqual(turn);
+    expect(store.getMainTurn()!.cancelled).toBe(true);
   });
 
-  it("starts empty, round-trips entries, and persists across instances", () => {
-    const path = join(tmp, "p.json");
-    const store = new PauseStore(path);
-    expect(store.list()).toEqual([]);
+  it("setMainTurn keeps the entry rows written by replace()", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const rows = [entry(), entry({ id: "agent-2", handle: "explore-2" })];
 
-    const entry = makeEntry();
-    store.replace([entry]);
-    expect(new PauseStore(path).list()).toEqual([entry]);
+    store.replace(rows);
+    store.setMainTurn(mainTurn());
+
+    expect(store.list()).toEqual(rows);
+    expect(store.getMainTurn()).toEqual(mainTurn());
   });
 
-  it("replace([]) deletes the backing file", () => {
-    const path = join(tmp, "p.json");
-    const store = new PauseStore(path);
-    store.replace([makeEntry()]);
-    expect(existsSync(path)).toBe(true);
+  it("replace(entries) preserves a main turn that is already on disk", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
 
+    store.setMainTurn(mainTurn({ pendingTools: 2 }));
+    store.replace([entry({ id: "agent-9" })]);
+
+    expect(store.list()).toEqual([entry({ id: "agent-9" })]);
+    expect(store.getMainTurn()).toEqual(mainTurn({ pendingTools: 2 }));
+  });
+
+  it("replace([]) keeps the file and the main turn", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.setMainTurn(mainTurn());
     store.replace([]);
-    expect(existsSync(path)).toBe(false);
+
+    expect(existsSync(file)).toBe(true);
+    expect(store.getMainTurn()).toEqual(mainTurn());
     expect(store.list()).toEqual([]);
   });
 
-  it("clear() is a no-op on a missing file", () => {
-    const store = new PauseStore(join(tmp, "never-written.json"));
-    expect(() => store.clear()).not.toThrow();
+  it("replace([]) still clears a file that has no main turn", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.replace([entry()]);
+    store.replace([]);
+
+    expect(existsSync(file)).toBe(false);
+    // Merging with the mainTurn path must not change the v1 clearing rule.
+    expect(store.getMainTurn()).toBeUndefined();
   });
 
-  it("self-heals from a corrupt file by reading empty", () => {
-    const path = join(tmp, "p.json");
-    writeFileSync(path, "{not json");
-    expect(new PauseStore(path).list()).toEqual([]);
+  it("setMainTurn(undefined) clears the main turn and removes an entry-less file", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.setMainTurn(mainTurn());
+    store.setMainTurn(undefined);
+
+    expect(store.getMainTurn()).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
   });
 
-  it("creates the backing directory lazily on first write", () => {
-    const path = join(tmp, "nested", "dirs", "p.json");
-    new PauseStore(path).replace([makeEntry()]);
-    expect(new PauseStore(path).list()).toHaveLength(1);
+  it("setMainTurn(undefined) leaves the entry rows in place", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.replace([entry()]);
+    store.setMainTurn(mainTurn());
+    store.setMainTurn(undefined);
+
+    expect(store.getMainTurn()).toBeUndefined();
+    expect(store.list()).toEqual([entry()]);
+  });
+
+  it("ignores a corrupt manifest instead of throwing", () => {
+    const file = join(tempDir(), "manifest.json");
+    writeFileSync(file, "{ not json");
+
+    const store = new PauseStore(file);
+    expect(store.list()).toEqual([]);
+    expect(store.getMainTurn()).toBeUndefined();
+  });
+});
+
+describe("resolvePauseManifestPath fallback", () => {
+  it("returns the canonical path for a session with no manifest yet", () => {
+    const dir = tempDir();
+    const resolved = resolveManifestPath(dir, "s1");
+    expect(resolved).toBe(join(dir, ".pi", "subagent-pauses", "s1.json"));
+  });
+
+  it("finds a manifest written under a different (parent) cwd", () => {
+    // What the restart flow hits: the session header recorded the workspace
+    // root as cwd, but the live ctx.cwd is a subdirectory.
+    const root = tempDir();
+    const file = join(root, ".pi", "subagent-pauses", "s1.json");
+    mkdirSync(join(root, ".pi", "subagent-pauses"), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 2, entries: [] }));
+
+    const nested = join(root, "packages", "app");
+    mkdirSync(nested, { recursive: true });
+
+    const resolved = resolveManifestPath(nested, "s1");
+    expect(resolved).toBe(file);
+    expect(existsSync(resolved)).toBe(true);
+  });
+
+  it("falls back to the canonical path when nothing is found anywhere", () => {
+    const dir = tempDir();
+    const resolved = resolveManifestPath(dir, "nope");
+    expect(typeof resolved).toBe("string");
+    expect(existsSync(resolved)).toBe(false);
   });
 });

@@ -39,14 +39,56 @@ export interface PausedAgentEntry {
   pausedAt: string;
 }
 
-export interface PauseStoreData {
-  version: 1;
-  entries: PausedAgentEntry[];
+/**
+ * The parked main-agent turn. The pending calls themselves live in the
+ * transcript; `pendingTools` is only their count.
+ */
+export interface PausedMainTurn {
+  parked: boolean;
+  pendingTools: number;
+  /** Set when a gate closure marked the pending calls (not used by the default flow). */
+  cancelled?: boolean;
+  /** Multi-window guard for the non-idempotent shadow continuation. */
+  claim: { pid: number; at: string };
+  pausedAt: string;
 }
 
-/** Resolve the storage path for a session-scoped pause manifest. */
+/** Manifest v2: the paused-agent rows plus an optional parked main turn. */
+export interface PauseStoreData {
+  version: 2;
+  entries: PausedAgentEntry[];
+  mainTurn?: PausedMainTurn;
+}
+
+/** Resolve the canonical storage path for a session-scoped pause manifest. */
 export function resolvePauseStorePath(cwd: string, sessionId: string): string {
   return join(cwd, ".pi", "subagent-pauses", `${sessionId}.json`);
+}
+
+/** How many parent directories the fallback lookup walks before giving up. */
+const MAX_PARENT_LEVELS = 6;
+
+/**
+ * Resolve the manifest for a session the way `/continue` needs it: the
+ * canonical `<cwd>/.pi/subagent-pauses/<sessionId>.json` when it is there,
+ * otherwise the same relative path under a parent directory — the restart
+ * flow hits this when the session header recorded the workspace root as cwd
+ * but the live `ctx.cwd` is a subdirectory. Falls back to the canonical path
+ * when no manifest exists anywhere (callers check existence).
+ */
+export function resolvePauseManifestPath(cwd: string, sessionId: string): string {
+  const canonical = resolvePauseStorePath(cwd, sessionId);
+  if (existsSync(canonical)) return canonical;
+
+  let dir = cwd;
+  for (let level = 0; level < MAX_PARENT_LEVELS; level++) {
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+    const candidate = resolvePauseStorePath(dir, sessionId);
+    if (existsSync(candidate)) return candidate;
+  }
+  return canonical;
 }
 
 export class PauseStore {
@@ -58,23 +100,60 @@ export class PauseStore {
 
   /** Read the manifest from disk. Silent on parse errors — next write rewrites. */
   list(): PausedAgentEntry[] {
-    if (!existsSync(this.filePath)) return [];
-    try {
-      const data: PauseStoreData = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      return data.entries ?? [];
-    } catch {
-      return [];
-    }
+    return this.read().entries;
   }
 
-  /** Replace the manifest with exactly these entries. Empty list clears the file. */
+  /** The parked main turn, if one was recorded. */
+  getMainTurn(): PausedMainTurn | undefined {
+    return this.read().mainTurn;
+  }
+
+  /**
+   * Record (or clear, with `undefined`) the parked main turn without touching
+   * the entry rows. Clearing with no entries left removes the file.
+   */
+  setMainTurn(turn: PausedMainTurn | undefined): void {
+    const current = this.read();
+    if (!turn) {
+      if (current.entries.length === 0) {
+        this.clear();
+        return;
+      }
+      this.write(current.entries, undefined);
+      return;
+    }
+    this.write(current.entries, turn);
+  }
+
+  /**
+   * Replace the entry rows. A main turn already on disk survives (the
+   * settle/quit funnel rewrites the entries while the parked turn waits for
+   * `/continue`); an empty list with no main turn clears the file.
+   */
   replace(entries: PausedAgentEntry[]): void {
-    if (entries.length === 0) {
+    const { mainTurn } = this.read();
+    if (entries.length === 0 && !mainTurn) {
       this.clear();
       return;
     }
+    this.write(entries, mainTurn);
+  }
+
+  /** Read entries and main turn tolerantly: v1 files, garbage and all. */
+  private read(): { entries: PausedAgentEntry[]; mainTurn?: PausedMainTurn } {
+    if (!existsSync(this.filePath)) return { entries: [] };
+    try {
+      const data: Partial<PauseStoreData> = JSON.parse(readFileSync(this.filePath, "utf-8"));
+      return { entries: data.entries ?? [], mainTurn: data.mainTurn };
+    } catch {
+      return { entries: [] };
+    }
+  }
+
+  /** Whole-file snapshot via temp+rename. */
+  private write(entries: PausedAgentEntry[], mainTurn: PausedMainTurn | undefined): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
-    const data: PauseStoreData = { version: 1, entries };
+    const data: PauseStoreData = { version: 2, entries, ...(mainTurn ? { mainTurn } : {}) };
     const tmp = this.filePath + ".tmp";
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, this.filePath);

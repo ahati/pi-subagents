@@ -169,6 +169,124 @@ function externallyHalted(record: Pick<AgentRecord, "status">): boolean {
 /** Which concurrency pool a spawn is charged to, if any. */
 type Pool = "background" | "foreground";
 
+/**
+ * A record with the pause gate attached. Attached at pause time rather than
+ * declared on `AgentRecord`: only the gate helpers below read it.
+ */
+type GatedRecord = AgentRecord & { pauseGate?: PauseGate };
+
+/**
+ * The suspension gate a parked record carries. Closed while the record is
+ * paused; the run's `beforeToolCall`/`finishTurn` boundaries await it and the
+ * run continues in place once it is opened — nothing is aborted.
+ */
+interface PauseGate {
+  /** True until `open()` is called. Read live by the installed hooks. */
+  closed: boolean;
+  /**
+   * Resolves when the gate opens OR when `signal` aborts. The race is
+   * mandatory: pi's `session.abort()` awaits the suspended call before the
+   * session can go idle, so a gate that ignored the signal would deadlock
+   * `/new`, `/fork`, `/resume`, `switchSession` and `compact()`.
+   */
+  wait(signal?: AbortSignal): Promise<void>;
+  /** Open the gate. Idempotent. */
+  open(): void;
+}
+
+/** Create a closed gate. */
+function createPauseGate(): PauseGate {
+  let release: (() => void) | undefined;
+  const opened = new Promise<void>((resolve) => { release = resolve; });
+  const gate: PauseGate = {
+    closed: true,
+    open() {
+      if (!gate.closed) return;
+      gate.closed = false;
+      release?.();
+    },
+    wait(signal?: AbortSignal) {
+      if (!gate.closed) return Promise.resolve();
+      // No signal: the only way out is open().
+      if (!signal) return opened;
+      if (signal.aborted) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const settle = () => {
+          signal.removeEventListener("abort", settle);
+          resolve();
+        };
+        signal.addEventListener("abort", settle, { once: true });
+        void opened.then(settle);
+      });
+    },
+  };
+  return gate;
+}
+
+/** Sessions whose hooks are already wrapped — installation is idempotent. */
+const gatedAgents = new WeakSet<object>();
+
+/**
+ * Wrap a child session's `beforeToolCall` and `finishTurn` so a parked run
+ * suspends at its next boundary instead of continuing. The wrappers read the
+ * record's gate at CALL time, so a pause that lands after installation still
+ * holds a boundary that is already in flight; with no gate (or an open one)
+ * they delegate straight through. Never replaces an existing hook: the tool-
+ * scope wrapper `runAgent` installs still runs.
+ *
+ * Idempotent, and a no-op for a session whose `agent` slot is missing (test
+ * fakes vary). Installed from the spawn-time `onSessionCreated` wiring and from
+ * `pause()` — the manager owns both, so a caller that never goes through
+ * `spawn()` (or a test that mocks the runner) still parks correctly.
+ */
+function installPauseGate(
+  host: GatedRecord,
+  session: AgentSession | undefined = host.session,
+): void {
+  const agent = session?.agent;
+  if (!agent || gatedAgents.has(agent)) return;
+  gatedAgents.add(agent);
+
+  const awaitGate = async (signal?: AbortSignal): Promise<void> => {
+    const gate = gateOf(host);
+    if (!gate?.closed) return;
+    await gate.wait(host.abortController?.signal ?? signal);
+  };
+
+  const priorBeforeToolCall = agent.beforeToolCall;
+  agent.beforeToolCall = async (context, signal) => {
+    await awaitGate(signal);
+    return priorBeforeToolCall?.(context, signal);
+  };
+
+  const priorFinishTurn = agent.finishTurn;
+  // Cast: `FinishTurn` is a union of return shapes, so the async wrapper's
+  // inferred `Promise<void | AgentTurnDecision | undefined>` matches no single
+  // member even though every member it can produce is represented.
+  agent.finishTurn = (async (turn, signal) => {
+    await awaitGate(signal);
+    return priorFinishTurn?.(turn, signal);
+  }) as NonNullable<AgentSession["agent"]["finishTurn"]>;
+}
+
+/** The gate a pause() closed, if this record is parked. */
+function gateOf(record: AgentRecord): PauseGate | undefined {
+  return (record as GatedRecord).pauseGate;
+}
+
+/**
+ * Release anything a closed gate is holding and drop it. Called from the settle
+ * path: the run is over, so a waiting boundary at the next tool/turn hook would
+ * never resume — and, with the gate gone, a later resume() reads the still-
+ * "paused" status as "settled while parked" and continues the session bare.
+ */
+function releaseGate(record: AgentRecord): void {
+  const gate = gateOf(record);
+  if (!gate) return;
+  gate.open();
+  (record as GatedRecord).pauseGate = undefined;
+}
+
 /** One entry in the shared two-pool spawn queue. */
 interface QueueEntry { id: string; pool: Pool; start: () => Promise<void>; release: () => void }
 
@@ -176,7 +294,8 @@ interface SpawnArgs {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
   type: SubagentType;
-  prompt: string;
+  /** Omitted only when reopening a session file (a bare revive, no new prompt). */
+  prompt: string | undefined;
   options: SpawnOptions;
 }
 
@@ -515,6 +634,25 @@ export class AgentManager {
     type: SubagentType,
     prompt: string,
     options: SpawnOptions,
+  ): string;
+  /**
+   * Reopen a persisted session instead of starting a fresh conversation.
+   * `resumeSessionFile` is required and the prompt may be omitted, in which
+   * case the runner heals any unanswered tool calls and continues bare.
+   */
+  spawn(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    type: SubagentType,
+    prompt: string | undefined,
+    options: SpawnOptions & { resumeSessionFile: string },
+  ): string;
+  spawn(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    type: SubagentType,
+    prompt: string | undefined,
+    options: SpawnOptions,
   ): string {
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
@@ -828,6 +966,11 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        // Install the pause gate hooks at spawn — synchronously before the
+        // prompt, so a pause that lands during the first turn still suspends
+        // the run at its next tool/turn boundary. Idempotent; a session
+        // without an `agent` slot degrades to no hooks.
+        installPauseGate(record as GatedRecord, session);
         // Capture now, while the session object exists: after eviction this
         // path is the only thing that can reopen the conversation, and an
         // in-memory session reports undefined, which correctly means
@@ -989,6 +1132,7 @@ export class AgentManager {
    *   the release disagree with the acquire.
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
+    releaseGate(record);
     if (!record.isBackground) record.resultConsumed = true;
     if (pool === "background") this.runningBackground--;
     else if (pool === "foreground") this.runningForeground--;
@@ -1125,16 +1269,59 @@ export class AgentManager {
   }
 
   /**
-   * Resume an existing agent session with a new prompt.
+   * Resume a paused agent — or continue a settled one.
+   *
+   * In order:
+   *   1. A LIVE closed gate (the run is alive, parked): open it, mark the
+   *      record running, and return — the original run continues in place and
+   *      no resume callback / `resumeAgent` call happens at all.
+   *   2. A record that settled while parked (status still "paused", no gate —
+   *      the settle path dropped it): continue the session BARE through the
+   *      normal funnel. The session's own transcript is the prompt; the
+   *      `prompt` argument is ignored (docs/pause-quit-resume-continue.md §3.5).
+   *   3. A record paused out of the queue (no session): unpause replays the
+   *      original spawn.
+   *   4. Everything else: the historical resume, which honors a caller-supplied
+   *      prompt (the user's own typed `@handle <text>` mention).
+   *
+   * The `prompt` parameter is kept for signature compatibility — the bare
+   * resume is the only path a parked record may take; a bare call for a settled
+   * record ignores it too (docs/pause-quit-resume-continue.md §3.5).
    */
   async resume(
     id: string,
-    prompt: string,
+    prompt?: string,
     signal?: AbortSignal,
     options?: ResumeOptions,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
-    if (!record?.session) return undefined;
+    if (!record) return undefined;
+
+    const gate = gateOf(record);
+    if (gate?.closed && record.status === "paused") {
+      // The run is still alive behind its gate. Reopening it IS the resume.
+      // The gate stays on the record (opened): `resume()` again is a no-op-ish
+      // pass-through and the gate test observes `closed === false` here.
+      gate.open();
+      record.status = "running";
+      record.completedAt = undefined;
+      return record;
+    }
+
+    // "paused" with no closed gate means the run settled while parked. That is
+    // the settled-session branch: bare continuation, prompt ignored.
+    const bare = record.status === "paused";
+
+    if (!record.session) {
+      // Paused out of the queue: there is nothing to continue — replay the
+      // original spawn. (A sessionless paused record can only be a queued one.)
+      return this.unpause(id) ? record : undefined;
+    }
+
+    // Bare continuation: the session's transcript is the message. A prompt is
+    // only ever sent for a non-parked record resumed with one (mentions).
+    // prompt ignored — resume is bare (docs/pause-quit-resume-continue.md §3.5)
+    const effectivePrompt = bare ? undefined : prompt;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1161,7 +1348,7 @@ export class AgentManager {
       record.completedAt = undefined;
       record.status = "queued";
 
-      const start = () => this.startResume(id, record, prompt, signal, options);
+      const start = () => this.startResume(id, record, effectivePrompt, signal, options);
       if (occupiesPoolSlot(record) && !this.poolHasRoom("background")) {
         // At the concurrency limit — queue it, drains when a slot frees. A
         // detached resume has no inline caller, hence nothing to release. The
@@ -1196,24 +1383,30 @@ export class AgentManager {
     record.result = undefined;
     record.error = undefined;
 
+    const callbacks = {
+      onToolActivity: (activity: ToolActivity) => {
+        if (activity.type === "end") record.toolUses++;
+        options?.onToolActivity?.(activity);
+      },
+      onAssistantUsage: (usage: LifetimeUsage) => {
+        addUsage(record.lifetimeUsage, usage);
+        this.onUsage?.(record, usage);
+        options?.onAssistantUsage?.(usage);
+      },
+      onCompaction: (info: CompactionInfo) => {
+        record.compactionCount++;
+        this.onCompact?.(record, info);
+        options?.onCompaction?.(info);
+      },
+      signal,
+    };
+
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
-        onToolActivity: (activity) => {
-          if (activity.type === "end") record.toolUses++;
-          options?.onToolActivity?.(activity);
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-          this.onUsage?.(record, usage);
-          options?.onAssistantUsage?.(usage);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-          options?.onCompaction?.(info);
-        },
-        signal,
-      });
+      // A parked record's resume is bare (2 args — no prompt). A non-parked
+      // record with a caller-supplied prompt keeps the prompt-bearing call.
+      const { text, failure } = effectivePrompt === undefined
+        ? await resumeAgent(record.session, callbacks)
+        : await resumeAgent(record.session, effectivePrompt, callbacks);
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
       record.status = failure ? "error" : "completed";
@@ -1243,7 +1436,7 @@ export class AgentManager {
   private startResume(
     id: string,
     record: AgentRecord,
-    prompt: string,
+    prompt: string | undefined,
     parentSignal: AbortSignal | undefined,
     options: ResumeOptions,
   ) {
@@ -1276,6 +1469,8 @@ export class AgentManager {
     const settle = () => {
       detachParentSignal?.();
       detachParentSignal = undefined;
+      // The run is over; a lingering gate must not hold a later boundary.
+      releaseGate(record);
       // Final flush of streaming output file
       if (record.outputCleanup) {
         try { record.outputCleanup(); } catch { /* ignore */ }
@@ -1449,15 +1644,21 @@ export class AgentManager {
   }
 
   /**
-   * Pause an active agent: interrupt its in-flight run (or dequeue it) while
-   * keeping the record and session so a later resume continues the same
+   * Pause an active agent: park its in-flight run behind a gate (or dequeue it)
+   * while keeping the record and session so a later resume continues the same
    * conversation. The companion of abort(), with a resumable outcome.
    *
-   * A paused run settles like an aborted one — its slot is released, its
-   * output file flushed, its children stopped — but the settle path leaves the
-   * "paused" status alone (externallyHalted), so nothing downstream can mistake
-   * it for a finished or failed run. Pause is a statement of user intent, and
-   * only a deliberate unpause/resume lifts it.
+   * A running pause does NOT abort anything. A closed gate holds the run's next
+   * `beforeToolCall`/`finishTurn` boundary, so a tool already executing finishes
+   * and is persisted, and nothing else starts; the run stays alive, keeps its
+   * concurrency slot, and continues in place when resume() opens the gate. The
+   * gate races the record's abort signal, so an abort while parked releases the
+   * suspended call and pi's `session.abort()` cannot deadlock.
+   *
+   * The status is set to "paused" synchronously, and the settle path leaves it
+   * alone (externallyHalted) if the run dies while parked — so nothing
+   * downstream can mistake it for a finished or failed run. Pause is a statement
+   * of user intent, and only a deliberate unpause/resume lifts it.
    *
    * Refused, returning false, when pausing would lose work or strand a caller:
    *
@@ -1493,7 +1694,13 @@ export class AgentManager {
     }
 
     if (record.status !== "running") return false;
-    record.abortController?.abort();
+    // Close a gate instead of aborting. Set on the record BEFORE the hooks are
+    // installed, so the wrapper's first read already sees the banked intent.
+    (record as GatedRecord).pauseGate = createPauseGate();
+    // Idempotent: a session that was spawned through runAgent already carries
+    // the hooks. Called here too because the gate test (and any caller holding
+    // a session the runner never saw) must still park on `record.session`.
+    installPauseGate(record as GatedRecord, record.session);
     record.status = "paused";
     record.completedAt = Date.now();
     return true;
@@ -1506,7 +1713,7 @@ export class AgentManager {
    * indistinguishable from one that waited longer in the queue.
    *
    * Returns false for an agent with a session: that one resumes through
-   * `resume()`, which re-prompts the existing conversation instead.
+   * `resume()`, which continues the existing conversation bare.
    */
   unpause(id: string): boolean {
     const record = this.agents.get(id);
@@ -1523,6 +1730,13 @@ export class AgentManager {
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    // A parked run is ALIVE behind its gate: eviction must not leave it hung at
+    // a boundary (the gate's wait would never resolve) or running unseen while
+    // it holds a concurrency slot. Release the gate, then abort so the settle
+    // path frees the slot — a session boundary sweeping a paused record is the
+    // same statement as an abort, just delivered from the other direction.
+    releaseGate(record);
+    record.abortController?.abort();
     this.tombstone(record);
     const session = record.session;
     // Detached before the shutdown starts, so the record leaves the map at once and

@@ -89,6 +89,12 @@ export function ctx(overrides: Record<string, unknown> = {}) {
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
     sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
     getSystemPrompt: vi.fn(() => "parent"),
+    // Main-agent gate defaults: an idle run, no signal to race, a no-op abort,
+    // nothing queued. Tests that drive the streamed/parked paths override them.
+    isIdle: () => true,
+    signal: undefined,
+    abort: vi.fn(),
+    hasPendingMessages: () => false,
     ...overrides,
   } as any;
 }

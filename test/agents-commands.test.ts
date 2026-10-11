@@ -169,23 +169,20 @@ describe("/agents pause", () => {
 });
 
 describe("/agents resume", () => {
-  it("continues a paused agent's session with the continuation prompt", async () => {
+  it("continues a paused agent's session bare — no continuation prompt", async () => {
     const b = boot();
     const id = await spawnRunning(b);
-    const session = manager().getRecord(id).session;
     runCommand(b, "pause @explore");
     await flush();
     expect(manager().getRecord(id).status).toBe("paused");
 
-    heldResume();
     const { cmdCtx } = runCommand(b, "resume @explore");
     await flush();
 
-    expect(vi.mocked(resumeAgent)).toHaveBeenCalledWith(
-      session,
-      "Continue from where you left off.",
-      expect.anything(),
-    );
+    // The run is alive behind its gate: resume reopens it — no resumeAgent, and
+    // no prompt of any kind. The bare resumeAgent funnel is for runs that
+    // settled while parked (see agent-pause.test.ts).
+    expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed @explore.", "info");
   });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 
 vi.mock("../src/agent-runner.js", () => ({
@@ -15,6 +15,13 @@ vi.mock("../src/worktree.js", () => ({
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { createWorktree } from "../src/worktree.js";
+
+// Mock history persists across tests in a file — the gate test's
+// `resumeAgent` not-called assertion must not see earlier tests' calls.
+beforeEach(() => {
+  vi.mocked(runAgent).mockReset();
+  vi.mocked(resumeAgent).mockReset();
+});
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -55,6 +62,49 @@ describe("AgentManager — pause / unpause", () => {
     await manager.awaitStartup(id);
     return { id, release };
   }
+
+  /**
+   * A fake child session carrying the slots the runner wraps with the record's
+   * pause gate (the same shape agent-runner.test.ts fakes): `agent.beforeToolCall`
+   * and `agent.finishTurn`, both pre-populated with the hooks the wrapper must
+   * delegate to once the gate reopens.
+   */
+  function gateSession() {
+    const priorBeforeToolCall = vi.fn(async () => ({ block: false }));
+    const priorFinishTurn = vi.fn(async () => undefined);
+    const session = {
+      dispose: vi.fn(),
+      abort: vi.fn(),
+      steer: vi.fn().mockResolvedValue(undefined),
+      subscribe: vi.fn(() => () => {}),
+      messages: [],
+      getActiveToolNames: vi.fn(() => []),
+      agent: { beforeToolCall: priorBeforeToolCall, finishTurn: priorFinishTurn },
+    } as any;
+    return { session, priorBeforeToolCall, priorFinishTurn };
+  }
+
+  /**
+   * Spawn a run the test releases by hand, handing the fake child session to
+   * the manager through onSessionCreated — the moment a real runner installs
+   * the record's gate on it.
+   */
+  async function spawnGated(session: any, prompt = "task") {
+    let release!: (value: ReturnType<typeof runResult>) => void;
+    vi.mocked(runAgent).mockImplementation(
+      (_pi: any, _type: any, _prompt: any, opts: any) =>
+        new Promise<ReturnType<typeof runResult>>(resolve => {
+          release = resolve;
+          opts.onSessionCreated?.(session);
+        }),
+    );
+    const id = manager.spawn(mockPi, mockCtx, "X", prompt, { description: prompt, isBackground: true });
+    await manager.awaitStartup(id);
+    return { id, release };
+  }
+
+  /** The record's gate, as the manager exposes it for observation. */
+  const gateOf = (id: string) => (manager.getRecord(id) as any)?.pauseGate as { closed: boolean } | undefined;
 
   it("pauses a running agent, and the settle keeps 'paused'", async () => {
     manager = new AgentManager();
@@ -97,11 +147,15 @@ describe("AgentManager — pause / unpause", () => {
     await manager.getRecord(a.id)!.promise;
     expect(manager.getRecord(b)!.status).toBe("paused");
 
+    vi.mocked(runAgent).mockClear();
     vi.mocked(runAgent).mockResolvedValue(runResult({ responseText: "b-done" }));
     expect(manager.unpause(b)).toBe(true);
     expect(manager.getRecord(b)!.status).toBe("running");
     await manager.getRecord(b)!.promise;
     expect(manager.getRecord(b)!.status).toBe("completed");
+    // The parked queue entry replays verbatim: the re-queued run gets B's
+    // original prompt, not some continuation stand-in.
+    expect(vi.mocked(runAgent).mock.calls.at(-1)![2]).toBe("b");
   });
 
   it("refuses to pause a foreground agent", async () => {
@@ -159,17 +213,99 @@ describe("AgentManager — pause / unpause", () => {
     expect(manager.unpause(id)).toBe(false);
   });
 
-  it("resume after pause completes the same record", async () => {
+  it("resume after pause completes the same record, sending no continuation prompt", async () => {
     manager = new AgentManager();
     const { id, release } = await spawnHeld({ isBackground: true });
     manager.pause(id);
     release(runResult({ aborted: true }));
     await manager.getRecord(id)!.promise;
+    const session = manager.getRecord(id)!.session;
 
     vi.mocked(resumeAgent).mockResolvedValue({ text: "ok" } as any);
-    const record = await manager.resume(id, "Continue from where you left off.");
+    const record = await manager.resume(id);
     expect(record?.status).toBe("completed");
     expect(record?.result).toBe("ok");
+
+    // Bare resume: the session's own transcript continues, so resumeAgent gets
+    // an options object — never a prompt, and never a third argument.
+    expect(vi.mocked(resumeAgent)).toHaveBeenCalledWith(session, expect.anything());
+    const call = vi.mocked(resumeAgent).mock.calls.at(-1)!;
+    expect(call).toHaveLength(2);
+    expect(JSON.stringify(call)).not.toContain("Continue from where you left off.");
+  });
+
+  it("pause closes a gate instead of aborting, and resume reopens it", async () => {
+    manager = new AgentManager();
+    const { session, priorBeforeToolCall, priorFinishTurn } = gateSession();
+    const { id, release } = await spawnGated(session);
+    const record = manager.getRecord(id)!;
+    const controllerAbort = vi.spyOn(record.abortController!, "abort");
+
+    expect(manager.pause(id)).toBe(true);
+    // Synchronously parked; nothing is killed.
+    expect(record.status).toBe("paused");
+    expect(controllerAbort).not.toHaveBeenCalled();
+    expect(record.abortController!.signal.aborted).toBe(false);
+    expect(session.abort).not.toHaveBeenCalled();
+    expect(gateOf(id)?.closed).toBe(true);
+
+    // Neither boundary of the parked run may proceed: the wrapper the runner
+    // installed on the child session holds both until resume opens the gate.
+    let toolSettled = false;
+    const toolCall = Promise.resolve(session.agent.beforeToolCall({ toolCall: { name: "read" } }))
+      .then(() => { toolSettled = true; });
+    let turnSettled = false;
+    const finishTurn = Promise.resolve(session.agent.finishTurn({} as any))
+      .then(() => { turnSettled = true; });
+    await new Promise(r => setTimeout(r, 20));
+    expect(toolSettled).toBe(false);
+    expect(turnSettled).toBe(false);
+
+    expect(await manager.resume(id)).toBeDefined();
+    await Promise.all([toolCall, finishTurn]);
+    expect(toolSettled).toBe(true);
+    expect(turnSettled).toBe(true);
+    expect(gateOf(id)?.closed).toBe(false);
+    expect(record.status).toBe("running");
+    // The suspended run simply continues; no new prompt is sent at the session.
+    expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
+
+    // Once open, the wrapper passes through to the hook pi had there before.
+    await session.agent.beforeToolCall({ toolCall: { name: "read" } });
+    await session.agent.finishTurn({} as any);
+    expect(priorBeforeToolCall).toHaveBeenCalledTimes(2);
+    expect(priorFinishTurn).toHaveBeenCalledTimes(2);
+
+    release(runResult({ responseText: "parked run finished" }));
+    await record.promise;
+  });
+
+  it("releases a gated call when the run is aborted — the signal race", async () => {
+    manager = new AgentManager();
+    const { session } = gateSession();
+    const { id, release } = await spawnGated(session);
+    manager.pause(id);
+    const record = manager.getRecord(id)!;
+
+    let settled = false;
+    const gated = Promise.resolve(session.agent.beforeToolCall({ toolCall: { name: "read" } }))
+      .then(() => { settled = true; }, () => { settled = true; });
+    await new Promise(r => setTimeout(r, 20));
+    expect(settled).toBe(false); // held by the closed gate
+
+    record.abortController!.abort();
+
+    // A gate that ignored the signal would hang here forever — and with it pi's
+    // abort path, which awaits the suspended call before the session can idle.
+    const outcome = await Promise.race([
+      gated.then(() => "settled" as const),
+      new Promise<"pending">(r => setTimeout(() => r("pending"), 100)),
+    ]);
+    expect(outcome).toBe("settled");
+
+    release(runResult({ aborted: true }));
+    await record.promise;
+    expect(record.status).toBe("paused");
   });
 
   it("abortAll leaves paused agents alone", async () => {

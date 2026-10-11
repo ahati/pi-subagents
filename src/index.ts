@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
@@ -32,9 +32,10 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { type PausedAgentEntry, PauseStore, resolvePauseStorePath } from "./pause-store.js";
+import { type PausedAgentEntry, type PausedMainTurn, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
+import { continueSessionBare } from "./session-continue.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type AgentTombstone, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
@@ -478,12 +479,12 @@ export default function (pi: ExtensionAPI) {
     const notification = formatTaskNotification(record, 500, showCost);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
 
-    pi.sendMessage<NotificationDetails>({
+    holdWhileParked(() => pi.sendMessage<NotificationDetails>({
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    }, { deliverAs: "followUp", triggerTurn: true }));
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -516,12 +517,12 @@ export default function (pi: ExtensionAPI) {
           details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
         }
 
-        pi.sendMessage<NotificationDetails>({
+        holdWhileParked(() => pi.sendMessage<NotificationDetails>({
           customType: "subagent-notification",
           content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
           display: true,
           details,
-        }, { deliverAs: "followUp", triggerTurn: true });
+        }, { deliverAs: "followUp", triggerTurn: true }));
       });
       widget.update();
     },
@@ -724,7 +725,7 @@ export default function (pi: ExtensionAPI) {
    * Resolve the agent type and spawn. Trusts its options — every caller must
    * either be in-process or have gone through `spawnTopLevel` first.
    */
-  const spawnResolved = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+  const spawnResolved = (piRef: any, ctxRef: any, type: string, prompt: string | undefined, options: any) => {
     // Cross-extension callers get the same dispatch contract as the LLM (#183).
     // The RPC layer already throws for an unresolvable model rather than falling
     // back silently; a bad agent type should not be quieter. Throws become error
@@ -849,6 +850,12 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    // A session switch/reload strands every in-memory park: the suspended run
+    // died with the old session, and held nudges belong to it. The manifest is
+    // the only park that crosses a session boundary.
+    armedPause = false;
+    openMainTurnGate();
+    heldNudges.length = 0;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -907,10 +914,17 @@ export default function (pi: ExtensionAPI) {
     try {
       const sid = ctx.sessionManager?.getSessionId?.();
       if (sid) {
-        const parked = new PauseStore(resolvePauseStorePath(ctx.cwd, sid)).list();
+        const store = new PauseStore(resolvePauseManifestPath(ctx.cwd, sid));
+        const parked = store.list();
+        const mainTurn = store.getMainTurn();
+        const hint: string[] = [];
         if (parked.length > 0) {
-          ctx.ui.notify(`${parked.length} subagent${parked.length === 1 ? "" : "s"} paused here — /continue to resume.`, "info");
+          hint.push(`${parked.length} subagent${parked.length === 1 ? "" : "s"} paused here`);
         }
+        if (mainTurn?.parked) {
+          hint.push(`the main turn is parked (${mainTurn.pendingTools} pending tool call${mainTurn.pendingTools === 1 ? "" : "s"})`);
+        }
+        if (hint.length > 0) ctx.ui.notify(`${hint.join(" — ")} — /continue to resume.`, "info");
       }
     } catch {
       // A hint, never a blocker.
@@ -1338,7 +1352,7 @@ export default function (pi: ExtensionAPI) {
   async function startBackgroundResume(
     ctx: ExtensionContext,
     existing: AgentRecord,
-    prompt: string,
+    prompt: string | undefined,
     opts: { outputTranscript: boolean; maxTurns?: number; toolCallId?: string },
   ): Promise<AgentRecord | undefined> {
     const id = existing.id;
@@ -2445,7 +2459,7 @@ Terse command-style prompts produce shallow, generic work.
     fleet.update();
     const result = workflowResultText(task);
     scheduleNudge(task.id, () => {
-      pi.sendMessage<NotificationDetails>({
+      holdWhileParked(() => pi.sendMessage<NotificationDetails>({
         customType: "subagent-notification",
         content: formatWorkflowNotification(task),
         display: true,
@@ -2461,7 +2475,7 @@ Terse command-style prompts produce shallow, generic work.
           error: task.error,
           resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
         },
-      }, { deliverAs: "followUp", triggerTurn: true });
+      }, { deliverAs: "followUp", triggerTurn: true }));
     });
   }
 
@@ -2961,20 +2975,140 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   /**
-   * Prompt sent to a paused or evicted agent when the user did not type one:
-   * the session carries the full task context, so a bare instruction to pick
-   * the work back up is all a continuation needs.
+   * Prompts a resume applies: none. A resume (gate reopen, bare continuation,
+   * revive) never sends a synthetic prompt — the transcript is what continues
+   * (docs/pause-quit-resume-continue.md §3.5). `@handle` mentions still carry
+   * the user's own typed text.
    */
-  const CONTINUATION_PROMPT = "Continue from where you left off.";
+
+  // ---- Main-turn park state (docs/pause-quit-resume-continue.md §3.2) ----
+
+  /** `/pause` typed while the main model streams; the park lands at the next boundary. */
+  let armedPause = false;
+  /** The park landed in this session: the main run is suspended behind `mainGate`. */
+  let parkedMain = false;
+  /** The suspended main run waits on this; `/continue` opens it, the run signal races it. */
+  let mainGate: { promise: Promise<void>; open(): void } | undefined;
+  /** Completion nudges held while the main turn is parked; flushed on `/continue`. */
+  const heldNudges: Array<() => void> = [];
+
+  /** A parked main turn must not be woken by a completion nudge: hold the send,
+   * flush it when /continue reopens the gate. */
+  function holdWhileParked(send: () => void): void {
+    if (parkedMain) {
+      heldNudges.push(send);
+      return;
+    }
+    send();
+  }
+
+  function pauseStoreFor(ctx: ExtensionContext): PauseStore {
+    const sid = ctx.sessionManager?.getSessionId?.() ?? "";
+    return new PauseStore(resolvePauseStorePath(ctx.cwd, sid));
+  }
+
+  /** True when the pid that claimed the parked turn is still running. */
+  function claimLive(claim: { pid: number } | undefined): boolean {
+    if (!claim) return false;
+    if (claim.pid === process.pid) return true;
+    try {
+      process.kill(claim.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The promise a suspended boundary handler awaits: gate open, or run aborted. */
+  function holdMainTurnGate(signal: AbortSignal | undefined): Promise<void> {
+    if (!mainGate) {
+      let open!: () => void;
+      const promise = new Promise<void>(resolve => {
+        open = resolve;
+      });
+      mainGate = { promise, open };
+    }
+    const gate = mainGate;
+    if (signal?.aborted) return Promise.resolve();
+    if (!signal) return gate.promise;
+    return new Promise<void>(resolve => {
+      const settle = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = () => settle();
+      void gate.promise.then(settle);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  function openMainTurnGate(): void {
+    parkedMain = false;
+    mainGate?.open();
+    mainGate = undefined;
+  }
+
+  /**
+   * Land the armed park at a main-turn boundary: park every active subagent
+   * (their own gates close through the funnel), write `mainTurn` to the manifest
+   * — the transcript itself carries the pending calls — and announce it. The
+   * main run is NOT aborted here; the boundary it is suspended at holds it.
+   */
+  async function landPark(ctx: ExtensionContext, pendingTools: number): Promise<void> {
+    armedPause = false;
+    parkedMain = true;
+    let paused = 0;
+    let ephemeral = 0;
+    const refused: string[] = [];
+    for (const record of manager.listAgents().filter(isTopLevelAgent)) {
+      if (record.status !== "running" && record.status !== "queued") continue;
+      const refusal = pauseAgentRecord(record);
+      if (refusal !== undefined) {
+        refused.push(`@${recordName(record)} (${refusal})`);
+        continue;
+      }
+      paused++;
+      if (!record.sessionFile) ephemeral++;
+    }
+    syncPauseManifest(ctx);
+    const mainTurn: PausedMainTurn = {
+      parked: true,
+      pendingTools,
+      claim: { pid: process.pid, at: new Date().toISOString() },
+      pausedAt: new Date().toISOString(),
+    };
+    pauseStoreFor(ctx).setMainTurn(mainTurn);
+    const parts = [`Main turn parked at its boundary (${pendingTools} pending tool call${pendingTools === 1 ? "" : "s"})`];
+    if (paused > 0) parts.push(`parked ${paused} agent${paused === 1 ? "" : "s"}`);
+    if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
+    if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
+    ctx.ui.notify(parts.join("; ") + " — /continue resumes.", "info");
+  }
+
+  // The park gates themselves. Armed by /pause, landed at the first boundary,
+  // held until /continue or the run's signal aborts (Esc) — the loop is never
+  // aborted just for parking.
+  pi.on("tool_call", async (_event, ctx) => {
+    if (armedPause) await landPark(ctx, 1);
+    if (parkedMain) await holdMainTurnGate(ctx.signal);
+    return undefined;
+  });
+  pi.on("turn_end", async (event, ctx) => {
+    if (armedPause) await landPark(ctx, event.toolResults.length);
+    // With unanswered calls (or held input) the loop would fire another request
+    // the moment this handler returns — unwind it instead.
+    if (parkedMain && (event.toolResults.length > 0 || ctx.hasPendingMessages())) ctx.abort();
+    return undefined;
+  });
 
   /**
    * Continue a settled agent's session in the background — the same wiring a
    * `@handle` mention gets (transcript, activity tracking, completion
-   * notification), with `prompt` defaulting to CONTINUATION_PROMPT. Resumes
-   * re-enter the concurrency queue, so resuming a wall of paused agents just
-   * queues the tail. Returns false when the resume could not start.
+   * notification). A resume applies no prompt: the transcript continues bare.
+   * Resumes re-enter the concurrency queue, so resuming a wall of paused
+   * agents just queues the tail. Returns false when the resume could not start.
    */
-  function resumeAgentSession(ctx: ExtensionContext, record: AgentRecord, prompt = CONTINUATION_PROMPT): Promise<boolean> {
+  function resumeAgentSession(ctx: ExtensionContext, record: AgentRecord, prompt?: string): Promise<boolean> {
     const config = getAgentConfig(record.type);
     return startBackgroundResume(ctx, record, prompt, {
       outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
@@ -3061,7 +3195,15 @@ Terse command-style prompts produce shallow, generic work.
    */
   async function pauseAllCommand(ctx: ExtensionCommandContext) {
     if (!ctx.isIdle()) {
-      ctx.ui.notify("Main model is streaming — press Esc (or let the turn finish) before /pause.", "warning");
+      // Streaming: arm instead of refusing. The park lands at the next boundary
+      // event (tool_call / turn_end) — see landPark and the handlers above.
+      if (armedPause) {
+        armedPause = false;
+        ctx.ui.notify("Pause cancelled.", "info");
+        return;
+      }
+      armedPause = true;
+      ctx.ui.notify("Pausing when the turn reaches its next boundary — /pause again to cancel.", "info");
       return;
     }
     const active = manager.listAgents().filter(isTopLevelAgent)
@@ -3120,7 +3262,7 @@ Terse command-style prompts produce shallow, generic work.
       sessionFile: entry.sessionFile,
       completedAt: Date.now(),
     };
-    return (await reviveTombstone(ctx, tombstone, CONTINUATION_PROMPT, "Continuing")) ? "resumed" : "failed";
+    return (await reviveTombstone(ctx, tombstone, undefined, "Continuing")) ? "resumed" : "failed";
   }
 
   /**
@@ -3136,12 +3278,43 @@ Terse command-style prompts produce shallow, generic work.
       ctx.ui.notify("No active session.", "warning");
       return;
     }
-    const store = new PauseStore(resolvePauseStorePath(ctx.cwd, sessionId));
+    // Reads fall back to a parent-directory scan: the manifest may have been
+    // written under the session's original cwd (docs §5.1).
+    const store = new PauseStore(resolvePauseManifestPath(ctx.cwd, sessionId));
     const entries = store.list();
-    if (entries.length === 0) {
+    const mainTurn = store.getMainTurn();
+    if (entries.length === 0 && !mainTurn?.parked) {
       ctx.ui.notify("Nothing paused in this session.", "info");
       return;
     }
+
+    let continuedMain = false;
+    if (parkedMain) {
+      // In-session park: the run is alive behind its gate — reopen it.
+      openMainTurnGate();
+      store.setMainTurn(undefined);
+      continuedMain = true;
+      const held = heldNudges.splice(0);
+      for (const send of held) send();
+    } else if (mainTurn?.parked) {
+      // Cross-restart park (docs §6): continue the main turn FIRST — in a
+      // shadow session, never with a prompt — and adopt it via a session
+      // switch; the subagents revive inside the replacement session, so a
+      // failure cannot half-adopt the continuation.
+      if (claimLive(mainTurn.claim)) {
+        ctx.ui.notify(
+          `Another pi window holds the claim on the parked main turn (pid ${mainTurn.claim.pid}) — continue there, or wait for it to exit.`,
+          "warning",
+        );
+        return;
+      }
+      store.setMainTurn({ ...mainTurn, claim: { pid: process.pid, at: new Date().toISOString() } });
+      const ok = await continueParkedMainTurn(ctx, store, entries);
+      if (ok) return;
+      continuedMain = false;
+      ctx.ui.notify("Continuing the subagents only — the main turn could not be continued.", "warning");
+    }
+
     let resumed = 0;
     let stale = 0;
     const failed: PausedAgentEntry[] = [];
@@ -3153,22 +3326,102 @@ Terse command-style prompts produce shallow, generic work.
     }
     store.replace(failed);
     const parts: string[] = [];
+    if (continuedMain) parts.push("Continued the parked main turn");
     if (resumed > 0) parts.push(`Continued ${resumed} agent${resumed === 1 ? "" : "s"}`);
     if (stale > 0) parts.push(`${stale} already handled`);
     if (failed.length > 0) parts.push(`${failed.length} could not be revived (kept in the manifest)`);
-    ctx.ui.notify(parts.join("; ") + ".", resumed === 0 && failed.length > 0 ? "warning" : "info");
+    ctx.ui.notify(parts.join("; ") + ".", !continuedMain && resumed === 0 && failed.length > 0 ? "warning" : "info");
+  }
+
+  /**
+   * The M1 shadow continuation (docs §6): reopen the parked main session in a
+   * second SessionManager, execute the pending tool calls through the real
+   * pipeline, bare-continue the turn — never with a prompt — and let the live
+   * UI adopt the file via switchSession. The subagent entries revive inside
+   * the replacement session (fresh context), after the continuation.
+   * Returns false when nothing was continued; the caller then falls back to
+   * entry-only revival and `mainTurn` stays parked for a later attempt.
+   */
+  async function continueParkedMainTurn(
+    ctx: ExtensionCommandContext,
+    store: PauseStore,
+    entries: PausedAgentEntry[],
+  ): Promise<boolean> {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    if (!sessionFile) {
+      ctx.ui.notify("Could not continue the parked main turn — the session file is unknown.", "warning");
+      return false;
+    }
+    try {
+      const sessionManager = SessionManager.open(sessionFile);
+      const cwd = sessionManager.getCwd();
+      const agentDir = getAgentDir();
+      const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: ctx.isProjectTrusted?.() ?? true });
+      // No extension discovery: the shadow session heals pending built-in tool
+      // calls and bare-continues. Extension/MCP-backed pending calls resolve as
+      // honest errors for the model to re-plan around (docs §6.4 hazard 3), and
+      // skipping discovery avoids loading this extension a second time.
+      const loader = new DefaultResourceLoader({
+        cwd,
+        agentDir,
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+      });
+      await loader.reload();
+      const { session } = await createAgentSession({
+        sessionManager,
+        cwd,
+        agentDir,
+        settingsManager,
+        resourceLoader: loader,
+      });
+      const result = await continueSessionBare(session);
+      if (result.continuationError) {
+        // The heal is persisted; the turn continuation failed. Adopt anyway —
+        // the healed file is strictly better than the dangling one.
+        ctx.ui.notify(`The parked main turn was healed, but its continuation failed: ${result.continuationError}`, "warning");
+      } else {
+        ctx.ui.notify("Continuing the parked main turn — pi reloads the session when it finishes.", "info");
+      }
+      const failed: PausedAgentEntry[] = [];
+      await ctx.switchSession(sessionFile, {
+        withSession: async fresh => {
+          // The host always supplies the replacement context; fall back to the
+          // current one when a host (or test double) invokes the callback bare.
+          const runCtx = fresh ?? ctx;
+          for (const entry of entries) {
+            const outcome = await continuePausedEntry(runCtx, entry);
+            if (outcome !== "resumed") failed.push(entry);
+          }
+          store.setMainTurn(undefined);
+          store.replace(failed);
+        },
+      });
+      return true;
+    } catch (err) {
+      ctx.ui.notify(
+        `Could not continue the parked main turn: ${err instanceof Error ? err.message : String(err)}`,
+        "warning",
+      );
+      return false;
+    }
   }
 
   /**
    * Reopen an evicted agent's conversation (a tombstone) as a fresh background
    * agent carrying the same handle. Shared by the `@handle` mention path and
-   * `/agents revive` — the only difference is the prompt (typed text vs
-   * CONTINUATION_PROMPT) and the verb in the toast.
+   * `/agents revive` — the only difference is the prompt (typed text vs none:
+   * a revive without a prompt continues the transcript bare) and the verb in
+   * the toast.
    *
    * Returns false when the conversation could not be reopened; the failure
    * paths notify, because each knows exactly why.
    */
-  async function reviveTombstone(ctx: ExtensionContext, entry: AgentTombstone, prompt: string, verb: string): Promise<boolean> {
+  async function reviveTombstone(ctx: ExtensionContext, entry: AgentTombstone, prompt: string | undefined, verb: string): Promise<boolean> {
     const target = `@${entry.alias ?? entry.handle}`;
 
     // Checked here rather than left to SessionManager.open: that runs inside
@@ -3366,7 +3619,7 @@ Terse command-style prompts produce shallow, generic work.
           : `No evicted agent named @${target.replace(/^@/, "")}.`, "warning");
         return;
       }
-      await reviveTombstone(ctx, tombstone, CONTINUATION_PROMPT, "Reviving");
+      await reviveTombstone(ctx, tombstone, undefined, "Reviving");
       return;
     }
 
@@ -3383,7 +3636,7 @@ Terse command-style prompts produce shallow, generic work.
       tombstones,
       t => `@${t.alias ?? t.handle} — ${t.description}`,
     );
-    if (entry) await reviveTombstone(ctx, entry, CONTINUATION_PROMPT, "Reviving");
+    if (entry) await reviveTombstone(ctx, entry, undefined, "Reviving");
   }
 
   async function showAgentsMenu(ctx: ExtensionCommandContext) {
