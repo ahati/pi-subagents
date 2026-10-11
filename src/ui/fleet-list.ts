@@ -14,7 +14,7 @@
  */
 
 import { isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { hasAgentBadge, renderAgentName } from "../agent-color.js";
+import { hasAgentBadge, renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
@@ -660,7 +660,7 @@ export class FleetList {
     // keeps the agent color on the selected row too and only bolds it — which also
     // keeps the row's width fixed as the selection moves.
     const selected = rosterIndex === sel;
-    const name = renderAgentName(record.type, theme, selected
+    const name = renderAgentRecordName(record, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;

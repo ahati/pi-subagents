@@ -8,6 +8,7 @@
  */
 
 import { getConfig } from "./agent-types.js";
+import type { AgentRecord } from "./types.js";
 
 const NAMED_AGENT_COLORS: Readonly<Record<string, string>> = {
   // Claude Code's eight subagent colors, as its default theme renders them.
@@ -149,13 +150,33 @@ export function hasAgentBadge(type: string | undefined): boolean {
   return type !== undefined && resolveAgentColor(getConfig(type).color) !== undefined;
 }
 
-/** Render a registered agent's display name with its configured color. */
+/**
+ * Render a registered agent's display name with its configured color.
+ * `instanceName` (the spawner's `name`) overrides the type's display name while
+ * keeping its color.
+ */
 export function renderAgentName(
   type: string | undefined,
   theme: AgentNameTheme,
   style: AgentNameStyle = {},
+  instanceName?: string,
 ): string {
-  if (!type) return renderAgentNameLabel("Agent", undefined, theme, style);
+  if (!type) return renderAgentNameLabel(instanceName ?? "Agent", undefined, theme, style);
   const config = getConfig(type);
-  return renderAgentNameLabel(config.displayName, config.color, theme, style);
+  return renderAgentNameLabel(instanceName ?? config.displayName, config.color, theme, style);
+}
+
+/**
+ * Render an agent instance's name with its type's configured color: the
+ * spawner's `alias` when the agent was named, else its `handle` (the unique,
+ * collision-numbered instance name), else the type's display name. Unlike
+ * `renderAgentName` this distinguishes sibling agents of one type.
+ */
+export function renderAgentRecordName(
+  record: Pick<AgentRecord, "type" | "handle" | "alias">,
+  theme: AgentNameTheme,
+  style: AgentNameStyle = {},
+): string {
+  const config = getConfig(record.type);
+  return renderAgentNameLabel(record.alias ?? record.handle ?? config.displayName, config.color, theme, style);
 }

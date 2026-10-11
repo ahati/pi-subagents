@@ -1739,7 +1739,7 @@ Terse command-style prompts produce shallow, generic work.
         fallbackColor: "toolTitle",
         restoreBackground: rowBackground,
         bold: true,
-      });
+      }, typeof args.name === "string" && args.name ? args.name : undefined);
       return new Text(rowBackground + "▸ " + name + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 

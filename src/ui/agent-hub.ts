@@ -23,7 +23,7 @@
 
 import * as piHost from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { renderAgentName } from "../agent-color.js";
+import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -900,7 +900,7 @@ export class AgentHub implements Component {
   private renderChatRow(record: AgentRecord, selected: boolean): string {
     const th = this.theme;
     const marker = selected ? th.fg("accent", "❯") : " ";
-    const name = renderAgentName(record.type, th, selected
+    const name = renderAgentRecordName(record, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
     return `${marker} ${statusGlyph(record.status, th)} ${name}`;
@@ -951,7 +951,7 @@ export class AgentHub implements Component {
     // Pad the name column to the widest visible name so descriptions align.
     let nameCol = 0;
     for (const e of items) {
-      const name = e.kind === "workflow" ? e.workflow.name : renderAgentName(e.record.type, this.theme, {});
+      const name = e.kind === "workflow" ? e.workflow.name : renderAgentRecordName(e.record, this.theme, {});
       nameCol = Math.max(nameCol, visibleWidth(name) + (e.kind === "workflow" ? "workflow ".length : 0));
     }
     nameCol = Math.min(nameCol, MAX_NAME_COL);
@@ -985,7 +985,7 @@ export class AgentHub implements Component {
     }
 
     const record = entry.record;
-    const name = renderAgentName(record.type, th, selected
+    const name = renderAgentRecordName(record, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
     const description = selected ? th.fg("text", record.description) : record.description;
@@ -1045,7 +1045,7 @@ export class AgentHub implements Component {
         ? describeActivity(act.activeTools, act.responseText)
         : record.status === "running" ? "thinking…" : record.status;
       const turns = act?.maxTurns ? ` · turn ${act.turnCount}/${act.maxTurns}` : act ? ` · turn ${act.turnCount}` : "";
-      const line = `${statusGlyph(record.status, th)} ${renderAgentName(record.type, th, {})}  ${th.fg(record.status === "running" ? "text" : "dim", doing)}${th.fg("dim", turns)}`;
+      const line = `${statusGlyph(record.status, th)} ${renderAgentRecordName(record, th, {})}  ${th.fg(record.status === "running" ? "text" : "dim", doing)}${th.fg("dim", turns)}`;
       lines.push(row(truncateToWidth(line, innerW)));
     }
     return lines;

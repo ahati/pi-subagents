@@ -1,6 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { renderAgentNameLabel, resolveAgentColor } from "../src/agent-color.js";
+import { renderAgentName, renderAgentNameLabel, renderAgentRecordName, resolveAgentColor } from "../src/agent-color.js";
+import { registerAgents } from "../src/agent-types.js";
 
 const theme = {
   fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
@@ -65,5 +66,50 @@ describe("renderAgentNameLabel", () => {
       .toBe("<toolTitle>*Agent*</toolTitle>");
     expect(renderAgentNameLabel("Agent", "invalid", theme, { fallbackColor: "muted" }))
       .toBe("<muted>Agent</muted>");
+  });
+});
+
+describe("renderAgentRecordName", () => {
+  it("prefers the alias, then the handle, then the type display name", () => {
+    registerAgents(new Map([[
+      "explore",
+      { name: "explore", displayName: "Explore", description: "d", extensions: false, skills: false, promptMode: "replace" },
+    ]]));
+    try {
+      const record = { type: "explore", handle: "explore-2", alias: "auth-audit" };
+      expect(renderAgentRecordName(record, theme, { fallbackColor: "muted" })).toBe("<muted>auth-audit</muted>");
+      expect(renderAgentRecordName({ type: "explore", handle: "explore-2" }, theme, { fallbackColor: "muted" }))
+        .toBe("<muted>explore-2</muted>");
+      expect(renderAgentRecordName({ type: "explore" }, theme, { fallbackColor: "muted" }))
+        .toBe("<muted>Explore</muted>");
+    } finally {
+      registerAgents(new Map());
+    }
+  });
+
+  it("keeps the type's badge color for the instance name", () => {
+    registerAgents(new Map([[
+      "colored",
+      { name: "colored", displayName: "Colored", color: "purple", description: "d", extensions: false, skills: false, promptMode: "replace" },
+    ]]));
+    try {
+      const badge = renderAgentRecordName({ type: "colored", alias: "audit" }, theme);
+      expect(badge).toContain("\u001b[48;2;130;125;189m");
+      expect(badge).toContain(" audit ");
+    } finally {
+      registerAgents(new Map());
+    }
+  });
+
+  it("renderAgentName's instanceName override keeps the type's color", () => {
+    registerAgents(new Map([[
+      "colored",
+      { name: "colored", displayName: "Colored", color: "purple", description: "d", extensions: false, skills: false, promptMode: "replace" },
+    ]]));
+    try {
+      expect(renderAgentName("colored", theme, { fallbackColor: "toolTitle" }, "requested")).toContain(" requested ");
+    } finally {
+      registerAgents(new Map());
+    }
   });
 });

@@ -7,7 +7,7 @@
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { renderAgentName } from "../agent-color.js";
+import { renderAgentRecordName } from "../agent-color.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -561,7 +561,7 @@ export class ConversationViewer implements Component {
     if (cost) headerParts.push(cost);
 
     lines.push(row(
-      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${renderAgentRecordName(this.record, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));

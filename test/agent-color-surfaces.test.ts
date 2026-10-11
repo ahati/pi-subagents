@@ -211,6 +211,18 @@ describe("custom agent color runtime surfaces", () => {
       expect(output).toContain(DISPLAY_NAME);
       expect(output).toContain(PURPLE_BACKGROUND);
 
+      // The row names the instance: a spawner's name (alias) wins over the type's display name.
+      record.alias = "audit-1";
+      record.handle = "colored-reviewer";
+      const named = factory?.(
+        { requestRender: vi.fn(), terminal: { columns: 120, rows: 40 } },
+        theme,
+      ).render(120).join("\n");
+      expect(named).toContain("audit-1");
+      expect(named).not.toContain(DISPLAY_NAME);
+      delete record.alias;
+      delete record.handle;
+
       registerColoredReviewer("invalid");
       const fallback = factory?.(
         { requestRender: vi.fn(), terminal: { columns: 120, rows: 40 } },
