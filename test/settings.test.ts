@@ -55,10 +55,17 @@ describe("settings persistence", () => {
   });
 
   it("returns {} when both files are malformed JSON", () => {
-    writeFileSync(globalFile(), "not json {{");
-    mkdirSync(join(projectDir, ".pi"), { recursive: true });
-    writeFileSync(projectFile(), "also not json");
-    expect(loadSettings(projectDir)).toEqual({});
+    // The warning itself is asserted in "warns to console.warn when an existing
+    // file is malformed" — silence the expected noise here.
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeFileSync(globalFile(), "not json {{");
+      mkdirSync(join(projectDir, ".pi"), { recursive: true });
+      writeFileSync(projectFile(), "also not json");
+      expect(loadSettings(projectDir)).toEqual({});
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("loads from global when no project file", () => {

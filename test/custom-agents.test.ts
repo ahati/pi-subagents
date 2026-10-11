@@ -691,16 +691,21 @@ Agent prompt.`);
     // Claude Code doesn't load these. Skipping beats loading it under the
     // filename, which would dispatch an agent whose declared identity nothing
     // honoured.
-    writeAgent("scoped", `---
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("scoped", `---
 name: my-plugin:reviewer
 description: Reviews code
 ---
 
 Agent prompt.`);
 
-    const result = loadCustomAgents(tmpDir);
-    expect(result.get("my-plugin:reviewer")).toBeUndefined();
-    expect(result.get("scoped")).toBeUndefined();
+      const result = loadCustomAgents(tmpDir);
+      expect(result.get("my-plugin:reviewer")).toBeUndefined();
+      expect(result.get("scoped")).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("does not claim the rejected file was overriding its filename's agent", () => {
@@ -885,22 +890,27 @@ Off.`);
   // extension load — pi exited 1 before the TUI. Regression for #212.
   it("skips a file with malformed frontmatter and still loads the others", () => {
     // Unquoted `description` containing ": " — the shape Claude Code tolerates.
-    writeAgent("broken", `---
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("broken", `---
 name: broken
 description: Use this: that
 ---
 
 Broken body.`);
-    writeAgent("good", `---
+      writeAgent("good", `---
 description: Still loads
 ---
 
 Good body.`);
 
-    const result = loadCustomAgents(tmpDir);
+      const result = loadCustomAgents(tmpDir);
 
-    expect(result.has("broken")).toBe(false);
-    expect(result.get("good")?.description).toBe("Still loads");
+      expect(result.has("broken")).toBe(false);
+      expect(result.get("good")?.description).toBe("Still loads");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("names the offending file and the reason when skipping it", () => {

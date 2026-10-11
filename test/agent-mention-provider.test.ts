@@ -134,27 +134,37 @@ describe("agent suggestions", () => {
     // We now call the inner provider for tokens we used to answer alone, and it
     // is not always pi's — an extension registered before us sits inside. A
     // rejection there must not delete the handle rows too.
-    const current = builtIn();
-    current.getSuggestions.mockRejectedValue(new Error("inner provider exploded"));
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const current = builtIn();
+      current.getSuggestions.mockRejectedValue(new Error("inner provider exploded"));
+      const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect(await suggest(provider, "@ex")).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
-      prefix: "@ex",
-    });
+      expect(await suggest(provider, "@ex")).toEqual({
+        items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
+        prefix: "@ex",
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("still offers agents when the wrapped provider throws synchronously", async () => {
     // The async case above is caught by any `.catch()`; this one is not — a sync
     // throw never yields a promise to attach to, so only try/catch holds it.
-    const current = builtIn();
-    current.getSuggestions.mockImplementation(() => { throw new Error("sync boom"); });
-    const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const current = builtIn();
+      current.getSuggestions.mockImplementation(() => { throw new Error("sync boom"); });
+      const provider = createMentionProvider(current, () => mentionRoster(managerWith(record({ handle: "explore" })), []), () => true);
 
-    expect(await suggest(provider, "@ex")).toEqual({
-      items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
-      prefix: "@ex",
-    });
+      expect(await suggest(provider, "@ex")).toEqual({
+        items: [{ value: "@explore", label: "@explore", description: "send message · running · find flaky tests" }],
+        prefix: "@ex",
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("warns once about a failing inner provider, not once per keystroke", async () => {

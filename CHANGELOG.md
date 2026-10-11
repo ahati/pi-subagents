@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+- **`npm publish` completes and the release pipeline runs clean.** The `-rN` calendar suffix is a semver prerelease, so npm refused an implicit `latest` tag — `publishConfig.tag` now pins it explicitly, and `"type": "module"` makes the ESM `dist/` output formal instead of relying on Node's syntax detection (also silencing the Vite config-loader warning). One worktree test still called the pre-`pi.exec` signature, verified nothing and emitted a Node `DEP0187` deprecation warning — it now exercises the isolation-switch behavior it claims; six other tests silence the failure-path logs they deliberately provoke.
+
 ## [2026.10.11-r1] - 2026-10-11
 
 ### Added

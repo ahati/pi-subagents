@@ -173,19 +173,26 @@ describe("toolDescriptionMode", () => {
   });
 
   it("custom mode renders the project template with placeholders substituted", () => {
-    const tools = setup({ toolDescriptionMode: "custom" }, () => {
-      writeFileSync(
-        join(tmpDir, ".pi", "agent-tool-description.md"),
-        "My agents:\n{{typeList}}\n\nGlobal dir: {{agentDir}}\nUnknown: {{nope}}\nCost: $& stays literal",
-      );
-    });
-    const desc: string = tools.get("Agent").description;
-    expect(desc).toContain("My agents:");
-    expect(desc).toContain("- general-purpose:"); // {{typeList}} expanded
-    expect(desc).toContain(`Global dir: ${hermeticAgentDir}`); // {{agentDir}} expanded
-    expect(desc).toContain("Unknown: {{nope}}"); // unknown placeholder left verbatim
-    expect(desc).toContain("Cost: $& stays literal"); // no $-pattern expansion
-    expect(desc).not.toContain("## Usage notes");
+    // The {{nope}} line below deliberately triggers the unknown-placeholder
+    // console.warn; this test asserts the rendered output, so silence the log.
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const tools = setup({ toolDescriptionMode: "custom" }, () => {
+        writeFileSync(
+          join(tmpDir, ".pi", "agent-tool-description.md"),
+          "My agents:\n{{typeList}}\n\nGlobal dir: {{agentDir}}\nUnknown: {{nope}}\nCost: $& stays literal",
+        );
+      });
+      const desc: string = tools.get("Agent").description;
+      expect(desc).toContain("My agents:");
+      expect(desc).toContain("- general-purpose:"); // {{typeList}} expanded
+      expect(desc).toContain(`Global dir: ${hermeticAgentDir}`); // {{agentDir}} expanded
+      expect(desc).toContain("Unknown: {{nope}}"); // unknown placeholder left verbatim
+      expect(desc).toContain("Cost: $& stays literal"); // no $-pattern expansion
+      expect(desc).not.toContain("## Usage notes");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("custom mode falls back to the global file when no project file exists", () => {
