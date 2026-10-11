@@ -228,9 +228,17 @@ export function buildInvocationTags(
   };
 }
 
-/** Truncate text to a single line, max `len` chars. */
+/**
+ * Truncate text to a single line, max `len` chars.
+ *
+ * Takes the LAST non-empty line, not the first: `responseText` is the assistant
+ * message's streamed text so far, and while an agent works the line that reads
+ * as "what is it doing now" is the tail of that stream. The first line completes
+ * as soon as the first `\n` arrives, so picking it would pin the subtext to the
+ * message's opening sentence for the rest of the message.
+ */
 function truncateLine(text: string, len = 60): string {
-  const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  const line = text.split("\n").map(l => l.trim()).filter(Boolean).at(-1) ?? "";
   if (line.length <= len) return line;
   return line.slice(0, len) + "…";
 }

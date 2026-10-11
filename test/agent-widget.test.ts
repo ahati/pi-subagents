@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -51,6 +51,48 @@ describe("renderRunningAgentStatus", () => {
       "⠋ thinking: xhigh · 4 tool uses",
       "  ⎿  thinking…",
     ]);
+  });
+});
+
+// While an agent streams text with no tool mid-flight, the `⎿` line shows a
+// line from that text. It must be the LAST line of the stream — what the agent
+// is writing right now — not the first, which completes as soon as the first
+// `\n` arrives and would otherwise pin the subtext to the message's opening
+// sentence for the rest of the message.
+describe("describeActivity text fallback", () => {
+  const noTools = new Map<string, string>();
+
+  it("shows the latest line of streamed text, not the first", () => {
+    const streamed = "Let me look at the files.\nReading the config now.\nFound three suspects in src/auth.ts.";
+    expect(describeActivity(noTools, streamed)).toBe("Found three suspects in src/auth.ts.");
+  });
+
+  it("rolls forward as new lines arrive", () => {
+    // Same message, two points in its stream: the displayed line must move.
+    const before = describeActivity(noTools, "First line done.\n");
+    const after = describeActivity(noTools, "First line done.\nSecond line is the current one.");
+    expect(before).toBe("First line done.");
+    expect(after).toBe("Second line is the current one.");
+  });
+
+  it("skips blank and whitespace-only lines when finding the latest", () => {
+    const streamed = "Opening line.\n\n   \n\nLatest after a gap.\n";
+    expect(describeActivity(noTools, streamed)).toBe("Latest after a gap.");
+  });
+
+  it("still truncates the picked line to 60 chars with an ellipsis", () => {
+    const long = "x".repeat(80);
+    expect(describeActivity(noTools, `short preamble.\n${long}`)).toBe("x".repeat(60) + "…");
+  });
+
+  it("keeps tool activity ahead of response text", () => {
+    const reading = new Map([["call-1", "read"], ["call-2", "read"]]);
+    expect(describeActivity(reading, "some streamed text")).toBe("reading 2 files…");
+  });
+
+  it("falls back to thinking… with no tools and no text", () => {
+    expect(describeActivity(noTools, "")).toBe("thinking…");
+    expect(describeActivity(noTools, "\n \n")).toBe("thinking…");
   });
 });
 
