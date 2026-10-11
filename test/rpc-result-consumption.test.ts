@@ -27,7 +27,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
-/** pi-subagents holds a completion notification for NUDGE_HOLD_MS (200ms). */
+/** pi-subagents-hub holds a completion notification for NUDGE_HOLD_MS (200ms). */
 const PAST_THE_HOLD_MS = 400;
 
 /**

@@ -1,6 +1,6 @@
 /**
  * print-mode-runner.ts — a headless ("print mode") host runner for driving the
- * pi-subagents extension through REAL end-to-end subagent runs.
+ * pi-subagents-hub extension through REAL end-to-end subagent runs.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -8,12 +8,12 @@
  * *gated tool set captured at construction* — they never drive a turn, so they
  * never actually spawn a subagent or exercise the background hold condition.
  * This runner closes that gap: it boots a real headless pi session with the
- * pi-subagents extension loaded, drives a real assistant turn that calls the
+ * pi-subagents-hub extension loaded, drives a real assistant turn that calls the
  * `Agent` tool, and lets the extension spawn a real child session through the
  * real `runAgent` path — then waits for it to finish exactly like a production
  * print-mode host does.
  *
- * It is the pi-subagents analogue of pi-chonky-step's `src/agent.ts` headless
+ * It is the pi-subagents-hub analogue of pi-chonky-step's `src/agent.ts` headless
  * runner: same shape (DefaultResourceLoader → createAgentSession → prompt loop),
  * and crucially it replicates pi-chonky-step's SUBAGENT HOLD CONDITION — the
  * `dequeueFollowUpMessages` monkey-patch that blocks the parent agent loop until
@@ -69,7 +69,7 @@ import {
 import { fauxModelBackend } from "./faux-model-backend.js";
 import { getModel, registerFauxProvider } from "./pi-ai.js";
 
-/** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
+/** Path to the pi-subagents-hub extension entrypoint (repo `src/index.ts`). */
 const EXTENSION_PATH = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
 
 /** The cross-package handle the extension publishes on a global Symbol. */

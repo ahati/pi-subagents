@@ -6,7 +6,7 @@
  * survivors — but the `pi.events` bus is shared with the filtered-out
  * activations. The old code registered the RPC handlers and emitted
  * `subagents:ready` at factory time, so a child session that excluded
- * pi-subagents still saw `subagents:ready` + a working `subagents:rpc:ping`,
+ * pi-subagents-hub still saw `subagents:ready` + a working `subagents:rpc:ping`,
  * yet every spawn failed with "No active session" (its session_start never
  * fired, so currentCtx stayed undefined).
  *

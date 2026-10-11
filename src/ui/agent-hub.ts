@@ -1,5 +1,5 @@
 /**
- * agent-hub.ts — Full-screen agent hub overlay (oh-my-pi style), pi-subagents data.
+ * agent-hub.ts — Full-screen agent hub overlay (oh-my-pi style), pi-subagents-hub data.
  *
  * One full-terminal overlay (`ctx.ui.custom` with `width: "100%"`,
  * `maxHeight: "100%"`), three views:

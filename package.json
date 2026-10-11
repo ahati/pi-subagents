@@ -1,16 +1,16 @@
 {
-  "name": "@ahati/pi-subagents",
+  "name": "pi-subagents-hub",
   "version": "0.20.0",
   "description": "A pi extension that brings Claude Code-like sub-agents and workflow orchestration to pi — parallel execution, live widget, fleet view, custom agent types, mid-run steering, dynamic workflows, Claude Code compatibility, look and feel.",
   "author": "ahati",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ahati/pi-subagents.git"
+    "url": "git+https://github.com/ahati/pi-subagents-hub.git"
   },
-  "homepage": "https://github.com/ahati/pi-subagents#readme",
+  "homepage": "https://github.com/ahati/pi-subagents-hub#readme",
   "bugs": {
-    "url": "https://github.com/ahati/pi-subagents/issues"
+    "url": "https://github.com/ahati/pi-subagents-hub/issues"
   },
   "publishConfig": {
     "access": "public"

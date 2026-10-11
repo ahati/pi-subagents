@@ -1,9 +1,9 @@
 # Security Policy
 
-This document explains the security model behind `@ahati/pi-subagents` and
+This document explains the security model behind `pi-subagents-hub` and
 where the boundaries are.
 
-`pi-subagents` is a [pi](https://pi.dev) extension. It spawns and orchestrates
+`pi-subagents-hub` is a [pi](https://pi.dev) extension. It spawns and orchestrates
 autonomous sub-agents that run locally within the same security boundary as the
 user running pi, and inherit pi's trust model. It is the responsibility of the
 user to monitor those agents' operations or to contain them within a container,
@@ -17,10 +17,10 @@ modify files under the user's home directory, workspace, shell startup files,
 environment, pi configuration, or this extension's configuration, they can
 generally influence pi, its sub-agents, or other local developer tools. Reports
 that depend on such prior local write access are not security vulnerabilities
-unless they demonstrate how `pi-subagents` grants that write access or crosses an
+unless they demonstrate how `pi-subagents-hub` grants that write access or crosses an
 operating-system privilege boundary.
 
-`pi-subagents` relies on the user only loading trustworthy agent definitions
+`pi-subagents-hub` relies on the user only loading trustworthy agent definitions
 (`.pi/agents/*.md`, `.agents/agents/*.md`, and global agents), skills, and
 tools, and only using pi within trusted repositories. Files like `AGENTS.md`,
 custom agent frontmatter/system prompts, preloaded skills, or instructions
@@ -29,7 +29,7 @@ coding agent and its sub-agents trivially, and this cannot be protected against.
 
 ## Reporting a Vulnerability
 
-If you believe you found a security vulnerability in `pi-subagents`, please
+If you believe you found a security vulnerability in `pi-subagents-hub`, please
 report it privately by opening a draft advisory through
 [GitHub Security Advisories](https://github.com/tintinweb/pi-subagents/security/advisories/new)
 for this repository.
@@ -47,7 +47,7 @@ reviewed and disclosure coordinated as appropriate.
 ## Scope
 
 Security issues in the published npm package and the code in this repository are
-in scope — for example, a flaw in `pi-subagents` that crosses an
+in scope — for example, a flaw in `pi-subagents-hub` that crosses an
 operating-system privilege boundary, or that causes the extension to bypass a
 tool restriction, denylist, or agent boundary it claims to enforce.
 
@@ -70,7 +70,7 @@ tool restriction, denylist, or agent boundary it claims to enforce.
   user-controlled local state on the target machine. This includes `.pi/agents/`,
   `.agents/agents/`, agent and extension configuration, persistent agent memory,
   workspace files, `AGENTS.md`, skills, dotfiles, and files synchronized through NFS, roaming
-  profiles, or dotfile managers, unless the report shows how `pi-subagents`
+  profiles, or dotfile managers, unless the report shows how `pi-subagents-hub`
   itself grants that access.
 - Issues caused by intentionally weakened user configuration
 - Resource/DOS claims that require trusted local input/config
@@ -92,4 +92,4 @@ is out of scope.
 When possible, include the exact affected path, package version or commit SHA,
 configuration, and a proof of concept against the latest release or latest
 `master`. For dependency reports, include evidence that the shipped dependency is
-affected and that the issue is reachable through `pi-subagents`.
+affected and that the issue is reachable through `pi-subagents-hub`.

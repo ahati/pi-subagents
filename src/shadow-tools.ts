@@ -104,7 +104,7 @@ export const shadowToolsFactory = (pi: ExtensionAPI): void => {
           | ShadowManagerRegistry
           | undefined;
         if (typeof registry?.getRecord !== "function") {
-          return shadowResult("pi-subagents is not active in this session — no agent records are available.");
+          return shadowResult("pi-subagents-hub is not active in this session — no agent records are available.");
         }
         const record = registry.getRecord(params.agent_id) as ShadowRecord | undefined;
         if (!record) {
@@ -137,7 +137,7 @@ export const shadowToolsFactory = (pi: ExtensionAPI): void => {
       name: "Agent",
       label: "Agent",
       description:
-        "Spawn a background subagent through the live pi-subagents manager. Use this to launch or re-launch delegated work; the agent keeps running and you will be notified when it completes.",
+        "Spawn a background subagent through the live pi-subagents-hub manager. Use this to launch or re-launch delegated work; the agent keeps running and you will be notified when it completes.",
       promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
       parameters: Type.Object({
         prompt: Type.String({ description: "The task for the agent to perform." }),
@@ -153,7 +153,7 @@ export const shadowToolsFactory = (pi: ExtensionAPI): void => {
           | ShadowManagerRegistry
           | undefined;
         if (typeof registry?.spawn !== "function") {
-          return shadowResult("pi-subagents is not active in this session — subagents cannot be spawned from the continued turn.", true);
+          return shadowResult("pi-subagents-hub is not active in this session — subagents cannot be spawned from the continued turn.", true);
         }
         try {
           const agentId = registry.spawn(

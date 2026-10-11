@@ -1,10 +1,10 @@
-# Contributing to @ahati/pi-subagents
+# Contributing to pi-subagents-hub
 
 This guide exists to save both sides time.
 
 ## Philosophy
 
-`pi-subagents` is a [pi](https://pi.dev) extension, and it tries to stay focused:
+`pi-subagents-hub` is a [pi](https://pi.dev) extension, and it tries to stay focused:
 spawn and orchestrate autonomous sub-agents that feel native to pi, and do that
 well. Features that don't serve that goal, or that bolt on unrelated complexity,
 are likely to be declined. When in doubt, open an issue and discuss the idea

@@ -1,4 +1,4 @@
-# @ahati/pi-subagents (ahati fork)
+# pi-subagents-hub
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
 
@@ -64,12 +64,12 @@ UI-layer enhancements over upstream:
 **Install this fork** (git source, tracks `master`):
 
 ```bash
-pi install git:github.com/ahati/pi-subagents@master
+pi install git:github.com/ahati/pi-subagents-hub@master
 ```
 
-Update later with `pi update git:github.com/ahati/pi-subagents@master`.
+Update later with `pi update git:github.com/ahati/pi-subagents-hub@master`.
 
-A `prepare` script compiles `dist/` during that install, and pi loads the compiled `./dist/index.js` entry instead of transpiling `./src/index.ts` on every boot ([tintinweb/pi-subagents#279](https://github.com/tintinweb/pi-subagents/pull/279) — thanks [@tobymao](https://github.com/tobymao)). The path-derived extension name is `[dist]`; refer to this extension as `[pi-subagents]` in `extensions:` lists.
+A `prepare` script compiles `dist/` during that install, and pi loads the compiled `./dist/index.js` entry instead of transpiling `./src/index.ts` on every boot ([tintinweb/pi-subagents#279](https://github.com/tintinweb/pi-subagents/pull/279) — thanks [@tobymao](https://github.com/tobymao)). The path-derived extension name is `[dist]`; refer to this extension as `[pi-subagents-hub]` in `extensions:` lists.
 
 **Upstream release** (npm package, without the fork's UI additions):
 
@@ -633,7 +633,7 @@ When background agents complete, they notify the main agent. The **join mode** c
 
 **Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.
 
-When on, each subagent spawn's effective model is validated against pi's own `enabledModels` list (configured via pi's `/scoped-models` UI). pi-subagents reads that list; it doesn't manage it. Both of pi's settings files are honored: global `~/.pi/agent/settings.json` and project-local `<cwd>/.pi/settings.json`. **Project overrides global** — mirrors pi's `SettingsManager` deep-merge, so a tighter per-project scope (hand-edited into the project settings) is respected.
+When on, each subagent spawn's effective model is validated against pi's own `enabledModels` list (configured via pi's `/scoped-models` UI). pi-subagents-hub reads that list; it doesn't manage it. Both of pi's settings files are honored: global `~/.pi/agent/settings.json` and project-local `<cwd>/.pi/settings.json`. **Project overrides global** — mirrors pi's `SettingsManager` deep-merge, so a tighter per-project scope (hand-edited into the project settings) is respected.
 
 **Out-of-scope handling depends on source:**
 
@@ -761,7 +761,7 @@ EOF
 
 Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
 
-**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
+**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents-hub] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
 
 ## Events
 
@@ -780,7 +780,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here | `{}` |
 | `subagents:scheduled` | Schedule lifecycle change | `type` (`"added"` / `"removed"` / `"updated"` / `"fired"` / `"error"`) plus: `added`/`updated` → `job`; `removed` → `jobId`; `fired` → `jobId`, `agentId`, `name`; `error` → `jobId`, `error` |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
-| `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | `{}` (empty object) |
+| `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents-hub | `{}` (empty object) |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
 
@@ -810,7 +810,7 @@ pi.events.on("subagents:ready", () => {
 });
 ```
 
-`subagents:ready` fires only when pi-subagents is actually loaded **and bound** in the current session. A session that excludes it (via an agent's `extensions:`) emits no `subagents:ready` and does not answer the RPC channels — exactly as if pi-subagents were not installed. Treat "no `subagents:ready`" as "not available here" and give discovery a timeout rather than waiting indefinitely.
+`subagents:ready` fires only when pi-subagents-hub is actually loaded **and bound** in the current session. A session that excludes it (via an agent's `extensions:`) emits no `subagents:ready` and does not answer the RPC channels — exactly as if pi-subagents-hub were not installed. Treat "no `subagents:ready`" as "not available here" and give discovery a timeout rather than waiting indefinitely.
 
 ### Ping
 
