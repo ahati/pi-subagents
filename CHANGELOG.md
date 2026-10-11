@@ -9,7 +9,7 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
-## [Unreleased]
+## [2026.10.12-r1] - 2026-10-12
 
 ### Added
 - **Merged upstream `tintinweb/pi-subagents` through 7d83085.** Four upstream changes land on the fork:
