@@ -14,14 +14,6 @@ The extension deliberately mirrors Claude Code's tool names, calling
 conventions, and UI patterns. Changes should respect that compatibility unless
 there's a good reason to diverge.
 
-## The One Rule
-
-**You must understand your code.** If you cannot explain what your changes do and
-how they interact with the rest of the system, the PR will be closed.
-
-Using AI to write code is fine. Submitting AI-generated slop without
-understanding it is not.
-
 ## Filing Issues
 
 Keep issues short, concrete, and worth reading.

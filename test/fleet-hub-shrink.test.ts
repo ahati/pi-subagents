@@ -20,7 +20,6 @@
 import { type Component, Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { AgentManager, AgentRecord } from "../src/types.js";
-import { openAgentHub } from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import { FleetList } from "../src/ui/fleet-list.js";
 

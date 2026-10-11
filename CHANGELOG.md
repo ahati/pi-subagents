@@ -2,10 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Versions are calendar-based: `YYYY.MM.DD-r<n>`, where `r<n>` is the release
+number for that date. No Semantic Versioning compatibility promises are made —
+check the entries below for behaviour changes.
 
 ## [Unreleased]
+
+## [2026.10.11-r1] - 2026-10-11
 
 ### Added
 - **The conversation panel and hub chat stream a subagent's in-flight message.** The viewer rendered completed messages only, so while the model was writing, the pane showed a bare header and nothing else until the turn finished. The partial assistant message now renders as it grows — text through the same Markdown pipeline (its cache already handles append-only growth), thinking blocks through the same receded preview — with a dim `✻ thinking…` line under the header while nothing legible has arrived. (Adapted from the community fork's [#4](https://github.com/mt-code/pi-subagents-community/pull/4).)
