@@ -6,7 +6,7 @@
  * games. The v2 surface does not exist yet, so the tests fail on the missing
  * exports/behaviour, not on syntax.
  *
- * Pinned contract (from docs/pause-quit-resume-continue.md §5.1/§7):
+ * Pinned contract (from docs/pause-quit-resume-continue.md §5.2):
  *   - PauseStoreData { version: 2, entries, mainTurn? }
  *   - store.getMainTurn() / store.setMainTurn(turn | undefined)
  *   - replace(entries) never deletes a present mainTurn; replace([]) still

@@ -35,7 +35,7 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { type PausedAgentEntry, type PausedMainTurn, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { continueSessionBare, countUnansweredToolCalls } from "./session-continue.js";
+import { continueSessionBare, countUnansweredToolCalls, finalReportFromSessionFile } from "./session-continue.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { shadowToolsFactory } from "./shadow-tools.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
@@ -813,7 +813,7 @@ export default function (pi: ExtensionAPI) {
     // activation off the global registry and calls here instead. Not `spawn`:
     // that is the safety-stripped cross-package door, while this revive must
     // carry `resumeSessionFile` and `reclaim`
-    // (docs/pause-quit-resume-continue.md §10.1.3, §10.2.3).
+    // (docs/pause-quit-resume-continue.md §5.4).
     revivePausedEntry: continuePausedEntry,
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
@@ -867,6 +867,10 @@ export default function (pi: ExtensionAPI) {
     mainTurnSwitchInProgress = false;
     openMainTurnGate();
     heldNudges.length = 0;
+    // Captures belong to the session that wrote them; a fresh session's
+    // manifest must not inherit a previous session's rows. The manifest on
+    // disk is what the resumed activation (and `/continue`) reads.
+    capturedSettled.clear();
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -1191,7 +1195,7 @@ export default function (pi: ExtensionAPI) {
     workflowTasks.clear();
     // Quit while /pause is still armed (the main model never reached its
     // boundary): land the park best-effort so the manifest carries the parked
-    // subagents and the interrupted main turn (docs §10.1.4) — BEFORE abortAll,
+    // subagents and the interrupted main turn (PRD §4.1 FR-P8) — BEFORE abortAll,
     // which would otherwise lose all of it.
     if (armedPause) {
       armedPause = false;
@@ -3026,11 +3030,11 @@ Terse command-style prompts produce shallow, generic work.
   /**
    * Prompts a resume applies: none. A resume (gate reopen, bare continuation,
    * revive) never sends a synthetic prompt — the transcript is what continues
-   * (docs/pause-quit-resume-continue.md §3.5). `@handle` mentions still carry
+   * (docs/pause-quit-resume-continue.md §4.2 FR-C1). `@handle` mentions still carry
    * the user's own typed text.
    */
 
-  // ---- Main-turn park state (docs/pause-quit-resume-continue.md §3.2) ----
+  // ---- Main-turn park state (docs/pause-quit-resume-continue.md §4.1) ----
 
   /** `/pause` typed while the main model streams; the park lands at the next boundary. */
   let armedPause = false;
@@ -3038,7 +3042,7 @@ Terse command-style prompts produce shallow, generic work.
    * True while OUR OWN /continue-driven switchSession is in flight: the
    * replacement activation must take over without the shutdown handler
    * aborting/disposing the manager the withSession revival needs
-   * (docs/pause-quit-resume-continue.md §10.1.3).
+   * (docs/pause-quit-resume-continue.md §5.4).
    */
   let mainTurnSwitchInProgress = false;
   /** The park landed in this session: the main run is suspended behind `mainGate`. */
@@ -3056,6 +3060,58 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
     send();
+  }
+
+  /**
+   * Settled-but-unconsumed top-level results `/pause` captured into the
+   * manifest. Their runs are done, so they are never gated or paused: the rows
+   * exist so `/continue` can deliver the reports — in-session from the live
+   * record, or after a restart from each entry's session file. Kept in the
+   * factory closure alongside the other park state; the manifest on disk is
+   * what a replacement activation sees.
+   */
+  const capturedSettled = new Map<string, PausedAgentEntry>();
+
+  /** The manifest row a captured settled record is listed under. */
+  function pauseEntryFor(record: AgentRecord & { sessionFile: string }): PausedAgentEntry {
+    return {
+      id: record.id,
+      type: record.type,
+      handle: record.handle,
+      alias: record.alias,
+      description: record.description,
+      sessionFile: record.sessionFile,
+      pausedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * A settled top-level agent whose report nobody has read yet and whose
+   * conversation is on disk: `/pause` captures it so a later `/continue` can
+   * deliver the result the completion nudge may never get to. Not gated or
+   * paused — the run is already over.
+   */
+  function isCapturableResult(record: AgentRecord): record is AgentRecord & { sessionFile: string } {
+    return isTopLevelAgent(record)
+      && (record.status === "completed" || record.status === "steered" || record.status === "error")
+      && record.resultConsumed !== true
+      && typeof record.sessionFile === "string";
+  }
+
+  /**
+   * Park every settled-unconsumed result the session still owes its caller:
+   * rows go into `capturedSettled` and, via the merge in `syncPauseManifest`,
+   * onto the manifest. Returns how many were newly captured.
+   */
+  function captureSettledResults(ctx: ExtensionContext): number {
+    let captured = 0;
+    for (const record of manager.listAgents()) {
+      if (!isCapturableResult(record) || capturedSettled.has(record.id)) continue;
+      capturedSettled.set(record.id, pauseEntryFor(record));
+      captured++;
+    }
+    if (captured > 0) syncPauseManifest(ctx);
+    return captured;
   }
 
   function pauseStoreFor(ctx: ExtensionContext): PauseStore {
@@ -3115,13 +3171,18 @@ Terse command-style prompts produce shallow, generic work.
   async function landPark(ctx: ExtensionContext, boundaryCount = 0): Promise<void> {
     // The gate suspends at the assistant message's unanswered tool calls; the
     // transcript tail carries them (the previous count captured only the call
-    // the gate stopped at — docs §10.2.5). A host with no transcript view (a
+    // the gate stopped at — PRD §5.2). A host with no transcript view (a
     // read-only context, the shutdown landing) falls back to the boundary's own
     // count.
     const branch = ctx.sessionManager?.getBranch?.() ?? [];
     const pendingTools = branch.length > 0 ? countUnansweredToolCalls(branch) : boundaryCount;
     armedPause = false;
     parkedMain = true;
+    // Settled-unconsumed results land in the same manifest as the parked runs:
+    // the main turn is about to stop listening to completion nudges, so a
+    // report that already arrived but was never consumed must not be lost on
+    // the way to `/continue`.
+    const captured = captureSettledResults(ctx);
     let paused = 0;
     let ephemeral = 0;
     const refused: string[] = [];
@@ -3145,6 +3206,7 @@ Terse command-style prompts produce shallow, generic work.
     pauseStoreFor(ctx).setMainTurn(mainTurn);
     const parts = [`Main turn parked at its boundary (${pendingTools} pending tool call${pendingTools === 1 ? "" : "s"})`];
     if (paused > 0) parts.push(`parked ${paused} agent${paused === 1 ? "" : "s"}`);
+    if (captured > 0) parts.push(`captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue`);
     if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
     if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
     ctx.ui.notify(parts.join("; ") + " — /continue resumes.", "info");
@@ -3218,11 +3280,12 @@ Terse command-style prompts produce shallow, generic work.
 
   /**
    * Rewrite the session's pause manifest from the live records: exactly the
-   * top-level agents currently paused WITH a persisted session file. The
-   * settle callback calls this on every transition so the manifest never
-   * lists an agent that is no longer parked; `/pause` and `/continue` also
-   * call it directly around their batch work. Best-effort — an unwritable
-   * `.pi/` must never break pausing itself.
+   * top-level agents currently paused WITH a persisted session file, plus the
+   * settled-unconsumed results `capturedSettled` holds. The settle callback
+   * calls this on every transition so the manifest never lists an agent that
+   * is no longer parked; `/pause` and `/continue` also call it directly around
+   * their batch work. Best-effort — an unwritable `.pi/` must never break
+   * pausing itself.
    */
   function syncPauseManifest(ctx: ExtensionContext): void {
     const sessionId = ctx.sessionManager?.getSessionId?.();
@@ -3244,6 +3307,18 @@ Terse command-style prompts produce shallow, generic work.
           sessionFile: a.sessionFile,
           pausedAt: previous.get(a.id) ?? new Date().toISOString(),
         }));
+      // Captured settled results ride the same rewrite: their runs are done,
+      // but their reports are still owed. A result consumed since capture is
+      // dropped here; one whose record is gone (restart, eviction timer) stays
+      // — the session file can still deliver it.
+      const present = new Set(entries.map(e => e.id));
+      for (const [id, entry] of [...capturedSettled]) {
+        if (manager.getRecord(id)?.resultConsumed === true) {
+          capturedSettled.delete(id);
+          continue;
+        }
+        if (!present.has(id)) entries.push(entry);
+      }
       store.replace(entries);
     } catch {
       // Manifest write failed — in-session pause/resume still works.
@@ -3271,9 +3346,13 @@ Terse command-style prompts produce shallow, generic work.
       ctx.ui.notify("Pausing when the turn reaches its next boundary — /pause again to cancel.", "info");
       return;
     }
+    // Settled-unconsumed results are captured alongside the parked agents: a
+    // child that finished before `/pause` has nothing left to gate, but its
+    // report must survive the quit the same way (PRD §5.5; session 01a12ae5).
+    const captured = captureSettledResults(ctx);
     const active = manager.listAgents().filter(isTopLevelAgent)
       .filter(a => a.status === "running" || a.status === "queued");
-    if (active.length === 0) {
+    if (active.length === 0 && captured === 0) {
       ctx.ui.notify("No active agents to pause.", "info");
       return;
     }
@@ -3292,7 +3371,9 @@ Terse command-style prompts produce shallow, generic work.
       if (!record.sessionFile) ephemeral++;
     }
     syncPauseManifest(ctx);
-    const parts = [`Paused ${paused} agent${paused === 1 ? "" : "s"}`];
+    const parts: string[] = [];
+    if (paused > 0) parts.push(`Paused ${paused} agent${paused === 1 ? "" : "s"}`);
+    if (captured > 0) parts.push(`Captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue`);
     if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
     if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
     ctx.ui.notify(parts.join("; ") + ".", "info");
@@ -3344,13 +3425,67 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
     // Reads fall back to a parent-directory scan: the manifest may have been
-    // written under the session's original cwd (docs §5.1).
+    // written under the session's original cwd (PRD §5.2).
     const store = new PauseStore(resolvePauseManifestPath(ctx.cwd, sessionId));
     const entries = store.list();
     const mainTurn = store.getMainTurn();
     if (entries.length === 0 && !mainTurn?.parked) {
       ctx.ui.notify("Nothing paused in this session.", "info");
       return;
+    }
+
+    // Split the manifest before anything runs. A captured settled result needs
+    // no run: it is delivered from its live record (this process) or from its
+    // session file (a previous one). Only the entries that still need a run go
+    // to the revival loop.
+    const deliverable: PausedAgentEntry[] = [];
+    const revivable: PausedAgentEntry[] = [];
+    for (const entry of entries) {
+      if (capturedSettled.has(entry.id)) {
+        // Consumed since capture (get_subagent_result or an RPC read):
+        // nothing is owed any more, so the row is dropped, not delivered.
+        if (manager.getRecord(entry.id)?.resultConsumed === true) {
+          capturedSettled.delete(entry.id);
+          continue;
+        }
+        deliverable.push(entry);
+        continue;
+      }
+      // A manifest written by an EARLIER process carries no in-memory capture
+      // marker. A conversation that already ended on its final report is that
+      // run's result, not a parked run to revive (PRD §5.5; session
+      // 01a12ae5); a transcript parked at a tool boundary has no final report
+      // and revives as before.
+      if (!manager.getRecord(entry.id) && finalReportFromSessionFile(entry.sessionFile) !== undefined) {
+        deliverable.push(entry);
+        continue;
+      }
+      revivable.push(entry);
+    }
+
+    // Deliver the captured settled results FIRST, through the activation that
+    // dispatched /continue — before any session switch can invalidate it. They
+    // are reports already produced, not runs to reopen.
+    let delivered = 0;
+    const undelivered: PausedAgentEntry[] = [];
+    for (const entry of deliverable) {
+      const live = manager.getRecord(entry.id);
+      const report = live ? (live.result ?? live.error ?? "") : finalReportFromSessionFile(entry.sessionFile);
+      if (!live && report === undefined) {
+        // No record and no final answer in the session file (deleted, or a
+        // transcript that does not end on one): keep the row for a later
+        // attempt instead of dropping the result silently.
+        undelivered.push(entry);
+        continue;
+      }
+      try {
+        deliverCapturedResult(entry, live, report ?? "");
+        if (live) live.resultConsumed = true;
+        capturedSettled.delete(entry.id);
+        delivered++;
+      } catch {
+        undelivered.push(entry);
+      }
     }
 
     let continuedMain = false;
@@ -3362,7 +3497,7 @@ Terse command-style prompts produce shallow, generic work.
       const held = heldNudges.splice(0);
       for (const send of held) send();
     } else if (mainTurn?.parked) {
-      // Cross-restart park (docs §6): continue the main turn FIRST — in a
+      // Cross-restart park (PRD §5.3): continue the main turn FIRST — in a
       // shadow session, never with a prompt — and adopt it via a session
       // switch; the subagents revive inside the replacement session, so a
       // failure cannot half-adopt the continuation.
@@ -3374,7 +3509,10 @@ Terse command-style prompts produce shallow, generic work.
         return;
       }
       store.setMainTurn({ ...mainTurn, claim: { pid: process.pid, at: new Date().toISOString() } });
-      const ok = await continueParkedMainTurn(ctx, store, entries);
+      // Captured settled rows are deliberately not handed to the switch path:
+      // there is no run to revive, and delivering from the torn-down activation
+      // would throw after a real switch.
+      const ok = await continueParkedMainTurn(ctx, store, revivable);
       if (ok) return;
       continuedMain = false;
       ctx.ui.notify("Continuing the subagents only — the main turn could not be continued.", "warning");
@@ -3383,23 +3521,74 @@ Terse command-style prompts produce shallow, generic work.
     let resumed = 0;
     let stale = 0;
     const failed: PausedAgentEntry[] = [];
-    for (const entry of entries) {
+    for (const entry of revivable) {
       const outcome = await continuePausedEntry(ctx, entry);
       if (outcome === "resumed") resumed++;
       else if (outcome === "stale") stale++;
       else failed.push(entry);
     }
-    store.replace(failed);
+    // One final rewrite: revived/stale rows are gone, failed revivals and
+    // undelivered captures stay for a later `/continue`.
+    store.replace([...failed, ...undelivered]);
+
     const parts: string[] = [];
     if (continuedMain) parts.push("Continued the parked main turn");
     if (resumed > 0) parts.push(`Continued ${resumed} agent${resumed === 1 ? "" : "s"}`);
     if (stale > 0) parts.push(`${stale} already handled`);
+    if (delivered > 0) parts.push(`Delivered ${delivered} completed agent result${delivered === 1 ? "" : "s"}`);
     if (failed.length > 0) parts.push(`${failed.length} could not be revived (kept in the manifest)`);
-    ctx.ui.notify(parts.join("; ") + ".", !continuedMain && resumed === 0 && failed.length > 0 ? "warning" : "info");
+    if (undelivered.length > 0) parts.push(`${undelivered.length} result${undelivered.length === 1 ? "" : "s"} could not be delivered (kept in the manifest)`);
+    if (parts.length === 0) parts.push("Nothing left to continue");
+    ctx.ui.notify(parts.join("; ") + ".", !continuedMain && resumed === 0 && delivered === 0 && failed.length > 0 ? "warning" : "info");
   }
 
   /**
-   * The M1 shadow continuation (docs §6): reopen the parked main session in a
+   * Deliver one captured settled result through the ordinary completion
+   * notification — the same custom type and follow-up semantics a live finish
+   * uses. A still-in-memory record (captured and continued in the same
+   * process) reuses the standard notification formatter; without one, the
+   * report is composed from the manifest row alone, because after a restart
+   * the session file is the only thing left.
+   */
+  function deliverCapturedResult(entry: PausedAgentEntry, live: AgentRecord | undefined, report: string): void {
+    const footer = `\nFull transcript available at: ${entry.sessionFile}`;
+    if (live) {
+      holdWhileParked(() => pi.sendMessage<NotificationDetails>({
+        customType: "subagent-notification",
+        content: formatTaskNotification(live, 500, showCost) + footer,
+        display: true,
+        details: buildNotificationDetails(live, 500, agentActivity.get(live.id)),
+      }, { deliverAs: "followUp", triggerTurn: true }));
+      return;
+    }
+    const content = [
+      "<task-notification>",
+      `<task-id>${entry.id}</task-id>`,
+      `<status>completed</status>`,
+      `<summary>Agent "${escapeXml(entry.description)}" completed</summary>`,
+      `<result>${escapeXml(report)}</result>`,
+      "</task-notification>",
+    ].join("\n") + footer;
+    holdWhileParked(() => pi.sendMessage<NotificationDetails>({
+      customType: "subagent-notification",
+      content,
+      display: true,
+      details: {
+        id: entry.id,
+        description: entry.description,
+        status: "completed",
+        toolUses: 0,
+        turnCount: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        durationMs: 0,
+        resultPreview: report.length > 500 ? `${report.slice(0, 500)}…` : report,
+      },
+    }, { deliverAs: "followUp", triggerTurn: true }));
+  }
+
+  /**
+   * The M1 shadow continuation (PRD §5.3): reopen the parked main session in a
    * second SessionManager, execute the pending tool calls through the real
    * pipeline, bare-continue the turn — never with a prompt — and let the live
    * UI adopt the file via switchSession. The subagent entries revive inside
@@ -3430,7 +3619,7 @@ Terse command-style prompts produce shallow, generic work.
       const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: ctx.isProjectTrusted?.() ?? true });
       // No extension discovery: the shadow session heals pending built-in tool
       // calls and bare-continues. Extension/MCP-backed pending calls resolve as
-      // honest errors for the model to re-plan around (docs §6.4 hazard 3), and
+      // honest errors for the model to re-plan around (PRD §7), and
       // skipping discovery avoids loading this extension a second time.
       const loader = new DefaultResourceLoader({
         cwd,
@@ -3444,12 +3633,12 @@ Terse command-style prompts produce shallow, generic work.
         // Factories load even under noExtensions: the shadow session gets a
         // working `get_subagent_result` (resolving through the live manager
         // registry) without activating the whole extension a second time
-        // (docs §10.1.1, §10.2.1).
+        // (PRD §5.3).
         extensionFactories: [shadowToolsFactory],
       });
       // Inside a child-session context a second full activation is a no-op;
       // the guard keeps any accidental discovery from writing process-global
-      // state (docs §10.2.1).
+      // state (PRD §5.3).
       await runInChildSessionContext(() => loader.reload());
       const { session } = await createAgentSession({
         sessionManager,
@@ -3469,7 +3658,7 @@ Terse command-style prompts produce shallow, generic work.
       const failed: PausedAgentEntry[] = [];
       // A host without a session-switch handler calls `withSession` never and
       // resolves as if it had: without this flag the claim would be stranded
-      // and the entry fallback suppressed (docs §10.1.2, §10.2.2).
+      // and the entry fallback suppressed (PRD §5.4).
       let adopted = false;
       mainTurnSwitchInProgress = true;
       try {
@@ -3494,7 +3683,7 @@ Terse command-style prompts produce shallow, generic work.
             // shutdown guard above released the slot so it could publish.
             // Revive through that — the switch invalidated this activation's
             // own closures, so spawning from them would run in a manager whose
-            // `pi` and ctx are gone (docs §10.1.3, §10.2.3). A host that never
+            // `pi` and ctx are gone (PRD §5.4). A host that never
             // replaced the activation (a bare callback, an event-replay
             // harness, a switch double) has no fresh entry, and there this
             // activation is still live — the local path is correct.
@@ -3667,10 +3856,19 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
+    // Same capture as `/pause`: the bulk pause is the same park by another
+    // surface, so a settled-unconsumed result must be parked for `/continue`
+    // here too.
+    const captured = captureSettledResults(ctx);
     const active = manager.listAgents().filter(isTopLevelAgent)
       .filter(a => a.status === "running" || a.status === "queued");
     if (active.length === 0) {
-      ctx.ui.notify("No active agents.", "info");
+      ctx.ui.notify(
+        captured > 0
+          ? `No active agents — captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue.`
+          : "No active agents.",
+        "info",
+      );
       return;
     }
     let paused = 0;
@@ -3681,6 +3879,7 @@ Terse command-style prompts produce shallow, generic work.
     }
     ctx.ui.notify(
       `Paused ${paused} agent${paused === 1 ? "" : "s"}` +
+      (captured > 0 ? `; captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue` : "") +
       (skipped > 0 ? ` — ${skipped} skipped (foreground or worktree-isolated)` : "") + ".",
       "info",
     );

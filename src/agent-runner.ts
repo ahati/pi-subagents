@@ -1196,7 +1196,7 @@ export async function runAgent(
     if (prompt === undefined) {
       // Reviving a conversation with no new prompt: heal any unanswered tool
       // calls and continue the transcript bare — no synthetic prompt of any
-      // kind (docs/pause-quit-resume-continue.md §3.5).
+      // kind (docs/pause-quit-resume-continue.md §4.2 FR-C2).
       await continueSessionBare(session, { signal: options.signal });
     } else {
       // Build the effective prompt: optionally prepend parent context
@@ -1266,7 +1266,7 @@ export interface ResumeAgentOptions {
  * With no prompt the resume is BARE: the transcript as it stands is healed and
  * continued through `continueSessionBare` — pending tool calls execute, the
  * results persist, and the next model request sees no new message of any kind
- * (docs/pause-quit-resume-continue.md §3.5). A string in the second position is
+ * (docs/pause-quit-resume-continue.md §4.2 FR-C2). A string in the second position is
  * a caller-supplied prompt — the user's own typed text from an `@handle <text>`
  * mention, never a library-generated continuation — and keeps the historical
  * prompt-bearing resume.

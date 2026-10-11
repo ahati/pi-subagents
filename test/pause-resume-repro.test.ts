@@ -127,6 +127,57 @@ async function spawnRunningChild(b: BootedPi, childFile: string): Promise<string
   return /Agent ID: (\S+)/.exec(textOf(r))![1];
 }
 
+/** A runAgent that settles at once, leaving a completed record with a session file. */
+function finishedRunWithRealSession(childFile: string, report: string) {
+  vi.mocked(runAgent).mockImplementationOnce((_ctx: any, _type: any, _prompt: any, opts: any) => {
+    const session = {
+      steer: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+      messages: [],
+      getActiveToolNames: vi.fn(() => []),
+      sessionManager: { getSessionFile: () => childFile },
+    };
+    opts.onSessionCreated?.(session);
+    return Promise.resolve({
+      responseText: report,
+      session,
+      aborted: false,
+      steered: false,
+      failure: undefined,
+    }) as any;
+  });
+}
+
+/** A child session file whose last message is the assistant's final report. */
+function writeFinalReportSession(childFile: string, report: string) {
+  mkdirSync(join(childFile, ".."), { recursive: true });
+  const lines = [
+    { type: "session" },
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 } },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "text", text: report }], stopReason: "stop", timestamp: 2 },
+    },
+  ];
+  writeFileSync(childFile, lines.map(line => JSON.stringify(line)).join("\n") + "\n");
+}
+
+/** Spawn one background child that finishes at once, reporting `report`. */
+async function spawnFinishedChild(b: BootedPi, childFile: string, report: string, description: string): Promise<string> {
+  writeFinalReportSession(childFile, report);
+  finishedRunWithRealSession(childFile, report);
+  const r = await b.tools.get("Agent").execute(
+    `tc-${description}`,
+    { prompt: "go", description, subagent_type: "Explore", run_in_background: true },
+    undefined,
+    undefined,
+    ctx(),
+  );
+  await flush();
+  return /Agent ID: (\S+)/.exec(textOf(r))![1];
+}
+
 describe("REPRO: /pause → quit → /resume → /continue", () => {
   it("the resume-sequence session_start still sees the manifest and /continue revives the agent", async () => {
     // ---- run 1: park ----------------------------------------------------
@@ -216,7 +267,7 @@ describe("REPRO: quit while the park is still armed (nothing landed yet)", () =>
   // Arming is in-memory only, so today the shutdown persists NOTHING — the
   // manifest is never written — and after /resume both the hint and /continue
   // find an empty store: "/resume does not bring the paused agent states".
-  // The fix (design §5.4, E32): session_shutdown lands the armed park
+  // The fix (docs/pause-quit-resume-continue.md §4.1 FR-P8): session_shutdown lands the armed park
   // best-effort BEFORE abortAll — subagent entries + mainTurn (pendingTools
   // counted from the transcript tail's unanswered tool calls) — so the
   // cross-restart flow still works.
@@ -331,5 +382,124 @@ describe("REPRO: quit while the park is still armed (nothing landed yet)", () =>
     expect(JSON.stringify(reviveCall)).not.toContain("Continue from where you left off.");
     expect(manifest.list()).toEqual([]);
     void id;
+  });
+});
+
+/**
+ * The remaining field gap (real session 01a12ae5): children FINISHED their
+ * reports BEFORE `/pause` and nothing was parked for them, so quit + `/resume`
+ * + `/continue` said "Nothing paused in this session." and the reports stayed
+ * orphaned in the children's session files. `/pause` must capture settled,
+ * unconsumed results into the manifest, and `/continue` must deliver them —
+ * in the same process or after a restart — instead of reviving a finished run.
+ */
+describe("REPRO: completed-but-unconsumed results are captured by /pause and delivered by /continue", () => {
+  const manager = () => (globalThis as any)[Symbol.for("pi-subagents:manager")];
+  const manifest = () => new PauseStore(resolvePauseStorePath(hermetic!.dir, parentSm!.getSessionId()));
+
+  it("/pause captures completed, unconsumed agents into the manifest without delivering them", async () => {
+    const b = boot(parentSm);
+    const idA = await spawnFinishedChild(b, join(hermetic!.dir, "child-a.jsonl"), "report A", "task A");
+    const idB = await spawnFinishedChild(b, join(hermetic!.dir, "child-b.jsonl"), "report B", "task B");
+    expect(manager().getRecord(idA).status).toBe("completed");
+    expect(manager().getRecord(idA).resultConsumed).not.toBe(true);
+
+    const sendsBefore = vi.mocked(b.pi.sendMessage).mock.calls.length;
+    await b.commands.get("pause").handler("", parentCtx());
+    await flush();
+
+    const entries = manifest().list();
+    expect(entries.map(e => e.id).sort()).toEqual([idA, idB].sort());
+    expect(entries.every(e => typeof e.sessionFile === "string")).toBe(true);
+    // Capture only parks the rows: /pause itself delivers nothing.
+    const sends = vi.mocked(b.pi.sendMessage).mock.calls.slice(sendsBefore)
+      .filter(c => (c[0] as any)?.customType === "subagent-notification");
+    expect(sends).toEqual([]);
+  });
+
+  it("/continue delivers the captured reports, clears the manifest, and revives nothing", async () => {
+    const b = boot(parentSm);
+    const idA = await spawnFinishedChild(b, join(hermetic!.dir, "child-a.jsonl"), "report A", "task A");
+    const idB = await spawnFinishedChild(b, join(hermetic!.dir, "child-b.jsonl"), "report B", "task B");
+    await b.commands.get("pause").handler("", parentCtx());
+    await flush();
+    expect(manifest().list()).toHaveLength(2);
+
+    vi.mocked(b.pi.sendMessage).mockClear();
+    vi.mocked(runAgent).mockClear();
+    const cmdCtx = parentCtx();
+    await b.commands.get("continue").handler("", cmdCtx);
+    await flush();
+
+    const sends = vi.mocked(b.pi.sendMessage).mock.calls
+      .filter(c => (c[0] as any)?.customType === "subagent-notification");
+    expect(sends).toHaveLength(2);
+    const contents = sends.map(c => String((c[0] as any).content)).join("\n");
+    expect(contents).toContain("report A");
+    expect(contents).toContain("report B");
+    for (const send of sends) {
+      expect(send[1]).toMatchObject({ deliverAs: "followUp", triggerTurn: true });
+    }
+    // A settled result is delivered, never revived.
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(manifest().list()).toEqual([]);
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Delivered 2 completed agent results.", "info");
+    void idA;
+    void idB;
+  });
+
+  it("does not capture results that were already consumed", async () => {
+    const b = boot(parentSm);
+    const idA = await spawnFinishedChild(b, join(hermetic!.dir, "child-a.jsonl"), "report A", "task A");
+    const idB = await spawnFinishedChild(b, join(hermetic!.dir, "child-b.jsonl"), "report B", "task B");
+    // The RPC/get_subagent_result consumption path marks the record — the
+    // result is already on its way to a caller, so /pause must not re-park it.
+    manager().getRecord(idA).resultConsumed = true;
+
+    await b.commands.get("pause").handler("", parentCtx());
+    await flush();
+
+    expect(manifest().list().map(e => e.id)).toEqual([idB]);
+  });
+
+  it("delivers captured reports after quit + /resume, reading them from the session files", async () => {
+    // ---- run 1: capture, then quit --------------------------------------
+    const b1 = boot(parentSm);
+    const idA = await spawnFinishedChild(b1, join(hermetic!.dir, "child-a.jsonl"), "report A", "task A");
+    const idB = await spawnFinishedChild(b1, join(hermetic!.dir, "child-b.jsonl"), "report B", "task B");
+    await b1.commands.get("pause").handler("", parentCtx());
+    await flush();
+    const sid = parentSm!.getSessionId();
+    expect(new PauseStore(resolvePauseStorePath(hermetic!.dir, sid)).list()).toHaveLength(2);
+
+    // The real quit path: abortAll + dispose. The manifest survives.
+    await booted?.get("session_shutdown")?.({ type: "session_shutdown" }, parentCtx());
+    booted = undefined;
+    expect(new PauseStore(resolvePauseStorePath(hermetic!.dir, sid)).list()).toHaveLength(2);
+
+    // ---- run 2: pi /resume into a fresh runtime -------------------------
+    const b2 = bootOnlyResumed();
+    b2.lifecycle.get("session_before_switch")?.({ type: "session_before_switch" }, parentCtx());
+    await b2.lifecycle.get("session_shutdown")?.({ type: "session_shutdown" }, parentCtx());
+    const resumedSm = SessionManager.open(parentFile!);
+    const resumeCtx = parentCtx({ sessionManager: resumedSm });
+    await b2.lifecycle.get("session_start")?.({ type: "session_start", reason: "resume" }, resumeCtx);
+    booted = b2.lifecycle;
+
+    vi.mocked(runAgent).mockClear();
+    await b2.commands.get("continue").handler("", resumeCtx);
+    await flush();
+
+    const sends = vi.mocked(b2.pi.sendMessage).mock.calls
+      .filter(c => (c[0] as any)?.customType === "subagent-notification");
+    expect(sends).toHaveLength(2);
+    const contents = sends.map(c => String((c[0] as any).content)).join("\n");
+    expect(contents).toContain("report A");
+    expect(contents).toContain("report B");
+    // The finished conversations must not be reopened as fresh no-op runs.
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(new PauseStore(resolvePauseStorePath(hermetic!.dir, sid)).list()).toEqual([]);
+    void idA;
+    void idB;
   });
 });

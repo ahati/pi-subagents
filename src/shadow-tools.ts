@@ -3,12 +3,12 @@
  *
  * Post-restart, `/continue` runs a second `SessionManager` + `AgentSession` on
  * the parked session file with extension discovery off
- * (`docs/pause-quit-resume-continue.md` §6), so a continued main turn whose
+ * (`docs/pause-quit-resume-continue.md` §5.3), so a continued main turn whose
  * pending calls are `get_subagent_result` would otherwise resolve "tool not
  * found" and degrade to reading raw transcripts. Loading the whole extension a
  * second time is what that would be, so this factory is passed through
  * `extensionFactories` instead: factories load even under `noExtensions`
- * (§10.2.1), and it registers exactly one read-only answerer.
+ * (§5.3), and it registers exactly one read-only answerer.
  *
  * The factory is deliberately side-effect free — no manager, no registry
  * writes, no event subscriptions. It resolves records at `execute()` time
@@ -77,7 +77,7 @@ function describeRecord(record: ShadowRecord): ReturnType<typeof shadowResult> {
 
 /**
  * Extension factory for the M1 shadow continuation
- * (`docs/pause-quit-resume-continue.md` §10.2.1): gives the continued turn a
+ * (`docs/pause-quit-resume-continue.md` §5.3): gives the continued turn a
  * read-only answerer for `get_subagent_result` without loading the whole
  * extension into the shadow session.
  */

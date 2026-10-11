@@ -1278,7 +1278,7 @@ export class AgentManager {
    *   2. A record that settled while parked (status still "paused", no gate —
    *      the settle path dropped it): continue the session BARE through the
    *      normal funnel. The session's own transcript is the prompt; the
-   *      `prompt` argument is ignored (docs/pause-quit-resume-continue.md §3.5).
+   *      `prompt` argument is ignored (docs/pause-quit-resume-continue.md §4.2 FR-C2).
    *   3. A record paused out of the queue (no session): unpause replays the
    *      original spawn.
    *   4. Everything else: the historical resume, which honors a caller-supplied
@@ -1286,7 +1286,7 @@ export class AgentManager {
    *
    * The `prompt` parameter is kept for signature compatibility — the bare
    * resume is the only path a parked record may take; a bare call for a settled
-   * record ignores it too (docs/pause-quit-resume-continue.md §3.5).
+   * record ignores it too (docs/pause-quit-resume-continue.md §4.2 FR-C2).
    */
   async resume(
     id: string,
@@ -1320,7 +1320,7 @@ export class AgentManager {
 
     // Bare continuation: the session's transcript is the message. A prompt is
     // only ever sent for a non-parked record resumed with one (mentions).
-    // prompt ignored — resume is bare (docs/pause-quit-resume-continue.md §3.5)
+    // prompt ignored — resume is bare (docs/pause-quit-resume-continue.md §4.2 FR-C2)
     const effectivePrompt = bare ? undefined : prompt;
 
     // Background resume: settle asynchronously and notify on completion exactly

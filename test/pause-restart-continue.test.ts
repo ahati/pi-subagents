@@ -51,8 +51,9 @@ function toolCall(call: ToolCallFixture) {
   return { type: "toolCall", id: call.id, name: call.name, arguments: call.arguments };
 }
 
-function assistantMessage(calls: ToolCallFixture[]) {
-  return { role: "assistant", content: calls.map(toolCall), timestamp: ts };
+function assistantMessage(calls: ToolCallFixture[], text?: string, overrides: Record<string, unknown> = {}) {
+  const content = [...(text === undefined ? [] : [{ type: "text", text }]), ...calls.map(toolCall)];
+  return { role: "assistant", content, timestamp: ts, ...overrides };
 }
 
 function toolResultMessage(id: string, name = "read", overrides: Record<string, unknown> = {}) {
@@ -68,12 +69,22 @@ function toolResultMessage(id: string, name = "read", overrides: Record<string, 
   };
 }
 
-/** A session file with a real branch: system, user, assistant(toolCalls…). */
-function seedTranscript(dir: string, calls: ToolCallFixture[], answered: ToolCallFixture[] = []) {
+/**
+ * A session file with a real branch: system, user, assistant(text?,
+ * toolCalls…), results. `overrides` lands on the assistant entry, for shapes
+ * like `{ stopReason: "stop" }`.
+ */
+function seedTranscript(
+  dir: string,
+  calls: ToolCallFixture[],
+  answered: ToolCallFixture[] = [],
+  text?: string,
+  overrides: Record<string, unknown> = {},
+) {
   const manager = SessionManager.create(dir, dir);
   manager.appendMessage({ role: "system", content: [{ type: "text", text: "sys" }], timestamp: ts });
   manager.appendMessage({ role: "user", content: [{ type: "text", text: "do the thing" }], timestamp: ts });
-  manager.appendMessage(assistantMessage(calls));
+  manager.appendMessage(assistantMessage(calls, text, overrides));
   for (const call of answered) manager.appendMessage(toolResultMessage(call.id, call.name));
   return manager;
 }
@@ -240,6 +251,58 @@ describe("M1 shadow continuation (continueSessionBare)", () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(session.agent.continue).toHaveBeenCalledTimes(1);
+  });
+
+  it("a completed transcript (final assistant answer, no pending calls) is recognized as already complete", async () => {
+    const manager = seedTranscript(dir!, [], [], "the final report", { stopReason: "stop" });
+    const session = shadowSession(manager, [{ name: "read" }]);
+    const execute = vi.fn(async () => toolResultMessage("tc-none"));
+    const entriesBefore = manager.getBranch().length;
+
+    const result = await continueBare(session, { execute });
+
+    expect(session.refreshContext).toHaveBeenCalledTimes(1);
+    expect(session.agent.continue, "an already-final assistant turn cannot be continued").not.toHaveBeenCalled();
+    expect(session.agent.waitForIdle).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      executed: 0,
+      errors: 0,
+      alreadyComplete: true,
+      finalText: "the final report",
+    });
+    expect(manager.getBranch().length, "a completed transcript must not gain entries").toBe(entriesBefore);
+  });
+
+  it("a completed transcript WITH an unanswered tool call still heals and continues", async () => {
+    const pending = { id: "tc1", name: "read", arguments: { path: "a.ts" } };
+    const manager = seedTranscript(dir!, [pending]);
+    const session = shadowSession(manager, [{ name: "read" }]);
+    const execute = vi.fn(async (call: ToolCallFixture) => toolResultMessage(call.id, call.name));
+
+    const result = await continueBare(session, { execute });
+
+    expect(execute, "the unanswered call must still be healed").toHaveBeenCalledTimes(1);
+    expect(session.agent.continue, "the healed turn must still be continued").toHaveBeenCalledTimes(1);
+    expect(result.alreadyComplete).toBeUndefined();
+    expect(result.executed).toBe(1);
+  });
+
+  it("finalText is surfaced on the normal continuation path too", async () => {
+    const answered = { id: "tc1", name: "read", arguments: { path: "a.ts" } };
+    const manager = seedTranscript(dir!, [answered], [answered], "prior answer");
+    const session = shadowSession(manager, [{ name: "read" }]);
+    // The continuation's own answer lands after the prior turn, so finalText
+    // must come from the post-continuation transcript — not the stale first
+    // answer this fixture deliberately seeds.
+    session.agent.continue.mockImplementation(async () => {
+      manager.appendMessage(assistantMessage([], "the continuation answer"));
+    });
+
+    const result = await continueBare(session);
+
+    expect(session.agent.continue).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ executed: 0, errors: 0, finalText: "the continuation answer" });
   });
 });
 

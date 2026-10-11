@@ -2,7 +2,7 @@
  * pause-main-agent.test.ts — the main-agent half of the /pause + /continue pair.
  *
  * Today `/pause` refuses while the main model streams. The redesigned contract
- * (docs/pause-quit-resume-continue.md §3.2, §5.4) is: the first `/pause` ARMS
+ * (docs/pause-quit-resume-continue.md §4.1) is: the first `/pause` ARMS
  * the pair, the next boundary event (`tool_call` or `turn_end`) LANDS the park
  * — subagent gates close, `mainTurn` is written to the manifest — and the main
  * run stays suspended at that boundary until `/continue` reopens it. The
@@ -11,7 +11,7 @@
  *
  * The landing summary toast's exact text is not fixed by the design and is
  * only asserted to exist; the arming and disarming wording is pinned below,
- * since those two are the only strings the design specifies (§3.2.1).
+ * since those two are the only strings the design specifies (§4.1 FR-P2).
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";

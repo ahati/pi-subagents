@@ -17,7 +17,7 @@
  *     starts), then `switchSession(<run 1 session file>)` — the operation
  *     `/resume` runs — and finally `/continue` through real command dispatch.
  *
- * Expected (design docs/pause-quit-resume-continue.md §3.4): the resumed
+ * Expected (docs/pause-quit-resume-continue.md §4.2 FR-C4): the resumed
  * session announces the parked agents, `/continue` revives the child from its
  * session file with no synthetic prompt, and the manifest clears.
  *
@@ -385,7 +385,7 @@ describe("REPRO (runtime): /pause → quit → /resume → /continue", () => {
       // The revival runs through the replacement activation's registry entry
       // (`continueParkedMainTurn`'s `withSession` resolves it from the global
       // manager slot), so the invalidated pre-switch runner is never touched —
-      // no assertActive neutering needed (docs §10.2.3).
+      // no assertActive neutering needed (PRD §5.4).
       await runtime2.session.prompt("/continue");
 
       // The continuation settles (parent answers after its tool call).

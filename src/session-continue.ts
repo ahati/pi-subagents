@@ -22,8 +22,14 @@
  *   found" and come back as honest error results, never as a throw.
  * - Bare `continue()` — no prompt is sent; the turn resumes from the healed
  *   transcript.
+ * - A transcript whose last message is the agent's final assistant answer has
+ *   nothing left to continue (`agent.continue()` would throw "Cannot continue
+ *   from message role: assistant" — a subagent can finish while the session is
+ *   parked). That case reports `alreadyComplete` with the answer as
+ *   `finalText` instead of a spurious continuation failure.
  */
 
+import { readFileSync } from "node:fs";
 import {
   type AgentMessage,
   type AgentTool,
@@ -91,6 +97,17 @@ export interface ContinueSessionBareResult {
   executed: number;
   /** Attempts that produced an error result (thrown or honest tool error). */
   errors: number;
+  /**
+   * The transcript already ended on the agent's final assistant answer, so no
+   * continuation was started (calling `agent.continue()` would throw).
+   */
+  alreadyComplete?: boolean;
+  /**
+   * The last assistant answer in the transcript: the final report on the
+   * already-complete path, the continuation's answer otherwise. Omitted when
+   * the transcript holds no assistant text.
+   */
+  finalText?: string;
   /** Set when the bare continuation after the heal failed; the heal is kept. */
   continuationError?: string;
 }
@@ -171,6 +188,77 @@ export function countUnansweredToolCalls(branch: unknown[]): number {
   return unansweredToolCalls(branch)?.calls.length ?? 0;
 }
 
+/** The branch's last message entry, ignoring entries that carry no message. */
+function lastBranchMessage(branch: readonly unknown[]): AgentMessage | undefined {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const message = branchMessage(branch[i]);
+    if (message) return message;
+  }
+  return undefined;
+}
+
+/** The text blocks of an assistant message, joined and trimmed. */
+function assistantText(message: AssistantMessage): string {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block.type === "text") parts.push(block.text);
+  }
+  return parts.join("\n").trim();
+}
+
+/** The last non-empty assistant text in the branch, trimmed. */
+function lastAssistantText(branch: readonly unknown[]): string | undefined {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const message = branchMessage(branch[i]);
+    if (message?.role !== "assistant") continue;
+    const text = assistantText(message);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+/**
+ * The final report a session file ends on, or undefined when it holds none.
+ *
+ * `/pause` can capture a subagent that already finished (its result never
+ * consumed), and `/continue` after a restart must deliver that report without
+ * a live record to read it from — the session file is the only source left
+ * (`PausedAgentEntry.sessionFile`). Reads the JSONL defensively: unparseable
+ * lines and entries without a message are skipped, and only the transcript's
+ * LAST message counts. A run that completed ends on the assistant's final
+ * answer (text, no tool calls); one parked at a tool boundary ends on the
+ * assistant's tool-call message or the batch's toolResult. Walking further
+ * back would surface a stale answer from an earlier turn, or the preamble that
+ * precedes unanswered calls — neither is this run's report.
+ */
+export function finalReportFromSessionFile(file: string): string | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf-8");
+  } catch {
+    return undefined;
+  }
+
+  let last: AgentMessage | undefined;
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const message = branchMessage(entry);
+    if (message) last = message;
+  }
+
+  if (last?.role !== "assistant") return undefined;
+  const content = Array.isArray(last.content) ? last.content : [];
+  if (content.some(block => block.type === "toolCall")) return undefined;
+  return assistantText(last) || undefined;
+}
+
 /**
  * Heal the parked turn's unanswered tool calls, then continue the session
  * bare. Never throws for executor failures; the returned counts report them.
@@ -210,6 +298,21 @@ export async function continueSessionBare(
   if (session.refreshContext) session.refreshContext();
   else agent.state.messages = sessionManager.buildSessionProjection().messages;
 
+  // A transcript that ends on the agent's final assistant answer has nothing
+  // left to continue: `agent.continue()` would throw "Cannot continue from
+  // message role: assistant". That is the shape left behind when a subagent
+  // finished while the session was parked (real session 01a12ae5) — the work
+  // is done and the report is already in the transcript. Report it as such
+  // instead of a spurious continuation failure. An answerless tail (an
+  // aborted or empty assistant message) has no report to surface and keeps
+  // the normal continuation path.
+  const healedBranch = sessionManager.getBranch();
+  const lastMessage = lastBranchMessage(healedBranch);
+  const lastText = lastMessage?.role === "assistant" ? assistantText(lastMessage) : "";
+  if (lastText && unansweredToolCalls(healedBranch)?.calls.length === 0) {
+    return { executed, errors, alreadyComplete: true, finalText: lastText };
+  }
+
   // The healed transcript is already persisted — a continuation failure (no
   // model, provider error) must not discard it. Surface it instead; the caller
   // still adopts the healed file.
@@ -221,5 +324,13 @@ export async function continueSessionBare(
     continuationError = err instanceof Error ? err.message : String(err);
   }
 
-  return { executed, errors, continuationError };
+  // The answer the post-continuation transcript ends on, so callers do not
+  // have to re-scan the branch for it.
+  const finalText = lastAssistantText(sessionManager.getBranch());
+  return {
+    executed,
+    errors,
+    ...(finalText === undefined ? {} : { finalText }),
+    continuationError,
+  };
 }
