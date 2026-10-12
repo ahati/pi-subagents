@@ -1,20 +1,29 @@
 /**
- * workflow-dialog.ts — the `/agents → Workflows` two-pane inspector.
+ * workflow-dialog.ts — the `/agents → Workflows` inspector.
+ *
+ * Three levels inside one agent-hub-style window:
  *
  * ```
- *  review-changes
- *  Review changed files across dimensions              3/7 agents · 1m12s
- *
- *  ╭ Phases ──────────┬ Verify · 1 agent ──────────────────────────────╮
- *  │ ❯ ✔ Review   3/3 │ ❯ ◌ verify:auth.ts · attempt 2 · waiting 8s    │
- *  │   2 Verify   1/2 │                                                │
- *  │   3 Report       │                                                │
- *  ╰──────────────────┴────────────────────────────────────────────────╯
- *  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
+ * ╭ review-changes ───────────────────── 3/7 agents · 1m12s ─╮
+ * │ Review changed files across dimensions                  │
+ * ├ ─ Phases ──────┬─ Verify · 1 agent ───────────────────── ┤
+ * │ ❯ ✔ Review 3/3 │ ❯ ◌ verify:auth.ts · attempt 2 · wait 8s│
+ * │   2 Verify 1/2 │                                         │
+ * ├ ───────────────┴───────────────────────────────────────── ┤
+ * │ ↑↓ select · ⏎ open · f filter · x stop · esc close       │
+ * ╰──────────────────────────────────────────────────────────╯
  * ```
  *
- * Opening an agent swaps the panes: that phase's agents move left and the
- * right becomes the agent's Prompt / Activity / Outcome detail.
+ * Enter on a phase swaps the panes — that phase's agents move left and the
+ * right becomes the agent's Prompt / Activity / Outcome detail. Enter on an
+ * agent with a conversation descends to the third level: the agent's live
+ * `ConversationViewer` embedded frameless in the right pane, the same surface
+ * the agent hub's chat view shows. Esc walks back one level at a time.
+ *
+ * The window is the hub's popup chrome — title inside the frame, hints in a
+ * bordered footer, `border`-coloured rules — sized like it too: the shell
+ * fills the same 70%-of-terminal ceiling the hub's overlay caps at, rather
+ * than shrink-wrapping the content.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -33,8 +42,12 @@
  * **The layout is pure.** `layoutWorkflowDialog` returns coloured segments and
  * `handleWorkflowDialogKey` maps a keypress to the next state plus an optional
  * action; neither touches a theme, a terminal, or the workflow runtime. The
- * `WorkflowDialog` component is the thin shell that wires those to `ctx.ui`, and
- * the runtime side arrives as an injected `WorkflowDialogActions`.
+ * `WorkflowDialog` component is the shell that wires those to `ctx.ui`, and
+ * the runtime side arrives as injected `WorkflowDialogActions` plus the
+ * optional {@link WorkflowDialogLogDeps} the third level needs. The log level
+ * renders as themed strings (the viewer's output), so it bypasses the segment
+ * layout — the same split `agent-hub.ts` makes between its table and chat
+ * renderers.
  *
  * All state derivation lives in `src/workflow/progress.ts`; this file only
  * arranges what that module returns.
@@ -43,12 +56,15 @@
 import {
   type Component,
   matchesKey,
+  type ScrollViewScrollbar,
   stripTerminalSequences,
   type TUI,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { AgentManager } from "../agent-manager.js";
+import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
@@ -61,7 +77,8 @@ import {
   type WorkflowDisplayState,
   type WorkflowEntry,
 } from "../workflow/progress.js";
-import { SPINNER, type Theme } from "./agent-widget.js";
+import { type AgentActivity, SPINNER, type Theme } from "./agent-widget.js";
+import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 import {
   ASCII_GLYPHS,
   clampLine,
@@ -89,7 +106,8 @@ const LEFT_PANE_WIDTH = 18;
  *
  * A cap, not a height: the box sizes itself to what it holds, and this is where
  * it stops growing so a 200-agent fan-out scrolls inside the pane instead of
- * pasting 200 rows into the conversation.
+ * pasting 200 rows into the conversation. The live shell overrides it with the
+ * hub-derived height below.
  */
 export const DEFAULT_PANE_BODY_ROWS = 22;
 /**
@@ -100,6 +118,14 @@ export const DEFAULT_PANE_BODY_ROWS = 22;
  * absorbs the ordinary movement and leaves the height alone.
  */
 export const MIN_PANE_BODY_ROWS = 6;
+/**
+ * Non-body rows the window draws around its panes: top and bottom borders, the
+ * two header rows, the titled rule above the panes, the plain rule below them
+ * and the footer. The shell subtracts this from the hub's 70%-of-terminal
+ * ceiling to get its body height, so the whole window lands under the same cap
+ * the hub's overlay clips at.
+ */
+export const WINDOW_CHROME_ROWS = 7;
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
 /** Spinner cadence. Unlike the card's 1s header tick, this row really animates. */
@@ -120,7 +146,7 @@ export interface WorkflowDialogGlyphs {
   focus: string;
   /** Running rows cycle these. */
   spinner: readonly string[];
-  /** The pane frame: corners, edges and the tee where the two panes meet. */
+  /** The pane frame: corners, edges and the tees where the two panes meet. */
   box: {
     topLeft: string;
     topRight: string;
@@ -130,6 +156,9 @@ export interface WorkflowDialogGlyphs {
     vertical: string;
     topTee: string;
     bottomTee: string;
+    /** The window's rule ends: `├` / `┤`. */
+    leftTee: string;
+    rightTee: string;
   };
   /** Trailing marker on a title the pane was too narrow to hold. */
   ellipsis: string;
@@ -154,6 +183,8 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     vertical: "│",
     topTee: "┬",
     bottomTee: "┴",
+    leftTee: "├",
+    rightTee: "┤",
   },
   ellipsis: "…",
   upDown: "↑↓",
@@ -177,6 +208,8 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     vertical: "|",
     topTee: "+",
     bottomTee: "+",
+    leftTee: "+",
+    rightTee: "+",
   },
   ellipsis: "~",
   upDown: "up/down",
@@ -236,15 +269,17 @@ export const WORKFLOW_DIALOG_COPY = {
  * ------------------------------------------------------------------------- */
 
 /**
- * Which of the two drill-down levels is showing.
+ * Which of the three drill-down levels is showing.
  *
  * `phases` is the overview — phases on the left, the selected phase's agents on
  * the right. `agent` is the subview reached by opening one: the same phase's
  * agents move to the left pane and the right pane becomes that agent's detail.
- * The panes never change count, only what they hold, which is what makes the
- * frame stay put as you drill in and back out.
+ * `log` is the third level, reached from `agent` when the selected agent has a
+ * conversation: the same list stays left and the right pane becomes the agent's
+ * live `ConversationViewer`. The panes never change count, only what they hold,
+ * which is what makes the frame stay put as you drill in and back out.
  */
-export type WorkflowDialogLevel = "phases" | "agent";
+export type WorkflowDialogLevel = "phases" | "agent" | "log";
 
 /** `all`, or exactly one display state. */
 export type WorkflowDialogFilter = "all" | WorkflowDisplayState;
@@ -295,8 +330,11 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
    * Which actions the caller actually wired. Absent keys default to available,
    * so layout tests and read-only callers keep the full footer; a caller that
    * wires only some actions passes the map so the hints stay truthful.
+   * `onOpenLog` is not a {@link WorkflowDialogActions} key — it exists only
+   * when the constructor got {@link WorkflowDialogLogDeps} — so it is named
+   * here separately.
    */
-  available?: Partial<Record<keyof WorkflowDialogActions, boolean>>;
+  available?: Partial<Record<keyof WorkflowDialogActions | "onOpenLog", boolean>>;
   now?: number;
   /** The *terminal* width; the content width is derived from it. */
   width?: number;
@@ -330,6 +368,33 @@ export interface WorkflowDialogActions {
   onOpenAgent?(recordId: string): void;
 }
 
+/**
+ * What the third level needs to embed one agent's live conversation.
+ *
+ * The same knobs the agent hub hands its chat viewer, resolved against the
+ * session the dialog runs in. Absent from the constructor — a bare layout test,
+ * or a caller that does not want the level — the level does not exist: Enter at
+ * the detail level falls through, and the footer never advertises it.
+ */
+export interface WorkflowDialogLogDeps {
+  /** The record behind an entry's `recordId`, or undefined once swept. */
+  getRecord(recordId: string): AgentRecord | undefined;
+  /** Abort and steering for the viewer's stop and compose affordances. */
+  manager: Pick<AgentManager, "abort" | "steer">;
+  /** In-flight activity the viewer renders under tool calls. */
+  agentActivity: Map<string, AgentActivity>;
+  /** Whether the viewer's header shows an estimated cost. Read at each open. */
+  showCost: () => boolean;
+  /** The user's `viewerMarkdown` setting, read live by the viewer. */
+  viewerMarkdown?: () => ViewerMarkdownMode;
+  /** Persist a mode chosen with `m` in the viewer. */
+  onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
+  /** Pi's fullscreen scrollbar preference. */
+  scrollbarMode?: () => ScrollViewScrollbar;
+  /** Surface a swept record. Omitted → silent. */
+  notify?: (message: string, type?: "info" | "warning" | "error") => void;
+}
+
 export type WorkflowDialogAction =
   | { kind: "cancel" }
   | { kind: "kill" }
@@ -337,7 +402,8 @@ export type WorkflowDialogAction =
   | { kind: "resume" }
   | { kind: "skip"; index: number }
   | { kind: "retry"; index: number }
-  | { kind: "open"; recordId: string };
+  | { kind: "open"; recordId: string }
+  | { kind: "open-log" };
 
 export interface ResolvedWorkflowDialog {
   groups: PhaseGroup[];
@@ -458,6 +524,17 @@ export function leftPaneWidth(width: number): number {
   return Math.max(1, Math.min(LEFT_PANE_WIDTH, Math.floor(available / 3), available - 1));
 }
 
+/**
+ * The agents pane's title: the phase it lists, and how many rows survive the
+ * filter — with a filter on, the count is of what survived it, so the title
+ * never reads as the whole phase.
+ */
+export function agentPaneTitleFor(filter: WorkflowDialogFilter, phaseTitle: string, shown: number): string {
+  return filter === "all"
+    ? `${phaseTitle} · ${shown} agent${shown === 1 ? "" : "s"}`
+    : `${phaseTitle} · ${shown} ${filter}`;
+}
+
 /** Fill a title out to the cell width with rule, so the corners stay put. */
 function padTitle(line: WorkflowCardLine, width: number, horizontal: string): WorkflowCardLine {
   const gap = Math.max(0, width - lineWidth(line));
@@ -471,7 +548,23 @@ function padCell(line: WorkflowCardLine, width: number): WorkflowCardLine {
   return gap > 0 ? [...clamped, { text: " ".repeat(gap) }] : clamped;
 }
 
-/** A title as it sits in the frame's top edge: ` Title ` then rule to `width`. */
+/**
+ * A window row: content between the outer borders, one padding column each
+ * side — the hub's row shape (`│ content │`).
+ */
+function windowRow(content: WorkflowCardLine, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardLine {
+  const inner = clampLine(content, width - 4);
+  const gap = Math.max(0, width - 4 - lineWidth(inner));
+  return [
+    { text: glyphs.box.vertical, color: "border" },
+    { text: " " },
+    ...inner,
+    { text: " ".repeat(gap + 1) },
+    { text: glyphs.box.vertical, color: "border" },
+  ];
+}
+
+/** A title as it sits in a rule: ` Title ` then rule to `width`. */
 function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardSegment[] {
   const room = Math.max(0, width - 2);
   // Truncated with the marker rather than simply cut: `Discover · 1 ag…` has to
@@ -488,60 +581,56 @@ function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs):
     [
       { text: " ", color: "dim" },
       { text: shown, color: "muted", bold: true },
-      { text: ` ${glyphs.box.horizontal.repeat(rule)}`, color: "dim" },
+      { text: ` ${glyphs.box.horizontal.repeat(rule)}`, color: "border" },
     ],
     width,
   );
 }
 
+/** One body row: the two cells zipped between the shared vertical borders. */
+function paneBodyRow(
+  left: WorkflowCardLine | undefined,
+  right: WorkflowCardLine | undefined,
+  leftWidth: number,
+  rightWidth: number,
+  glyphs: WorkflowDialogGlyphs,
+): WorkflowCardLine {
+  return [
+    { text: glyphs.box.vertical, color: "border" },
+    ...padCell(left ?? [], leftWidth),
+    { text: glyphs.box.vertical, color: "border" },
+    ...padCell(right ?? [], rightWidth),
+    { text: glyphs.box.vertical, color: "border" },
+  ];
+}
+
 /**
- * Draw the two panes into one framed block.
- *
- * Both columns are padded to `bodyRows` so the frame is the same height however
- * much either side holds — a box that grew and shrank as you moved the
- * selection would make the whole dialog jump.
+ * The rule under the header (or under the panes): `├` + cells + `┤`, with the
+ * pane titles carried in the upper one and a `┬` where the panes meet.
  */
-function paneFrame(options: {
-  leftTitle: string;
-  rightTitle: string;
-  leftRows: WorkflowCardLine[];
-  rightRows: WorkflowCardLine[];
-  width: number;
-  bodyRows: number;
+function paneRule(options: {
+  leftTitle?: string;
+  rightTitle?: string;
+  leftWidth: number;
+  rightWidth: number;
   glyphs: WorkflowDialogGlyphs;
 }): WorkflowCardLine[] {
-  const { glyphs, width } = options;
-  const box = glyphs.box;
-  const left = leftPaneWidth(width);
-  const right = Math.max(1, width - left - 3);
-
-  const lines: WorkflowCardLine[] = [];
-  lines.push([
-    { text: box.topLeft, color: "dim" },
-    ...padTitle(frameTitle(options.leftTitle, left, glyphs), left, box.horizontal),
-    { text: box.topTee, color: "dim" },
-    ...padTitle(frameTitle(options.rightTitle, right, glyphs), right, box.horizontal),
-    { text: box.topRight, color: "dim" },
-  ]);
-
-  for (let row = 0; row < options.bodyRows; row++) {
-    lines.push([
-      { text: box.vertical, color: "dim" },
-      ...padCell(options.leftRows[row] ?? [], left),
-      { text: box.vertical, color: "dim" },
-      ...padCell(options.rightRows[row] ?? [], right),
-      { text: box.vertical, color: "dim" },
-    ]);
+  const { glyphs } = options;
+  const rule = (width: number): WorkflowCardSegment => ({ text: glyphs.box.horizontal.repeat(width), color: "border" });
+  const line: WorkflowCardLine = [{ text: glyphs.box.leftTee, color: "border" }];
+  if (options.leftTitle !== undefined) {
+    line.push(...padTitle(frameTitle(options.leftTitle, options.leftWidth, glyphs), options.leftWidth, glyphs.box.horizontal));
+    line.push({ text: glyphs.box.topTee, color: "border" });
+    line.push(
+      ...padTitle(frameTitle(options.rightTitle ?? "", options.rightWidth, glyphs), options.rightWidth, glyphs.box.horizontal),
+    );
+  } else {
+    line.push(rule(options.leftWidth));
+    line.push({ text: glyphs.box.vertical, color: "border" });
+    line.push(rule(options.rightWidth));
   }
-
-  lines.push([
-    { text: box.bottomLeft, color: "dim" },
-    { text: box.horizontal.repeat(left), color: "dim" },
-    { text: box.bottomTee, color: "dim" },
-    { text: box.horizontal.repeat(right), color: "dim" },
-    { text: box.bottomRight, color: "dim" },
-  ]);
-  return lines;
+  line.push({ text: glyphs.box.rightTee, color: "border" });
+  return [line];
 }
 
 /* ------------------------------------------------------------------------- *
@@ -680,24 +769,35 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const now = input.now ?? Date.now();
   const view = resolveWorkflowDialog(input);
   const { state } = input;
-  // What the panes may *hold*; the frame's actual height is settled below, once
-  // there is something to measure.
+  // What the panes may *hold*. Given a height — the live shell derives it from
+  // the hub's 70%-of-terminal ceiling — the window fills exactly that, the way
+  // the hub's popup does; without one, it shrink-wraps to the content, which is
+  // what the layout tests render against.
+  const provided = input.bodyRows !== undefined;
   const capacity = Math.max(MIN_PANE_BODY_ROWS, input.bodyRows ?? DEFAULT_PANE_BODY_ROWS);
   const spinnerFrame = input.spinnerFrame ?? 0;
 
   const lines: WorkflowCardLine[] = [];
 
-  // ---- Header: the run's name, then its description with the stats flush right.
+  // ---- The window's top edge, then the header rows it wraps: the run's name
+  // with the counters flush right (the hub puts its counts on the title line),
+  // and the description under it.
   const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now);
-  lines.push(clampLine([{ text: " " }, { text: head.name, color: "toolTitle", bold: true }], width));
+  lines.push([{ text: glyphs.box.topLeft, color: "border" }, { text: glyphs.box.horizontal.repeat(width - 2), color: "border" }, { text: glyphs.box.topRight, color: "border" }]);
   lines.push(
-    rightAlign(
-      head.subtext ? [{ text: " " }, { text: head.subtext, color: "dim" }] : [],
-      [{ text: head.stats, color: "dim" }],
+    windowRow(
+      rightAlign(
+        [{ text: head.name, color: "toolTitle", bold: true }],
+        head.stats ? [{ text: `${head.stats} `, color: "dim" }] : [],
+        width - 6,
+      ),
       width,
+      glyphs,
     ),
   );
-  lines.push([]);
+  if (head.subtext) {
+    lines.push(windowRow([{ text: head.subtext, color: "dim" }], width, glyphs));
+  }
 
   const frameWidth = width - 1;
   const leftWidth = leftPaneWidth(frameWidth);
@@ -839,31 +939,29 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   }
 
   const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
-  // With a filter on, the count is of what survived it — so the title says
-  // which filter, rather than leaving "3 agents" looking like the whole phase.
-  const shown = view.visibleAgents.length;
-  const agentPaneTitle =
-    state.filter === "all" ?
-      `${phaseTitle} · ${shown} agent${shown === 1 ? "" : "s"}`
-    : `${phaseTitle} · ${shown} ${state.filter}`;
-  // Indented one column, so the frame's left edge lines up under the name and
-  // the description rather than hanging off the edge of them.
+  const agentPaneTitle = agentPaneTitleFor(state.filter, phaseTitle, view.visibleAgents.length);
   const leftRows = inPhases ? phaseRows : agentRows;
   const rightRows = inPhases ? agentRows : detailRows;
+  // Tall enough for whichever pane holds more, and no taller — unless the
+  // caller named a height, in which case the window fills it and the panes
+  // pad out below their last row, so the dialog does not resize as the
+  // selection moves.
+  const bodyRows = provided ? capacity : Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length));
+  // The titled rule under the header; the panes' cells between shared borders;
+  // the plain rule; the hints; the bottom edge.
   lines.push(
-    ...paneFrame({
+    ...paneRule({
       leftTitle: inPhases ? "Phases" : agentPaneTitle,
       rightTitle: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
-      leftRows,
-      rightRows,
-      width: width - 1,
-      // Tall enough for whichever pane holds more, and no taller. Both panes
-      // were built against `capacity`, so neither can exceed it and nothing
-      // measured here is ever cut by the frame it is sizing.
-      bodyRows: Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length)),
+      leftWidth,
+      rightWidth,
       glyphs,
-    }).map(line => [{ text: " " }, ...line]),
+    }),
   );
+  for (let row = 0; row < bodyRows; row++) {
+    lines.push(paneBodyRow(leftRows[row], rightRows[row], leftWidth, rightWidth, glyphs));
+  }
+  lines.push(...paneRule({ leftWidth, rightWidth, glyphs }));
 
   // ---- Key hints ----
   // Only the actions the run can currently take, so the footer never advertises
@@ -871,7 +969,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // that wires only some of the actions must not get a footer advertising keys
   // that do nothing. Omitting `available` entirely keeps every hint, which is
   // what the layout tests want.
-  const can = (action: keyof WorkflowDialogActions) => input.available?.[action] ?? true;
+  const can = (action: keyof WorkflowDialogActions | "onOpenLog") => input.available?.[action] ?? true;
   const hints: string[] = [];
   if (inPhases) {
     hints.push(`${glyphs.upDown} select`);
@@ -880,7 +978,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   } else {
     hints.push(`${glyphs.upDown} agent`);
     if (previewLines(entry?.promptPreview).length > PROMPT_COLLAPSED_LINES) {
-      hints.push(`${glyphs.enter} prompt`);
+      hints.push("e prompt");
     }
     const actions = agentActions(entry, view.workflowActive);
     if (actions.skip && can("onSkipAgent")) hints.push("s skip");
@@ -890,20 +988,24 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   else if (view.workflowActive && can("onPause")) hints.push("p pause");
   if (view.workflowActive && can("onKill")) hints.push("x stop");
   hints.push(inPhases ? "esc close" : "esc back");
-  // Advertised at BOTH levels, because the key works at both: the selected row
-  // is the one marked in the agents pane either way. Gated on the entry having
-  // a record id, so a row whose child has not been issued one — a queued agent,
-  // a replayed one — does not promise a conversation that does not exist.
-  //
-  // Last, and abbreviated, for one reason: the footer is clamped rather than
-  // wrapped, so whatever sits at the end is what an 80-column terminal drops.
-  // This is the only hint here that can be dropped without stranding the
-  // reader — every other key either moves the cursor, changes the run, or is
-  // the way out — so it is the one that goes over the edge first.
+  // The two display-only hints sit AFTER the way out, because the footer is
+  // clamped rather than wrapped: an 80-column terminal drops them — first
+  // `c convo`, then `⏎ log` — before it drops the escape hatch. Both are gated
+  // on the entry having a record id, so a row whose child has not been issued
+  // one — a queued agent, a replayed one — does not promise a conversation
+  // that does not exist.
+  if (view.selectedEntry?.recordId !== undefined && can("onOpenLog")) {
+    hints.push(`${glyphs.enter} log`);
+  }
   if (view.selectedEntry?.recordId !== undefined && can("onOpenAgent")) {
     hints.push("c convo");
   }
-  lines.push(clampLine([{ text: ` ${hints.join(" · ")}`, color: "dim" }], width));
+  lines.push(windowRow([{ text: hints.join(" · "), color: "dim" }], width, glyphs));
+  lines.push([
+    { text: glyphs.box.bottomLeft, color: "border" },
+    { text: glyphs.box.horizontal.repeat(width - 2), color: "border" },
+    { text: glyphs.box.bottomRight, color: "border" },
+  ]);
 
   return lines;
 }
@@ -934,15 +1036,18 @@ export function handleWorkflowDialogKey(
   // overlay on screen, which is the stuck feeling the key exists to avoid.
   if (matchesKey(data, "ctrl+c")) return { state, action: { kind: "cancel" } };
 
-  // Back one level before out of the dialog: `esc` in the subview returns to
-  // the overview, and only closes from there. Anything else would make a wrong
-  // turn cost the whole dialog.
+  // Back one level before out of the dialog: `esc` walks the drill-down back —
+  // log → agent detail → overview — and only closes from the overview. Anything
+  // else would make a wrong turn cost the whole dialog. (At the log level the
+  // embedded viewer normally takes Esc first, via its `onBack`; this branch is
+  // the handler-level walk-back the component falls back to.)
   if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+    if (state.level === "log") return { state: { ...state, level: "agent", promptExpanded: false } };
     if (state.level === "agent") return { state: { ...state, level: "phases", promptExpanded: false } };
     return { state, action: { kind: "cancel" } };
   }
-  if (matchesKey(data, "left") && state.level === "agent") {
-    return { state: { ...state, level: "phases", promptExpanded: false } };
+  if (matchesKey(data, "left") && state.level !== "phases") {
+    return { state: { ...state, level: state.level === "log" ? "agent" : "phases", promptExpanded: false } };
   }
 
   const down = matchesKey(data, "j") || matchesKey(data, "down");
@@ -958,8 +1063,10 @@ export function handleWorkflowDialogKey(
     return { state: { ...state, selectedAgent: clampIndex(view.clampedAgent + delta, view.visibleAgents.length) } };
   }
 
-  // One key, two jobs, because the two levels are what it means at each: open
-  // the selected phase's agents, then expand the prompt of the one you opened.
+  // One key, three jobs, because the levels are what it means at each: open
+  // the selected phase's agents, then open the selected agent's live log. The
+  // prompt expand/collapse moved to `e` — Enter is the descend key at every
+  // level but the last.
   if (matchesKey(data, "enter") || matchesKey(data, "right")) {
     if (state.level === "phases") {
       // Nothing to open, so nothing happens — entering an empty pane would
@@ -967,9 +1074,15 @@ export function handleWorkflowDialogKey(
       if (view.visibleAgents.length === 0) return { state };
       return { state: { ...state, level: "agent", promptExpanded: false } };
     }
-    return { state: { ...state, promptExpanded: !state.promptExpanded } };
+    if (state.level === "agent") {
+      // A row with no record id has no conversation to descend into; it falls
+      // through as a no-op rather than pretending.
+      if (view.selectedEntry?.recordId === undefined) return { state };
+      return { state, action: { kind: "open-log" } };
+    }
+    return { state };
   }
-  if (matchesKey(data, "e")) {
+  if (matchesKey(data, "e") && state.level !== "log") {
     return { state: { ...state, promptExpanded: !state.promptExpanded } };
   }
 
@@ -1019,15 +1132,20 @@ export function plainWorkflowDialogLines(lines: readonly WorkflowCardLine[]): st
 /**
  * The `/agents → Workflows` overlay.
  *
- * Deliberately thin: it owns the spinner timer and the theme, and delegates
- * everything else to the two pure functions above. `source` is re-read every
- * render so a live run updates in place without any subscription plumbing.
+ * Deliberately thin: it owns the spinner timer, the theme and the third
+ * level's embedded viewer, and delegates everything else to the two pure
+ * functions above. `source` is re-read every render so a live run updates in
+ * place without any subscription plumbing.
  */
 export class WorkflowDialog implements Component {
   private state: WorkflowDialogState;
   private spinnerFrame = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
+  /** The third level's viewer, alive only while the level is open. */
+  private logViewer: ConversationViewer | undefined;
+  /** The record id the viewer was built for, so switching agents rebuilds it. */
+  private logRecordId: string | undefined;
 
   constructor(
     private tui: TUI,
@@ -1036,6 +1154,7 @@ export class WorkflowDialog implements Component {
     private done: (result: undefined) => void,
     private actions: WorkflowDialogActions = {},
     initialPhaseIndex = 0,
+    private log?: WorkflowDialogLogDeps,
   ) {
     this.state = initialWorkflowDialogState(initialPhaseIndex);
     this.timer = setInterval(() => {
@@ -1046,15 +1165,36 @@ export class WorkflowDialog implements Component {
   }
 
   handleInput(data: string): void {
+    // Ctrl+C is the reflex for backing out of a full-screen overlay, and it
+    // closes from EVERY level — including the log, where the embedded viewer
+    // would otherwise turn it into a one-level step-back.
+    if (this.state.level === "log" && this.logViewer && !matchesKey(data, "ctrl+c")) {
+      // The viewer owns the keys while its level is open: scroll, compose,
+      // copy, quit — its quit keys come back through `onBack`, and the
+      // selection keys come back through `onUnhandledKey`.
+      this.logViewer.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
     const input: WorkflowDialogInput = { ...this.source(), state: this.state };
     const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input));
     if (!result) return;
+    const wasLevel = this.state.level;
     this.state = result.state;
+    // Leaving the log level — by any route — tears its viewer down.
+    if (wasLevel === "log" && this.state.level !== "log") this.closeLogViewer();
     if (result.action) this.dispatch(result.action);
     this.tui.requestRender();
   }
 
   render(width: number): string[] {
+    if (this.state.level === "log") {
+      const log = this.ensureLogViewer();
+      if (log) return this.renderLog(width, log);
+      // The record vanished between the Enter and this render (swept mid-drill):
+      // fall back to the detail level rather than drawing a broken pane.
+      this.state = { ...this.state, level: "agent" };
+    }
     const lines = layoutWorkflowDialog({
       ...this.source(),
       state: this.state,
@@ -1067,11 +1207,25 @@ export class WorkflowDialog implements Component {
         onSkipAgent: this.actions.onSkipAgent !== undefined,
         onRetryAgent: this.actions.onRetryAgent !== undefined,
         onOpenAgent: this.actions.onOpenAgent !== undefined,
+        onOpenLog: this.log !== undefined,
       },
       width,
       spinnerFrame: this.spinnerFrame,
+      // The hub's popup size: fill the same 70%-of-terminal ceiling the
+      // overlay clips at, minus the rows the window itself draws around the
+      // panes. A host with no terminal reported (bare tests) falls back to the
+      // default ceiling, sizing the window as the content-sized box it was
+      // before the hub restyle.
+      bodyRows: this.paneHeight(),
     });
     return styleWorkflowCardLines(lines, this.theme);
+  }
+
+  /** Body height for the pane window, from the hub's popup arithmetic. */
+  private paneHeight(): number {
+    const rows = this.tui.terminal?.rows;
+    if (rows === undefined) return DEFAULT_PANE_BODY_ROWS;
+    return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * VIEWPORT_HEIGHT_PCT) / 100) - WINDOW_CHROME_ROWS);
   }
 
   invalidate(): void {
@@ -1080,16 +1234,224 @@ export class WorkflowDialog implements Component {
 
   dispose(): void {
     this.closed = true;
+    this.closeLogViewer();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
   }
 
+  /** Build the third level's viewer for the selected agent, if it can. */
+  private ensureLogViewer(): ConversationViewer | undefined {
+    const recordId = this.resolveLogState()?.recordId;
+    if (recordId === undefined || !this.log) return undefined;
+    if (this.logViewer && this.logRecordId === recordId) return this.logViewer;
+    const record = this.log.getRecord(recordId);
+    if (!record?.session) {
+      // Swept between the Enter and now — say so, as the `c` handoff does.
+      this.log.notify?.("No conversation left — agent records are dropped ten minutes after they finish.", "info");
+      return undefined;
+    }
+    this.closeLogViewer();
+    this.logRecordId = recordId;
+    this.logViewer = new ConversationViewer(
+      this.tui,
+      record.session,
+      record,
+      this.log.agentActivity.get(record.id),
+      this.theme,
+      _result => this.closeFromLog(),
+      () => {
+        if (this.log!.manager.abort(record.id)) {
+          this.log!.notify?.(`Stopped "${record.description}".`, "info");
+        }
+      },
+      undefined,
+      message => this.log!.manager.steer(record.id, message),
+      this.log.showCost(),
+      this.log.viewerMarkdown,
+      this.log.onViewerMarkdown,
+      this.log.scrollbarMode?.() ?? "auto",
+      undefined,
+      {
+        // The window around the pane spends rows too, so the viewer's ceiling
+        // shrinks by their share of the terminal — the whole dialog stays
+        // under the overlay's 70% clip instead of losing its bottom border.
+        maxHeightPct: () =>
+          Math.max(20, VIEWPORT_HEIGHT_PCT - Math.ceil((WINDOW_CHROME_ROWS * 100) / Math.max(1, this.tui.terminal.rows))),
+        onBack: () => this.leaveLog(),
+        // ↑/↓ are the pane list's selection keys, so the viewer must not
+        // advertise them as scroll keys.
+        scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
+        frameless: () => true,
+        onUnhandledKey: data => {
+          const down = matchesKey(data, "down");
+          const up = matchesKey(data, "up");
+          if (!down && !up) return false;
+          this.moveLogSelection(down ? 1 : -1);
+          return true;
+        },
+      },
+    );
+    return this.logViewer;
+  }
+
+  /** The selected entry at the detail level — the one the log shows. */
+  private resolveLogState(): { recordId: string | undefined } {
+    const input: WorkflowDialogInput = { ...this.source(), state: { ...this.state, level: "agent" } };
+    const view = resolveWorkflowDialog(input);
+    return { recordId: view.selectedEntry?.recordId };
+  }
+
+  /** Step the agent selection while the log is up; a new agent rebuilds the viewer. */
+  private moveLogSelection(delta: number): void {
+    const input: WorkflowDialogInput = { ...this.source(), state: { ...this.state, level: "agent" } };
+    const view = resolveWorkflowDialog(input);
+    const next = clampIndex(view.clampedAgent + delta, view.visibleAgents.length);
+    if (next === view.clampedAgent) return;
+    this.state = { ...this.state, selectedAgent: next };
+    // Re-pointed selection: the next render rebuilds the viewer for that agent.
+    this.closeLogViewer();
+    this.tui.requestRender();
+  }
+
+  private leaveLog(): void {
+    this.closeLogViewer();
+    this.state = { ...this.state, level: "agent", promptExpanded: false };
+    this.tui.requestRender();
+  }
+
+  /** A viewer quit that is not `onBack` — close the dialog outright. */
+  private closeFromLog(): void {
+    this.closed = true;
+    this.closeLogViewer();
+    this.done(undefined);
+  }
+
+  private closeLogViewer(): void {
+    this.logViewer?.dispose();
+    this.logViewer = undefined;
+    this.logRecordId = undefined;
+  }
+
+  /**
+   * The log level, drawn as themed strings — the viewer renders strings, so
+   * this bypasses the segment layout entirely, the way the hub's chat view
+   * bypasses its table renderer. Same window, same rows:
+   *
+   * ```
+   * ╭ review-changes ───────── 2/3 agents · 40s ─╮
+   * │ Verify the auth flow                       │
+   * ├ ─ Verify · 2 agents ─┬─ verify:auth.ts ─── ┤
+   * │ ❯ ◌ verify:auth.ts   │ (live conversation) │
+   * │   ✓ plan             │                     │
+   * ├ ─────────────────────┴───────────────────── ┤
+   * │ ↑↓ agent · p pause · x stop · esc back     │
+   * ╰────────────────────────────────────────────╯
+   * ```
+   */
+  private renderLog(width: number, viewer: ConversationViewer): string[] {
+    const glyphs = UNICODE_DIALOG_GLYPHS;
+    const th = this.theme;
+    const input: WorkflowDialogInput = { ...this.source(), state: { ...this.state, level: "agent" } };
+    const view = resolveWorkflowDialog(input);
+    const entry = view.selectedEntry;
+
+    // The right pane's width follows the layout's own arithmetic, so the two
+    // render paths put the divider in the same column.
+    const contentWidth = width;
+    const frameWidth = contentWidth - 1;
+    const leftWidth = leftPaneWidth(frameWidth);
+    const rightWidth = Math.max(1, frameWidth - leftWidth - 3);
+    // The window's non-body rows: borders, headers, two rules, footer.
+    const chrome = WINDOW_CHROME_ROWS;
+    const bodyRows = Math.max(MIN_PANE_BODY_ROWS, Math.floor(((this.tui.terminal?.rows ?? 40) * VIEWPORT_HEIGHT_PCT) / 100) - chrome);
+
+    const chat = viewer.render(rightWidth);
+    if (chat.length === 0) return [];
+
+    // Left cells reuse the segment pipeline at its narrowest, styled like the
+    // segment path styles them — the selection's accent colour survives.
+    const leftRows: WorkflowCardLine[] = [];
+    if (view.visibleAgents.length === 0) {
+      leftRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], leftWidth));
+    } else {
+      const agents = windowRange(view.clampedAgent, view.visibleAgents.length, bodyRows);
+      for (let i = agents.start; i < Math.min(agents.end, view.visibleAgents.length); i++) {
+        leftRows.push(
+          agentRow({
+            entry: view.visibleAgents[i],
+            selected: i === view.clampedAgent,
+            compact: true,
+            width: leftWidth,
+            glyphs,
+            workflowActive: view.workflowActive,
+            spinnerFrame: this.spinnerFrame,
+            now: Date.now(),
+          }),
+        );
+      }
+    }
+    const leftText = styleWorkflowCardLines(leftRows, th);
+
+    const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, Date.now());
+    const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
+    const agentPaneTitle = agentPaneTitleFor(this.state.filter, phaseTitle, view.visibleAgents.length);
+
+    // ---- Window helpers, in strings. The shapes mirror the segment path's
+    // windowRow/paneRule so both render paths draw the same window.
+    const border = (s: string) => th.fg("border", s);
+    const windowTop = () => border(`${glyphs.box.topLeft}${glyphs.box.horizontal.repeat(contentWidth - 2)}${glyphs.box.topRight}`);
+    const windowBottom = () => border(`${glyphs.box.bottomLeft}${glyphs.box.horizontal.repeat(contentWidth - 2)}${glyphs.box.bottomRight}`);
+    const windowLine = (content: string) => {
+      const clamped = truncateToWidth(content, contentWidth - 4, glyphs.ellipsis, true);
+      const gap = Math.max(0, contentWidth - 4 - visibleWidth(clamped));
+      return `${border(glyphs.box.vertical)} ${clamped}${" ".repeat(gap + 1)}${border(glyphs.box.vertical)}`;
+    };
+    const ruleCell = (title: string | undefined, w: number) => {
+      if (title === undefined) return border(glyphs.box.horizontal.repeat(w));
+      const shown = truncateToWidth(` ${title} `, w - 2, glyphs.ellipsis);
+      return `${border(" ")}${th.fg("muted", th.bold(shown))}${border(glyphs.box.horizontal.repeat(Math.max(0, w - visibleWidth(shown) - 1)))}`;
+    };
+    const ruleRow = (leftTitle: string | undefined, rightTitle: string | undefined) =>
+      border(glyphs.box.leftTee) +
+      ruleCell(leftTitle, leftWidth) +
+      border(leftTitle === undefined ? glyphs.box.vertical : glyphs.box.topTee) +
+      ruleCell(rightTitle, rightWidth) +
+      border(glyphs.box.rightTee);
+
+    const lines: string[] = [];
+    lines.push(windowTop());
+    lines.push(windowLine(`${th.fg("toolTitle", th.bold(head.name))}  ${th.fg("dim", head.stats)}`));
+    if (head.subtext) lines.push(windowLine(th.fg("dim", head.subtext)));
+    lines.push(ruleRow(agentPaneTitle, entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents));
+
+    for (let i = 0; i < bodyRows; i++) {
+      const leftCell = truncateToWidth(leftText[i] ?? "", leftWidth, glyphs.ellipsis, true);
+      const leftPad = " ".repeat(Math.max(0, leftWidth - visibleWidth(leftCell)));
+      const chatLine = chat[i] ?? "";
+      const chatPad = " ".repeat(Math.max(0, rightWidth - visibleWidth(chatLine)));
+      lines.push(
+        `${border(glyphs.box.vertical)} ${leftCell}${leftPad} ${border(glyphs.box.vertical)} ${chatLine}${chatPad} ${border(glyphs.box.vertical)}`,
+      );
+    }
+
+    lines.push(ruleRow(undefined, undefined));
+    const hints: string[] = [`${glyphs.upDown} agent`];
+    if (view.paused) hints.push("p resume");
+    else if (view.workflowActive) hints.push("p pause");
+    if (view.workflowActive) hints.push("x stop");
+    hints.push("esc back");
+    lines.push(windowLine(th.fg("dim", hints.join(" · "))));
+    lines.push(windowBottom());
+    return lines;
+  }
+
   private dispatch(action: WorkflowDialogAction): void {
     switch (action.kind) {
       case "cancel":
         this.closed = true;
+        this.closeLogViewer();
         this.done(undefined);
         return;
       case "kill":
@@ -1109,6 +1471,11 @@ export class WorkflowDialog implements Component {
         return;
       case "open":
         this.actions.onOpenAgent?.(action.recordId);
+        return;
+      case "open-log":
+        // The descend: flip the level and let the next render build the
+        // viewer. A record with no conversation falls back in render().
+        this.state = { ...this.state, level: "log", promptExpanded: false };
         return;
     }
   }

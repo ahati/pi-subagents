@@ -132,9 +132,10 @@ export const ASCII_GLYPHS: WorkflowGlyphs = {
  * the recovered inline mapping asks for on a running row.
  *
  * `accent` is unused by the card and exists for the workflows dialog, which
- * shares these segment types.
+ * shares these segment types — as does `border`, the window frame colour the
+ * agent hub draws its popup with.
  */
-export type WorkflowCardColor = "success" | "error" | "warning" | "dim" | "muted" | "toolTitle" | "accent";
+export type WorkflowCardColor = "success" | "error" | "warning" | "dim" | "muted" | "toolTitle" | "accent" | "border";
 
 export interface WorkflowCardSegment {
   text: string;

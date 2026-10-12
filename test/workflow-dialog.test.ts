@@ -112,10 +112,10 @@ const trimTrailing = (rows: string[]): string[] => {
 const leftRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.left));
 const rightRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.right));
 
-/** The two pane titles from the frame's top edge. */
+/** The two pane titles from the window's titled rule, under the header. */
 function paneTitles(lines: string[]): { left: string; right: string } {
   for (const line of lines) {
-    const match = bare(line).match(/^[╭+](.*?)[┬+](.*)[╮+]$/);
+    const match = bare(line).match(/^[├+](.*?)[┬+](.*)[┤+]$/);
     if (match) {
       const strip = (part: string) => part.replace(/[─-]+\s*$/, "").trim();
       return { left: strip(match[1]), right: strip(match[2]) };
@@ -580,12 +580,27 @@ describe("keys", () => {
     expect(press("f", { selectedAgent: 1 })?.state.selectedAgent).toBe(0);
   });
 
-  it("toggles the prompt expansion", () => {
+  it("toggles the prompt expansion with e, at either detail level", () => {
     expect(press("e")?.state.promptExpanded).toBe(true);
     expect(press("e", { promptExpanded: true })?.state.promptExpanded).toBe(false);
-    // Enter means "open" at the overview and "expand" once opened, which is the
-    // only reading under which one key does the obvious thing at both levels.
-    expect(press("\r", { level: "agent" })?.state.promptExpanded).toBe(true);
+    // Enter is the descend key at every level but the last, so expanding at
+    // the detail level is `e`'s job alone.
+    expect(press("e", { level: "agent" })?.state.promptExpanded).toBe(true);
+    expect(press("\r", { level: "agent" })).toBeDefined();
+  });
+
+  it("descends to the log level on Enter, only for a row with a record", () => {
+    // No record: nothing to descend into, and the key is a no-op rather than
+    // a level the renderer cannot fill.
+    expect(pressRecords("\r", { level: "agent", selectedAgent: 0 })).toBeDefined();
+    expect(pressRecords("\r", { level: "agent", selectedAgent: 0 })?.action).toBeUndefined();
+    const opened = pressRecords("\r", { level: "agent", selectedAgent: 1 });
+    expect(opened?.action).toEqual({ kind: "open-log" });
+    expect(opened?.state.level).toBe("agent"); // the component flips the level
+    // Esc walks back out of the log level at the handler, too, as the
+    // fallback for when the embedded viewer is not the one that saw the key.
+    expect(press("\x1b", { level: "log" })?.state.level).toBe("agent");
+    expect(press("\x1b", { level: "log" })?.action).toBeUndefined();
   });
 
   it("cancels on escape from the overview", () => {
@@ -890,11 +905,13 @@ describe("header", () => {
       meta: { name: "review-changes", description: "Review changed files" },
       now: START + 72_000,
     });
-    // The run's own name leads, with the description and the counters under
-    // it — the tool's name is the card's job, not the dialog's.
-    expect(lines[0]).toBe(" review-changes");
-    expect(lines[1]).toContain("Review changed files");
-    expect(lines[1]).toContain("1/2 agents · 1m12s");
+    // The window's top edge, then the run's name with the counters flush
+    // right on the header row and the description under it — the tool's name
+    // is the card's job, not the dialog's.
+    expect(lines[0]).toMatch(/^\u256d\u2500+\u256e$/);
+    expect(lines[1]).toContain("review-changes");
+    expect(lines[1]).toContain("1/2 agents \u00b7 1m12s");
+    expect(lines[2]).toContain("Review changed files");
   });
 });
 
@@ -919,7 +936,7 @@ describe("WorkflowDialog component", () => {
   ): { dialog: WorkflowDialog; calls: string[]; closed: boolean[] } {
     const calls: string[] = [];
     const closed: boolean[] = [];
-    const tui = { requestRender: () => calls.push("render") } as unknown as never;
+    const tui = { requestRender: () => calls.push("render"), terminal: { rows: 40 } } as unknown as never;
     const instance = new WorkflowDialog(
       tui,
       from,
@@ -939,10 +956,14 @@ describe("WorkflowDialog component", () => {
   it("themes the layout and keeps its line count", () => {
     const { dialog: instance } = harness();
     const rendered = instance.render(86);
+    // The shell derives the pane height from the terminal (40 rows x 70% - 7
+    // chrome rows), so the plain layout must be given the same height to
+    // produce the same window.
     expect(rendered).toHaveLength(
-      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86 }).length,
+      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: 21 }).length,
     );
-    expect(rendered[0]).toContain("<toolTitle>*wf*</toolTitle>");
+    expect(rendered[0]).toContain("\u256d");
+    expect(rendered[1]).toContain("<toolTitle>*wf*</toolTitle>");
     expect(rendered.join("\n")).toContain("<success>✔</success>");
     instance.dispose();
   });
@@ -991,7 +1012,8 @@ describe("key hints reflect the wired actions", () => {
   // present, not how they truncate (that is covered by the width tests).
   // The footer is the last line, and the per-agent keys only exist in the
   // subview — so a test about skip/retry has to be looking at that level.
-  const hintLine = (over: DialogOverrides) => dialog({ width: 200, ...over }).at(-1) ?? "";
+  // The footer is the window's last content row; the bottom border is last.
+  const hintLine = (over: DialogOverrides) => dialog({ width: 200, ...over }).at(-2) ?? "";
   const agentHints = (over: DialogOverrides) =>
     hintLine({ ...over, state: { ...over.state, level: "agent" } });
 
@@ -1079,13 +1101,13 @@ describe("key hints reflect the wired actions", () => {
     // whatever was already there. `c convo` is last precisely so that an
     // 80-column terminal loses it rather than `esc back` — every other key
     // either moves the cursor, changes the run, or is the escape hatch.
-    const narrow = dialog({ progress: everyKey, width: 80, state: { level: "agent" } }).at(-1) ?? "";
+    const narrow = dialog({ progress: everyKey, width: 80, state: { level: "agent" } }).at(-2) ?? "";
     expect(narrow).toContain("esc back");
   });
 
   it("shows every hint once the terminal has room", () => {
-    const wide = dialog({ progress: everyKey, width: 100, state: { level: "agent" } }).at(-1) ?? "";
-    for (const key of ["↑↓ agent", "⏎ prompt", "s skip", "r retry", "p pause", "x stop", "esc back", "c convo"]) {
+    const wide = dialog({ progress: everyKey, width: 100, state: { level: "agent" } }).at(-2) ?? "";
+    for (const key of ["↑↓ agent", "e prompt", "⏎ log", "s skip", "r retry", "p pause", "x stop", "esc back", "c convo"]) {
       expect(wide).toContain(key);
     }
     expect(wide).not.toContain("…");
@@ -1106,7 +1128,7 @@ describe("key hints reflect the wired actions", () => {
 });
 
 describe("component availability", () => {
-  const tui = { requestRender: () => {} } as unknown as never;
+  const tui = { requestRender: () => {}, terminal: { rows: 40 } } as unknown as never;
   const liveSource = () => ({
     progress: [
       { type: "workflow_agent", index: 0, label: "a", phaseIndex: 0, state: "progress", startedAt: START },
@@ -1116,7 +1138,7 @@ describe("component availability", () => {
   /** The footer of the subview, where the per-agent keys are advertised. */
   const footer = (instance: WorkflowDialog) => {
     instance.handleInput("\r");
-    return instance.render(200).at(-1) ?? "";
+    return instance.render(200).at(-2) ?? "";
   };
 
   it("advertises only the actions it was given", () => {

@@ -131,7 +131,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
     // The footer is live, so waiting on it is waiting for the id to travel
     // host → runtime → progress entry → row. Until it lands there is nothing
     // to open and the key is correctly not advertised.
-    await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-2)).toContain("c convo"));
 
     dialog.handleInput?.("c");
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
@@ -162,7 +162,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
     void command.handler("", ui.context);
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
     const dialog = ui.overlays[0].instance;
-    await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-2)).toContain("c convo"));
     dialog.handleInput?.("c");
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
 

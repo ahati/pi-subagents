@@ -226,17 +226,17 @@ describe("/agents → Workflows", () => {
       const ui = commandCtx();
       await command.handler("", ui.context);
       const dialog = ui.built[0] as { handleInput(d: string): void; render(w: number): string[] };
-      expect(dialog.render(100).at(-1)).toContain("p pause");
+      expect(dialog.render(100).at(-2)).toContain("p pause");
 
       dialog.handleInput("p");
       // Said plainly: "paused" on a run whose agents are still finishing
       // promises more than it delivers.
       expect(ui.notes.at(-1)?.text).toMatch(/Paused — running agents finish/);
-      expect(dialog.render(100).at(-1)).toContain("p resume");
+      expect(dialog.render(100).at(-2)).toContain("p resume");
 
       dialog.handleInput("p");
       expect(ui.notes.at(-1)?.text).toMatch(/Resumed/);
-      expect(dialog.render(100).at(-1)).toContain("p pause");
+      expect(dialog.render(100).at(-2)).toContain("p pause");
     });
 
     it("opens as a centered overlay, like the conversation viewer beside it", async () => {

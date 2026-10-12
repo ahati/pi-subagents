@@ -17,7 +17,8 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
-import { WorkflowDialog } from "./workflow-dialog.js";
+import { VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { WorkflowDialog, type WorkflowDialogLogDeps } from "./workflow-dialog.js";
 
 /** Everything the menu and the inspector need from the extension around them. */
 export interface WorkflowMenuDeps {
@@ -37,6 +38,12 @@ export interface WorkflowMenuDeps {
    * sessions, which is a no-op rather than an error.
    */
   getCtx(): ExtensionCommandContext | undefined;
+  /**
+   * What the inspector's third level needs to embed an agent's live
+   * conversation — the same viewer knobs the agent hub gets. Omitted, the
+   * level does not exist: Enter on an agent row stops at the detail pane.
+   */
+  embeddedLog?: WorkflowDialogLogDeps;
 }
 
 /**
@@ -58,15 +65,13 @@ export async function showWorkflowDialog(
   // reached the same way: both are rows of the fleet list, and opening one
   // must not behave unlike opening the other. Inline, the frame would render
   // into the conversation and stay in the scrollback after it closed.
-  const { VIEWPORT_HEIGHT_PCT } = await import("./conversation-viewer.js");
-  /**
-   * This dialog's own overlay, so `c` can hide it while the conversation is
-   * up. Overlays stack, so the viewer would render *over* it either way —
-   * but the two frames size themselves to different content, and the taller
-   * one's edges show around the shorter. Hidden, there is nothing to peek
-   * out, and un-hiding puts the focus back on the dialog when the viewer
-   * closes.
-   */
+  //
+  // This dialog's own overlay handle, so `c` can hide it while the hub's
+  // conversation panel is up. Overlays stack, so the panel would render *over*
+  // it either way — but the two frames size themselves to different content,
+  // and the taller one's edges show around the shorter. Hidden, there is
+  // nothing to peek out, and un-hiding puts the focus back on the dialog when
+  // the panel closes.
   let overlay: { setHidden(hidden: boolean): void } | undefined;
   await ctx.ui.custom<undefined>(
     (tui, theme, _keybindings, done) =>
@@ -138,6 +143,10 @@ export async function showWorkflowDialog(
               .finally(() => overlay?.setHidden(false));
           },
         },
+        // The third level: the same viewer knobs the hub gets, so the embedded
+        // log steers, aborts and copies like the hub's chat pane does.
+        0,
+        deps.embeddedLog,
       ),
     {
       overlay: true,
