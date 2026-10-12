@@ -799,7 +799,10 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
     lines.push(windowRow([{ text: head.subtext, color: "dim" }], width, glyphs));
   }
 
-  const frameWidth = width - 1;
+  // The panes span the window's full inner width, so their right bar sits ON
+  // the window's right border and the divider stays in one column across the
+  // levels: left + right + the three bars = width, exactly.
+  const frameWidth = width;
   const leftWidth = leftPaneWidth(frameWidth);
   const rightWidth = Math.max(1, frameWidth - leftWidth - 3);
   const inPhases = state.level === "phases";
@@ -1357,12 +1360,13 @@ export class WorkflowDialog implements Component {
     const view = resolveWorkflowDialog(input);
     const entry = view.selectedEntry;
 
-    // The right pane's width follows the layout's own arithmetic, so the two
-    // render paths put the divider in the same column.
-    const contentWidth = width;
-    const frameWidth = contentWidth - 1;
-    const leftWidth = leftPaneWidth(frameWidth);
-    const rightWidth = Math.max(1, frameWidth - leftWidth - 3);
+    // The SAME width basis and pane arithmetic as the segment path — the raw
+    // render width minus the content padding, panes spanning the full window —
+    // so descending to this level moves nothing: the divider and the right bar
+    // stay in the columns the other two levels drew them in.
+    const contentWidth = workflowDialogContentWidth(width);
+    const leftWidth = leftPaneWidth(contentWidth);
+    const rightWidth = Math.max(1, contentWidth - leftWidth - 3);
     // The window's non-body rows: borders, headers, two rules, footer.
     const chrome = WINDOW_CHROME_ROWS;
     const bodyRows = Math.max(MIN_PANE_BODY_ROWS, Math.floor(((this.tui.terminal?.rows ?? 40) * VIEWPORT_HEIGHT_PCT) / 100) - chrome);
@@ -1410,7 +1414,10 @@ export class WorkflowDialog implements Component {
     };
     const ruleCell = (title: string | undefined, w: number) => {
       if (title === undefined) return border(glyphs.box.horizontal.repeat(w));
-      const shown = truncateToWidth(` ${title} `, w - 2, glyphs.ellipsis);
+      // Stripped like `frameTitle` strips its ellipsis wrappers: pi's
+      // truncation wraps the marker in resets, and resets inside a rule cell
+      // skew every raw-column offset to the right of them.
+      const shown = stripTerminalSequences(truncateToWidth(` ${title} `, w - 2, glyphs.ellipsis));
       return `${border(" ")}${th.fg("muted", th.bold(shown))}${border(glyphs.box.horizontal.repeat(Math.max(0, w - visibleWidth(shown) - 1)))}`;
     };
     const ruleRow = (leftTitle: string | undefined, rightTitle: string | undefined) =>
@@ -1427,12 +1434,15 @@ export class WorkflowDialog implements Component {
     lines.push(ruleRow(agentPaneTitle, entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents));
 
     for (let i = 0; i < bodyRows; i++) {
-      const leftCell = truncateToWidth(leftText[i] ?? "", leftWidth, glyphs.ellipsis, true);
+      // Same row shape as `paneBodyRow`: cells padded to their pane width, no
+      // extra spacing columns — the three bars plus both cells total exactly
+      // the window width, keeping the bars on the window's borders.
+      const leftCell = stripTerminalSequences(truncateToWidth(leftText[i] ?? "", leftWidth, glyphs.ellipsis, true));
       const leftPad = " ".repeat(Math.max(0, leftWidth - visibleWidth(leftCell)));
       const chatLine = chat[i] ?? "";
       const chatPad = " ".repeat(Math.max(0, rightWidth - visibleWidth(chatLine)));
       lines.push(
-        `${border(glyphs.box.vertical)} ${leftCell}${leftPad} ${border(glyphs.box.vertical)} ${chatLine}${chatPad} ${border(glyphs.box.vertical)}`,
+        `${border(glyphs.box.vertical)}${leftCell}${leftPad}${border(glyphs.box.vertical)}${chatLine}${chatPad}${border(glyphs.box.vertical)}`,
       );
     }
 
