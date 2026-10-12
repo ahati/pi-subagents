@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.10.12-r2] - 2026-10-12
+
 ### Added
 - **The workflow inspector gets the agent hub's windowed popup design and a third level: the selected agent's live conversation, embedded.** Enter on a workflow run now opens a hub-style window — the run's name and counters in a bordered header row, the key hints in a bordered footer, `border`-coloured rules — sized like the hub's popup too, filling the same 70%-of-terminal panel instead of shrink-wrapping to the content. Drilling in: `⏎` on a phase shows the Prompt/Activity/Outcome detail (prompt expansion moved to `e`), and `⏎` on an agent with a conversation descends to its live `ConversationViewer` in the right pane — partial messages and tool output streaming in place, `↑↓` switching agents, `esc` walking back one level at a time. `c` still opens the hub's conversation panel over the whole dialog; a record swept in the meantime says so instead of drawing a dead pane.
 
