@@ -9,6 +9,13 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Added
+- **Merged upstream `tintinweb/pi-subagents` through `e819a82`.** Two upstream changes land on the fork:
+  - **A pi package can ship subagents and workflow scripts** ([#109](https://github.com/tintinweb/pi-subagents/issues/109), [#262](https://github.com/tintinweb/pi-subagents/pull/262) — thanks [@iamfj](https://github.com/iamfj), [@RicardoMonteiroSimoes](https://github.com/RicardoMonteiroSimoes) and [@Brambovich](https://github.com/Brambovich)). Distributing an agent used to mean telling users to copy `.md` files into `.pi/agents/`. A package now declares them instead, and `pi install` is the whole setup: `{ "pi": { "subagents": { "agents": ["./agents"], "workflows": ["./workflows"] } } }`. Only packages pi has actually installed are read — never `node_modules` — and a package configured by an untrusted project stays invisible. Package agents rank **below every agent you wrote**, so one can offer a `reviewer` but never take the name from yours. They appear in the `/agents` menu read-only with *Eject* and *Disable*, and a `▪` source badge in the type list names the package that provided the agent. On by default, since installing a package already lets pi run its `extensions/`; the new `packageAgents` and `packageWorkflows` settings (`true`, `false`, or an allowlist) narrow it. Full guide: [`docs/packages.md`](docs/packages.md).
+
+### Changed
+- **Background completions that finish together reach the parent as one message, and none waits for its siblings, as in Claude Code** ([#388](https://github.com/tintinweb/pi-subagents/pull/388)). Delivery moves from per-notification 200 ms hold timers to a completion outbox that sends what is pending as one message at the parent's next boundary: a busy parent gets everything that finished during its tool batch before its next model call; an idle parent gets a turn about 200 ms after a completion, with anything else that finished in that window. The default `smart` join mode no longer holds a finished agent for up to 30 s until its siblings finish (`async` now means the same as `smart`); `group` batches by parent turn instead of a 100 ms spawn window. A completion pending when you press Esc is no longer dropped: it is delivered once the interrupted turn stops, starting a turn, as Claude Code does. `get_subagent_result` now suppresses a notification any time before it is sent, not only within the old 200 ms hold. **Park integration kept:** a notification built while the main turn is parked still cannot wake the park — the outbox holds it until `/continue` flushes it, along with the results captured at `/pause`.
+
 ## [2026.10.12-r1] - 2026-10-12
 
 ### Added

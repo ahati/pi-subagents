@@ -36,6 +36,7 @@ export interface BootedPi {
 export function makePi(flags: Record<string, boolean | string> = {}): BootedPi {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const lifecycleHandlers = new Map<string, any[]>();
   const entryRenderers = new Map<string, any>();
   const registeredFlags = new Map<string, any>();
   const commands = new Map<string, any>();
@@ -50,7 +51,22 @@ export function makePi(flags: Record<string, boolean | string> = {}): BootedPi {
     registerCommand: vi.fn((name: string, command: any) => commands.set(name, command)),
     registerFlag: vi.fn((name: string, options: any) => registeredFlags.set(name, options)),
     getFlag: vi.fn((name: string) => flags[name]),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
+    // pi delivers every event to ALL handlers registered for it, so handlers
+    // stack: the map entry is a dispatcher over the registered list, in
+    // registration order, returning the last handler's value (the pre-dispatcher
+    // behaviour tests were written against). The fork and upstream each register
+    // a `turn_end` handler — park landing and completion delivery — and both
+    // must run.
+    on: vi.fn((event: string, handler: any) => {
+      const list = lifecycleHandlers.get(event) ?? [];
+      list.push(handler);
+      lifecycleHandlers.set(event, list);
+      lifecycle.set(event, (...args: any[]) => {
+        let result: any;
+        for (const h of list) result = h(...args);
+        return result;
+      });
+    }),
     events: {
       emit: vi.fn(),
       on: vi.fn(() => vi.fn()),
