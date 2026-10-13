@@ -30,6 +30,27 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
+vi.mock("@earendil-works/pi-coding-agent", async () => {
+  const actual = await vi.importActual<any>("@earendil-works/pi-coding-agent");
+  // `continueParkedMainTurn`'s shadow continuation streams a REAL model turn
+  // through `createAgentSession`. With no model backend the stream dies at
+  // network-failure latency — ~30s per attempt when connect hangs, minutes
+  // with retries — which this file rode as a 120s budget and, on a cold run,
+  // as a multi-minute stall. A scripted faux model makes the continuation
+  // instant and hermetic: these tests assert the wiring (switch order, claim
+  // refusal, manifest rewrite), never the model's answer.
+  const { fauxModelBackend } = await import("./helpers/faux-model-backend.js");
+  const { registerFauxProvider } = await import("./helpers/pi-ai.js");
+  const { fauxAssistantMessage } = await import("@earendil-works/pi-ai");
+  const faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+  const step = () => fauxAssistantMessage("continuation answer");
+  faux.setResponses(Array.from({ length: 32 }, () => step));
+  return {
+    ...actual,
+    createAgentSession: (opts: any) => actual.createAgentSession({ ...opts, ...fauxModelBackend(faux.getModel()) }),
+  };
+});
+
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { PauseStore, resolvePauseStorePath } from "../src/pause-store.js";
@@ -42,9 +63,6 @@ interface ToolCallFixture {
   arguments: Record<string, unknown>;
 }
 
-// The M1 wiring tests run a real shadow continuation (~8-30s: model-less
-// stream failure latency in the bare continue). Give them headroom.
-vi.setConfig({ testTimeout: 120_000 });
 const ts = "2026-01-01T00:00:00.000Z";
 
 function toolCall(call: ToolCallFixture) {
@@ -68,6 +86,8 @@ function toolResultMessage(id: string, name = "read", overrides: Record<string, 
     ...overrides,
   };
 }
+
+/** Minimal AgentMessage / SessionEntry stand-ins — the seam only reads these. */
 
 /**
  * A session file with a real branch: system, user, assistant(text?,
