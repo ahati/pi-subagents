@@ -830,6 +830,60 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       expect(opts.onTurnEnd).toBe(onTurnEnd);
     });
 
+    it("falls back to the limit the agent was spawned with when the caller passes none", async () => {
+      manager = new AgentManager();
+      vi.mocked(runAgent).mockResolvedValue({ responseText: "first", session: mockSession() as any, aborted: false, steered: false });
+      const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+        description: "test",
+        isBackground: true,
+        invocation: { maxTurns: 50 },
+      });
+      await manager.getRecord(id)!.promise;
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
+
+      await manager.resume(id, "more");
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBe(50);
+
+      await (await manager.resume(id, "again", undefined, { isBackground: true }))!.promise;
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBe(50);
+    });
+
+    it("inline: abort() reaches the resumed run and the record stays stopped", async () => {
+      const id = await spawnSettled();
+      let runSignal: AbortSignal | undefined;
+      let finish!: () => void;
+      vi.mocked(resumeAgent).mockImplementation((_s, _p, opts) => {
+        runSignal = opts.signal;
+        return new Promise((resolve) => { finish = () => resolve({ text: "partial", aborted: false, steered: false }); });
+      });
+
+      const resumed = manager.resume(id, "more");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(manager.abort(id)).toBe(true);
+      expect(runSignal?.aborted).toBe(true);
+
+      finish();
+      await resumed;
+      expect(manager.getRecord(id)!.status).toBe("stopped");
+      expect(manager.getRecord(id)!.result).toBe("partial");
+    });
+
+    it("inline: a caller signal that is already aborted stops the resume before it runs", async () => {
+      const id = await spawnSettled();
+      let runSignal: AbortSignal | undefined;
+      vi.mocked(resumeAgent).mockImplementation(async (_s, _p, opts) => {
+        runSignal = opts.signal;
+        return { text: "", aborted: false, steered: false };
+      });
+
+      const cancelled = new AbortController();
+      cancelled.abort();
+      await manager.resume(id, "more", cancelled.signal);
+
+      expect(manager.getRecord(id)!.status).toBe("stopped");
+      expect(runSignal?.aborted).toBe(true);
+    });
+
     it("inline: a steered resume ends steered, an aborted one aborted", async () => {
       const id = await spawnSettled();
 

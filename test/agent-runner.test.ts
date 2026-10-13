@@ -394,7 +394,7 @@ describe("agent-runner final output capture", () => {
   it("resumeAgent also falls back to the final assistant message text", async () => {
     const { session } = createSession("RESUMED");
 
-    const result = await resumeAgent(session as any, "Continue");
+    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
@@ -525,7 +525,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push(errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "Continue");
+    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
   });
@@ -542,7 +542,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push({ role: "user", content: "follow-up" }, errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "follow-up");
+    const result = await resumeAgent(session as any, "follow-up", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe(""); // NOT "PREVIOUS ANSWER"
@@ -561,7 +561,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       );
     }) as any;
 
-    const result = await resumeAgent(session as any, "go");
+    const result = await resumeAgent(session as any, "go", { type: "Explore" });
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe("new partial"); // this resume's progress, not the prior answer
@@ -666,6 +666,7 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     await resumeAgent(session as any, "continue", {
+      type: "Explore",
       onAssistantUsage: (u) => seen.push(u),
     });
 
@@ -1798,7 +1799,7 @@ describe("agent-runner async extension tool registration", () => {
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
-    await resumeAgent(session as any, "keep going");
+    await resumeAgent(session as any, "keep going", { type: "Explore" });
 
     registerLate("/ext/foo.ts", "foo_late");
     registerLate("/ext/bar.ts", "bar_late");
@@ -2925,7 +2926,7 @@ describe("agent-runner turn limits", () => {
   // all and its widget counter never moved off turn 1.
   describe("on resume (#368)", () => {
     /** Resume a session whose prompt fires `turns` turn_end events, like runWithTurns. */
-    async function resumeWithTurns(turns: number, options: Record<string, unknown> = {}) {
+    async function resumeWithTurns(turns: number, options: Partial<Parameters<typeof resumeAgent>[2]> = {}) {
       const { session, listeners } = createSession("OK");
       session.prompt.mockImplementation(async () => {
         for (let i = 0; i < turns; i++) {
@@ -2933,8 +2934,8 @@ describe("agent-runner turn limits", () => {
         }
         session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
       });
-      const result = await resumeAgent(session as any, "keep going", options as any);
-      return { session, result: result as typeof result & { aborted?: boolean; steered?: boolean } };
+      const result = await resumeAgent(session as any, "keep going", { type: "Explore", ...options });
+      return { session, result };
     }
 
     it("steers once on reaching the limit, and does not abort", async () => {
@@ -2996,7 +2997,7 @@ describe("agent-runner abort signal forwarding", () => {
     controller.abort();
     const { session } = createSession("SHOULD NOT RUN");
 
-    await resumeAgent(session as any, "continue", { signal: controller.signal });
+    await resumeAgent(session as any, "continue", { type: "Explore", signal: controller.signal });
 
     expect(session.prompt).not.toHaveBeenCalled();
   });

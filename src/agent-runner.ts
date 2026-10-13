@@ -413,8 +413,8 @@ export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurn
  * before the run starts, and a second copy of the expression would drift from
  * the one below that enforces it.
  */
-export function resolveEffectiveMaxTurns(type: string | undefined, explicit?: number): number | undefined {
-  return normalizeMaxTurns(explicit ?? (type === undefined ? undefined : getAgentConfig(type)?.maxTurns) ?? defaultMaxTurns);
+export function resolveEffectiveMaxTurns(type: string, explicit?: number): number | undefined {
+  return normalizeMaxTurns(explicit ?? getAgentConfig(type)?.maxTurns ?? defaultMaxTurns);
 }
 
 /**
@@ -1355,8 +1355,8 @@ export async function runAgent(
  * afresh from the resume, bare continuation included (#368).
  */
 export interface ResumeAgentOptions {
-  /** The agent's type, for its own `max_turns`. Omitted: only `maxTurns` and the default apply. */
-  type?: SubagentType;
+  /** The agent's type, for its own `max_turns`. Always known: the manager passes `record.type`. */
+  type: SubagentType;
   /** Explicit turn limit for the resumed run, counted afresh from the resume (#368). */
   maxTurns?: number;
   /** Called at the end of each resumed turn with the count since the resume. */
@@ -1383,13 +1383,20 @@ export interface ResumeAgentOptions {
  */
 export async function resumeAgent(
   session: AgentSession,
-  promptOrOptions?: string | ResumeAgentOptions,
+  options: ResumeAgentOptions,
+): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">>;
+export async function resumeAgent(
+  session: AgentSession,
+  prompt: string,
+  options: ResumeAgentOptions,
+): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">>;
+export async function resumeAgent(
+  session: AgentSession,
+  promptOrOptions: string | ResumeAgentOptions,
   optionsArg?: ResumeAgentOptions,
 ): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
   const prompt = typeof promptOrOptions === "string" ? promptOrOptions : undefined;
-  const options: ResumeAgentOptions = typeof promptOrOptions === "string"
-    ? (optionsArg ?? {})
-    : (promptOrOptions ?? optionsArg ?? {});
+  const options: ResumeAgentOptions = typeof promptOrOptions === "string" ? optionsArg! : promptOrOptions;
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume counts as its output — a
   // failed resume must not surface the previous turn's answer (#144).

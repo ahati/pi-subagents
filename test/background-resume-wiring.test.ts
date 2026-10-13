@@ -308,7 +308,7 @@ describe("Agent tool — background resume wiring", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(resumeAgent).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(resumeAgent).mock.calls[0][2] as any;
+    const opts = vi.mocked(resumeAgent).mock.calls[0][2];
     expect(opts.maxTurns).toBe(7);
     expect(typeof opts.onTurnEnd).toBe("function");
 
@@ -331,8 +331,7 @@ describe("Agent tool — background resume wiring", () => {
     );
 
     expect(resumeAgent).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(resumeAgent).mock.calls[0][2] as any;
-    expect(opts.maxTurns).toBe(7);
+    expect(vi.mocked(resumeAgent).mock.calls[0][2].maxTurns).toBe(7);
 
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });

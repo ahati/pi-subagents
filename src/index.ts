@@ -1071,10 +1071,9 @@ export default function (pi: ExtensionAPI) {
         // agent, so its frontmatter is what governs — `output_transcript: false`
         // must keep holding, since record.outputFile is the sole gate every
         // downstream consumer keys off and a resume must not re-open it.
-        const config = getAgentConfig(record.type);
         const resumedRecord = await startBackgroundResume(ctx, record, mention.message, {
-          outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
-          maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
+          outputTranscript: getAgentConfig(record.type)?.outputTranscript ?? getOutputTranscriptDefault(),
+          maxTurns: resumeTurnLimit(record),
         });
         ctx.ui.notify(
           resumedRecord ? `Resuming ${target}` : `Could not resume ${target} — it is still running.`,
@@ -1505,6 +1504,16 @@ export default function (pi: ExtensionAPI) {
         groupJoin.onAgentComplete(record);
       }
     }
+  }
+
+  /**
+   * The turn budget for resuming `record`, from its OWN type — resume ignores
+   * `subagent_type`. Same precedence as a spawn, frontmatter authoritative:
+   * the agent file's `max_turns`, else the call's, else the limit the agent
+   * was spawned with, else the default (#368).
+   */
+  function resumeTurnLimit(record: AgentRecord, explicit?: number): number | undefined {
+    return normalizeMaxTurns(getAgentConfig(record.type)?.maxTurns ?? explicit ?? record.invocation?.maxTurns ?? getDefaultMaxTurns());
   }
 
   /**
@@ -2240,10 +2249,9 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
-        // From the record's OWN type, like the mention path: resume ignores
-        // `subagent_type`, so `effectiveMaxTurns` above may describe another
-        // agent. Same precedence as a spawn — frontmatter is authoritative.
-        const resumeMaxTurns = normalizeMaxTurns(getAgentConfig(existing.type)?.maxTurns ?? params.max_turns ?? getDefaultMaxTurns());
+        // Not `effectiveMaxTurns`: that was resolved for `subagent_type`, which
+        // a resume ignores, so it may describe another agent.
+        const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns);
 
         // Background resume: detached run that notifies on completion, mirroring
         // a background spawn. Previously run_in_background was silently ignored
@@ -2285,12 +2293,28 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        // Counted so the result card shows the resumed run's `↻N≤M`.
+        // Tracked like a foreground spawn, so the widget row and the result
+        // card show THIS run's `↻N≤M` and tool activity rather than the
+        // previous run's. The session predates this run, so it is seeded here.
         const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(resumeMaxTurns);
-        const record = await manager.resume(params.resume, params.prompt, signal, {
-          maxTurns: resumeMaxTurns,
-          onTurnEnd: resumeCallbacks.onTurnEnd,
-        });
+        resumeState.session = existing.session;
+        agentActivity.set(existing.id, resumeState);
+        widget.markRunning(existing.id);
+        widget.ensureTimer();
+        fleet.ensureTimer();
+        fleet.update();
+        let record: AgentRecord | undefined;
+        try {
+          record = await manager.resume(params.resume, params.prompt, signal, {
+            maxTurns: resumeMaxTurns,
+            onTurnEnd: resumeCallbacks.onTurnEnd,
+            onToolActivity: resumeCallbacks.onToolActivity,
+          });
+        } finally {
+          agentActivity.delete(existing.id);
+          widget.markFinished(existing.id);
+          fleet.onAgentFinished(existing.id);
+        }
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
