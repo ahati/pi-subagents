@@ -800,6 +800,63 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
+
+  // #368 — a resumed run is bounded like a spawn, so its outcome must map the
+  // same way: a hard abort is "aborted", a wrap-up is "steered".
+  describe("resume() turn-limit outcome (#368)", () => {
+    async function spawnSettled() {
+      manager = new AgentManager();
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "first",
+        session: mockSession() as any,
+        aborted: false,
+        steered: false,
+      });
+      const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test", isBackground: true });
+      await manager.getRecord(id)!.promise;
+      return id;
+    }
+
+    it("hands the record's type, the explicit limit and the turn counter to the runner", async () => {
+      const id = await spawnSettled();
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
+      const onTurnEnd = vi.fn();
+
+      await manager.resume(id, "more", undefined, { maxTurns: 3, onTurnEnd });
+
+      const opts = vi.mocked(resumeAgent).mock.calls.at(-1)![2]!;
+      expect(opts.type).toBe("general-purpose");
+      expect(opts.maxTurns).toBe(3);
+      expect(opts.onTurnEnd).toBe(onTurnEnd);
+    });
+
+    it("inline: a steered resume ends steered, an aborted one aborted", async () => {
+      const id = await spawnSettled();
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "wrapped", aborted: false, steered: true });
+      await manager.resume(id, "more");
+      expect(manager.getRecord(id)!.status).toBe("steered");
+      expect(manager.getRecord(id)!.result).toBe("wrapped");
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "cut", aborted: true, steered: true });
+      await manager.resume(id, "again");
+      expect(manager.getRecord(id)!.status).toBe("aborted");
+      expect(manager.getRecord(id)!.result).toBe("cut");
+    });
+
+    it("background: a steered resume ends steered, an aborted one aborted", async () => {
+      const id = await spawnSettled();
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "wrapped", aborted: false, steered: true });
+      await (await manager.resume(id, "more", undefined, { isBackground: true }))!.promise;
+      expect(manager.getRecord(id)!.status).toBe("steered");
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "cut", aborted: true, steered: true });
+      await (await manager.resume(id, "again", undefined, { isBackground: true }))!.promise;
+      expect(manager.getRecord(id)!.status).toBe("aborted");
+      expect(manager.getRecord(id)!.result).toBe("cut");
+    });
+  });
 });
 
 // Regression: `isolation: "worktree"` MUST fail loud when the cwd can't host

@@ -449,6 +449,14 @@ interface ResumeOptions {
    * record — the historical behavior.
    */
   isBackground?: boolean;
+  /**
+   * Explicit turn limit for the resumed run. Resolved like a spawn's: this,
+   * else the record's type's own `max_turns`, else the default — and counted
+   * afresh from the resume prompt (#368).
+   */
+  maxTurns?: number;
+  /** Called at the end of each resumed turn with the count since the resume. */
+  onTurnEnd?: (turnCount: number) => void;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called once per assistant message_end with that message's usage delta. */
@@ -1457,6 +1465,9 @@ export class AgentManager {
     record.error = undefined;
 
     const callbacks = {
+      type: record.type,
+      maxTurns: options?.maxTurns,
+      onTurnEnd: options?.onTurnEnd,
       onToolActivity: (activity: ToolActivity) => {
         if (activity.type === "end") record.toolUses++;
         options?.onToolActivity?.(activity);
@@ -1477,15 +1488,9 @@ export class AgentManager {
     try {
       // A parked record's resume is bare (2 args — no prompt). A non-parked
       // record with a caller-supplied prompt keeps the prompt-bearing call.
-      const { text, failure } = effectivePrompt === undefined
-        ? await resumeAgent(record.session, callbacks)
-        : await resumeAgent(record.session, effectivePrompt, callbacks);
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
-      record.result = text;
-      record.completedAt = Date.now();
+      this.settleResume(record, await (effectivePrompt === undefined
+        ? resumeAgent(record.session, callbacks)
+        : resumeAgent(record.session, effectivePrompt, callbacks)));
     } catch (err) {
       record.status = "error";
       record.error = err instanceof Error ? err.message : String(err);
@@ -1497,6 +1502,31 @@ export class AgentManager {
     this.abortOwnedChildren(id);
 
     return record;
+  }
+
+  /**
+   * Write a resumed run's outcome onto its record, with the spawn path's
+   * precedence: an external stop or pause keeps the status that halt chose; a
+   * hard abort (turn limit + grace) is "aborted"; a failed final turn is an
+   * "error", not a completion (#144); otherwise "steered" or "completed". The
+   * resumed text stays available in every case.
+   */
+  private settleResume(
+    record: AgentRecord,
+    { text, failure, aborted, steered }: Awaited<ReturnType<typeof resumeAgent>>,
+  ): void {
+    if (!externallyHalted(record)) {
+      if (aborted) {
+        record.status = "aborted";
+      } else if (failure) {
+        record.status = "error";
+        record.error = failure;
+      } else {
+        record.status = steered ? "steered" : "completed";
+      }
+    }
+    record.result = text;
+    record.completedAt ??= Date.now();
   }
 
   /**
@@ -1557,6 +1587,9 @@ export class AgentManager {
     };
 
     const promise = resumeAgent(record.session, prompt, {
+      type: record.type,
+      maxTurns: options.maxTurns,
+      onTurnEnd: options.onTurnEnd,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1573,18 +1606,10 @@ export class AgentManager {
       },
       signal: abortController.signal,
     })
-      .then(({ text, failure }) => {
-        // Don't overwrite a status an external halt (stop/pause) already chose.
-        if (!externallyHalted(record)) {
-          // Same contract as the spawn path (#144): a failed final turn is an
-          // error, not a completion — but the resumed text stays available.
-          record.status = failure ? "error" : "completed";
-          if (failure) record.error = failure;
-        }
-        record.result = text;
-        record.completedAt ??= Date.now();
+      .then((outcome) => {
+        this.settleResume(record, outcome);
         settle();
-        return text;
+        return outcome.text;
       })
       .catch((err) => {
         if (!externallyHalted(record)) {
