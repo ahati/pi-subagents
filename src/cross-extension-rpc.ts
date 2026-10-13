@@ -1,8 +1,8 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, and consume RPCs over the pi.events event bus,
- * using per-request scoped reply channels.
+ * Exposes ping, spawn, stop, pause, resume, consume, and steer RPCs over the
+ * pi.events event bus, using per-request scoped reply channels.
  *
  * Reply envelope follows pi-mono convention:
  *   success → { success: true, data?: T }
@@ -63,6 +63,11 @@ export interface SpawnCapable {
    * one. False when there is no such agent, or it has not settled yet.
    */
   consumeResult(id: string): boolean;
+  /**
+   * Deliver a message to a running or queued agent's conversation — what
+   * `steer_subagent` does. False when the agent is unknown or has settled.
+   */
+  steer(id: string, message: string): boolean;
 }
 
 export interface RpcDeps {
@@ -79,6 +84,7 @@ export interface RpcHandle {
   unsubPause: () => void;
   unsubResume: () => void;
   unsubConsume: () => void;
+  unsubSteer: () => void;
 }
 
 /**
@@ -106,7 +112,7 @@ function handleRpc<P extends { requestId: string }>(
 }
 
 /**
- * Register ping, spawn, stop, and consume RPC handlers on the event bus.
+ * Register ping, spawn, stop, consume, and steer RPC handlers on the event bus.
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
@@ -179,18 +185,22 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
+  // Only the session's own agents are this RPC's to stop or steer. A nested
+  // child or a workflow's agent is owned by something that is *waiting on it*,
+  // and aborting or redirecting it out from under that owner turns another
+  // extension's request into a failed step here. Defence in depth rather than
+  // a live hole: no RPC hands out agent ids, so a caller has no ordinary way to
+  // name one it does not own — but the guard is cheap and the id may leak some
+  // other way. Same refuse-what-we-should-not-touch stance as `consume` below.
+  const assertOwned = (agentId: string): void => {
+    const record = manager.getRecord(agentId);
+    if (!record) throw new Error("Agent not found");
+    if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+  };
+
   const unsubStop = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:stop", ({ agentId }) => {
-      const record = manager.getRecord(agentId);
-      if (!record) throw new Error("Agent not found");
-      // Only the session's own agents are this RPC's to stop. A nested child or
-      // a workflow's agent is owned by something that is *waiting on it*, and
-      // aborting it out from under that owner turns another extension's stop
-      // into a failed step here. Defence in depth rather than a live hole: no
-      // RPC hands out agent ids, so a caller has no ordinary way to name one it
-      // does not own — but the guard is cheap and the id may leak some other
-      // way. Same refuse-what-we-should-not-touch stance as `consume` below.
-      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      assertOwned(agentId);
       // Not "not found" — the lookup above already proved it exists. `abort`
       // returns false only for a record that is neither running nor queued,
       // which is an agent that has already finished.
@@ -203,18 +213,14 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // silent false — a bus caller has no UI to read a no-op from.
   const unsubPause = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:pause", ({ agentId }) => {
-      const record = manager.getRecord(agentId);
-      if (!record) throw new Error("Agent not found");
-      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      assertOwned(agentId);
       if (!manager.pauseAgent(agentId)) throw new Error("Agent is not pausable");
     },
   );
 
   const unsubResume = handleRpc<{ requestId: string; agentId: string; prompt?: string }>(
     events, "subagents:rpc:resume", async ({ agentId, prompt }) => {
-      const record = manager.getRecord(agentId);
-      if (!record) throw new Error("Agent not found");
-      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      assertOwned(agentId);
       if (!await manager.resumeAgent(agentId, prompt)) throw new Error("Agent cannot be resumed");
     },
   );
@@ -230,5 +236,18 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubPause, unsubResume, unsubConsume };
+  // An extension that spawned an agent over the bus and then learns something
+  // that agent needs — a second CI failure on the head it is already fixing, a
+  // review that landed mid-run — can hand it over instead of spawning a second
+  // agent for the same work or dropping the fact. Outside the ping version
+  // handshake, like consume: additive and best-effort.
+  const unsubSteer = handleRpc<{ requestId: string; agentId: string; message: unknown }>(
+    events, "subagents:rpc:steer", ({ agentId, message }) => {
+      if (typeof message !== "string" || message.trim().length === 0) throw new Error("Steer message must be a non-empty string");
+      assertOwned(agentId);
+      if (!manager.steer(agentId, message)) throw new Error("Agent is not running");
+    },
+  );
+
+  return { unsubPing, unsubSpawn, unsubStop, unsubPause, unsubResume, unsubConsume, unsubSteer };
 }

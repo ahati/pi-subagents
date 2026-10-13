@@ -1916,6 +1916,40 @@ describe("AgentManager — pendingSteers flush", () => {
     expect(record.pendingSteers).toBeUndefined();
   });
 
+  // The viewers, an @handle and the RPC all steer through the manager and none
+  // of them emits the lifecycle event itself — this callback is the one place
+  // `subagents:steered` comes from for every path except the tool.
+  it("fires onSteered for a queued and a delivered steer, never for a refused one", async () => {
+    const steer = vi.fn().mockResolvedValue(undefined);
+    let createSession: (() => void) | undefined;
+    let finish: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        createSession = () => opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+        finish = () => resolve({ responseText: "ok", session: mockSession(), aborted: false, steered: false });
+      }),
+    );
+
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
+    const record = manager.getRecord(id)!;
+
+    expect(manager.steer(id, "before session")).toBe(true);
+    expect(onSteered).toHaveBeenLastCalledWith(record, "before session");
+
+    createSession!();
+    expect(manager.steer(id, "live")).toBe(true);
+    expect(steer).toHaveBeenLastCalledWith("live");
+    expect(onSteered).toHaveBeenLastCalledWith(record, "live");
+    expect(onSteered).toHaveBeenCalledTimes(2);
+
+    finish!();
+    await record.promise;
+    expect(manager.steer(id, "too late")).toBe(false);
+    expect(onSteered).toHaveBeenCalledTimes(2);
+  });
+
   it("a steer that rejects does not fail the run", async () => {
     const steer = vi.fn().mockRejectedValue(new Error("session closed"));
     let release: (() => void) | undefined;
