@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.10.13-r2] - 2026-10-13
+
 ### Changed
 
 - **`subagents:usage` omits keys whose value is unknown instead of sending `undefined`** (upstream [#377](https://github.com/tintinweb/pi-subagents/pull/377)). The merge replaces the ported emit with upstream's evolved one: `model` and `thinking` are absent until the session has reported them, and `parentAgentId`/`workflowId` are absent on a top-level agent, so an in-process listener's `Object.keys` sees only real values. The shutdown emit is documented as synchronous — `emit` does not await listeners, and pi exits once the shutdown handler returns.
