@@ -21,7 +21,6 @@
  * stopping, markdown modes, cost display, linger semantics — is unchanged.
  */
 
-import * as piHost from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type ScrollViewScrollbar, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
@@ -30,6 +29,7 @@ import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
+import { copyRecordResult } from "./copy-result.js";
 import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
@@ -48,16 +48,6 @@ const MIN_TERMINAL_ROWS = 8;
 const CHAT_LIST_WIDTH = 18;
 /** Below this total width the chat drops the list pane and shows the conversation alone. */
 const CHAT_TWO_PANE_MIN_WIDTH = 60;
-
-/**
- * The host's clipboard helper, resolved at call time — pi ships one since
- * 0.84.2, but resolving lazily (not at module load) keeps a test's
- * `vi.spyOn(piHost, "copyToClipboard")` effective and honors any runtime
- * patching. A namespace import never throws for a missing binding; when the
- * property is absent the OSC 52 fallback in `copyChatResult` takes over.
- */
-const hostCopyToClipboard = (): ((text: string) => Promise<void>) | undefined =>
-  (piHost as { copyToClipboard?: (text: string) => Promise<void> }).copyToClipboard;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
 function chatGroupRank(status: AgentRecord["status"]): number {
@@ -697,12 +687,9 @@ export class AgentHub implements Component {
   }
 
   /**
-   * `c`: copy the shown agent's response to the system clipboard. Only a
-   * settled agent has a response worth pasting — a running one is still
-   * writing it. Uses the host's clipboard helper when this pi has one (it
-   * covers the platform tools and OSC 52 itself); on the pre-0.84.2 floor the
-   * fallback emits the OSC 52 sequence directly, the same escape route pi's
-   * own helper takes at the end of its chain.
+   * `c`: copy the shown agent's response to the system clipboard — the one
+   * implementation in `copyRecordResult`, shared with the workflow inspector's
+   * log level.
    */
   /** `p` in the chat pane: pause/resume the agent being viewed. */
   private pauseResumeChat(): void {
@@ -712,33 +699,7 @@ export class AgentHub implements Component {
 
   private copyChatResult(): void {
     const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
-    if (!record) return;
-    if (record.status === "running" || record.status === "queued") {
-      this.deps.notify?.(`"${record.description}" is still running — nothing to copy yet.`, "info");
-      return;
-    }
-    const text = record.result?.trim();
-    if (!text) {
-      this.deps.notify?.(`"${record.description}" has no result text to copy.`, "info");
-      return;
-    }
-    const report = () =>
-      this.deps.notify?.(`Copied "${record.description}" (${text.length.toLocaleString()} chars) to the clipboard.`, "info");
-    const copy = hostCopyToClipboard();
-    if (copy) {
-      void copy(text).then(report, () => {
-        this.deps.notify?.("Clipboard copy failed — no clipboard tool or terminal support.", "warning");
-      });
-      return;
-    }
-    // Base64 caps at the same 100k encoded chars pi's own helper allows.
-    const encoded = Buffer.from(text).toString("base64");
-    if (encoded.length > 100_000) {
-      this.deps.notify?.("Result too large for the terminal clipboard fallback.", "warning");
-      return;
-    }
-    process.stdout.write(`\x1b]52;c;${encoded}\x07`);
-    report();
+    if (record) copyRecordResult(record, (message, type) => this.deps.notify?.(message, type));
   }
 
   /** Two-press stop on the selected agent, mirroring the viewer's `x`. */

@@ -5352,6 +5352,19 @@ Write the file using the write tool. Only write the file, nothing else.`;
       viewerMarkdown: getViewerMarkdown,
       onViewerMarkdown: mode => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
       scrollbarMode: getFullscreenScrollbar,
+      // The log level's `p`, on the same funnel the fleet list's `p` rides —
+      // one place emits `subagents:paused` and decides refusals.
+      pauseAgent: id => {
+        const record = manager.getRecord(id);
+        return record ? pauseAgentRecord(record) : "no such agent";
+      },
+      resumeAgent: id => {
+        const record = manager.getRecord(id);
+        const sessionCtx = currentCtx;
+        if (!record || !sessionCtx) return false;
+        void resumeAgentById(sessionCtx, record);
+        return true;
+      },
     },
   };
 

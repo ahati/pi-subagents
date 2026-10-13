@@ -63,7 +63,7 @@ interface LogDepsWithPause extends WorkflowDialogLogDeps {
   resumeAgent: Mock<(id: string) => boolean>;
 }
 
-function harness(records: AgentRecord[]) {
+function harness(records: AgentRecord[], opts: { descend?: boolean } = {}) {
   const closed: boolean[] = [];
   const done = vi.fn((result: undefined | "toggle") => {
     if (result === "toggle") return;
@@ -82,14 +82,17 @@ function harness(records: AgentRecord[]) {
   };
   // Two rows ALWAYS, so the drill-down works even when `getRecord` resolves
   // nothing — the rows carry the record ids, the log deps decide what is
-  // behind them.
+  // behind them. Two phases and per-row prompts, so the overview/detail levels
+  // have something to move through and assert on.
   const instance = new WorkflowDialog(
     tui as unknown as never,
     () => ({
       progress: [
         { type: "workflow_phase", index: 0, title: "Verify" },
-        { type: "workflow_agent", index: 0, label: "row-one", phaseIndex: 0, state: "progress", startedAt: START, recordId: "rec-1" },
-        { type: "workflow_agent", index: 1, label: "row-two", phaseIndex: 0, state: "progress", startedAt: START, recordId: "rec-2" },
+        { type: "workflow_agent", index: 0, label: "row-one", phaseIndex: 0, state: "progress", startedAt: START, recordId: "rec-1", promptPreview: "first agent prompt" },
+        { type: "workflow_agent", index: 1, label: "row-two", phaseIndex: 0, state: "progress", startedAt: START, recordId: "rec-2", promptPreview: "second agent prompt" },
+        { type: "workflow_phase", index: 1, title: "Plan" },
+        { type: "workflow_agent", index: 2, label: "row-three", phaseIndex: 1, state: "queued", startedAt: START, recordId: "rec-3", promptPreview: "third agent prompt" },
       ],
       task: { status: "running" as const, workflowName: "wf", startTime: START },
     }),
@@ -100,9 +103,12 @@ function harness(records: AgentRecord[]) {
     0,
     log,
   );
-  // Open the detail level, then descend on the first agent → the log level.
-  instance.handleInput("\r");
-  instance.handleInput("\r");
+  // Open the detail level, then — unless asked not to — descend on the first
+  // agent → the log level.
+  if (opts.descend !== false) {
+    instance.handleInput("\r");
+    instance.handleInput("\r");
+  }
   return { instance, closed, log, done, write, tui };
 }
 
@@ -159,6 +165,7 @@ describe("workflow dialog log — hub parity (negative TCs, red until the parity
   describe("f / c / p keys", () => {
     it("TC4 f requests the popup ↔ full-screen toggle, like the hub's chat view", () => {
       const { instance, done } = harness([makeRecord({ id: "rec-1" })]);
+      frame(instance); // the level's viewer is built at render time, as live
       instance.handleInput("f");
       // The hub's contract: resolve the overlay with "toggle" so the open
       // loop reopens it at full-screen size (pi sizes overlays once).
@@ -171,6 +178,7 @@ describe("workflow dialog log — hub parity (negative TCs, red until the parity
       const { instance, log } = harness([
         makeRecord({ id: "rec-1", status: "completed", result: "the final answer" }),
       ]);
+      frame(instance); // the level's viewer is built at render time, as live
       instance.handleInput("c");
       await Promise.resolve();
       expect(copy).toHaveBeenCalledWith("the final answer");
@@ -180,6 +188,7 @@ describe("workflow dialog log — hub parity (negative TCs, red until the parity
 
     it("TC6 c on a running agent explains there is nothing to copy yet", () => {
       const { instance, log } = harness([makeRecord({ id: "rec-1", status: "running" })]);
+      frame(instance); // the level's viewer is built at render time, as live
       instance.handleInput("c");
       expect(log.notify).toHaveBeenCalledWith(expect.stringContaining("still running"), "info");
       instance.dispose();
@@ -187,6 +196,7 @@ describe("workflow dialog log — hub parity (negative TCs, red until the parity
 
     it("TC7 p pauses the shown agent, as the footer already advertises", () => {
       const { instance, log } = harness([makeRecord({ id: "rec-1", status: "running" })]);
+      frame(instance); // the level's viewer is built at render time, as live
       instance.handleInput("p");
       expect(log.pauseAgent).toHaveBeenCalledWith("rec-1");
       expect(log.notify).toHaveBeenCalledWith(expect.stringContaining('Paused "verify:auth.ts"'), "info");
@@ -205,6 +215,41 @@ describe("workflow dialog log — hub parity (negative TCs, red until the parity
       // Missing hub-parity hints:
       expect(rendered).toContain("c copy");
       expect(rendered).toContain("f expand");
+      instance.dispose();
+    });
+  });
+
+  describe("the levels above the log", () => {
+    it("TC9 wheel moves the phase selection at the overview (the hub roster's rule)", () => {
+      const { instance } = harness([], { descend: false });
+      expect(frame(instance)).toContain("❯ 1 Verify");
+      expect(instance.handleMouse!({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+      expect(frame(instance)).toContain("❯ 2 Plan");
+      expect(frame(instance)).not.toContain("❯ 1 Verify");
+      instance.handleMouse({ type: "wheel", wheelDelta: -1 });
+      expect(frame(instance)).toContain("❯ 1 Verify");
+      instance.dispose();
+    });
+
+    it("TC10 wheel moves the agent selection at the detail level", () => {
+      const { instance } = harness([], { descend: false });
+      instance.handleInput("\r"); // → the detail level
+      expect(frame(instance)).not.toContain("second agent prompt");
+      expect(instance.handleMouse!({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+      expect(frame(instance)).toContain("second agent prompt");
+      instance.dispose();
+    });
+
+    it("TC11 k keeps its scroll-up alias in the log (kill stays on x, per the hub)", () => {
+      const { instance } = harness([makeRecord({ id: "rec-1", session: scrollableSession() })]);
+      const followed = frame(instance);
+      expect(followed).toContain("message number 39");
+      instance.handleInput("k");
+      instance.handleInput("k");
+      instance.handleInput("k");
+      const scrolled = frame(instance);
+      expect(scrolled).not.toBe(followed);
+      expect(scrolled).not.toContain("message number 39");
       instance.dispose();
     });
   });

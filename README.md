@@ -582,7 +582,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 ╰───────────────────────────────────────────────────────────────────────╯
 ```
 
-The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `e` expanding the prompt and `esc` going back a level rather than closing. `⏎` on an agent with a conversation descends to the third level: the agent's **live conversation** embedded in the right pane — the same streaming viewer the hub's chat view shows, with `↑↓` switching agents and `esc` walking back. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay at the hub popup's size (90% × 70% of the terminal); the panes scroll inside it, so a two-hundred-agent fan-out never pastes two hundred rows. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
+The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `e` expanding the prompt and `esc` going back a level rather than closing. `⏎` on an agent with a conversation descends to the third level: the agent's **live conversation** embedded in the right pane — the same streaming viewer the hub's chat view shows, with `↑↓` switching agents, `c` copying the agent's settled result, `p` pausing or resuming it, the mouse wheel scrolling the conversation (the two levels above move the selection instead, as the hub's roster does), and `esc` walking back. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay at the hub popup's size (90% × 70% of the terminal) and `f` at the detail or log level expands it to the full terminal and back, carrying the level and selection across — the hub popup's same toggle. The panes scroll inside it, so a two-hundred-agent fan-out never pastes two hundred rows. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
 
 The run itself takes five keys, and the footer offers each only while it can actually do something:
 
@@ -1122,6 +1122,7 @@ src/
     workflow-menu.ts      # /agents → Workflows entry and the run inspector behind it
     terminal-mouse.ts     # Wheel support for regular TUI mode (mouse capture/restore)
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
+    copy-result.ts        # `c` — copy an agent's settled result (hub chat + inspector log)
     viewer-keys.ts        # Viewer key matchers (scroll + app.tools.expand) resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
     schedule-menu.ts      # /agents → Scheduled jobs submenu

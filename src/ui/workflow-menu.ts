@@ -18,7 +18,16 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
-import { WorkflowDialog, type WorkflowDialogLogDeps } from "./workflow-dialog.js";
+import {
+  WorkflowDialog,
+  type WorkflowDialogLogDeps,
+  type WorkflowDialogResumeState,
+} from "./workflow-dialog.js";
+
+/** Overlay geometry for the windowed inspector — the hub popup's size. */
+const POPUP_OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` } as const;
+/** Overlay geometry for the full-screen inspector (`f` expands to it). */
+const FULLSCREEN_OVERLAY_OPTIONS = { anchor: "center", width: "100%", maxHeight: "100%" } as const;
 
 /** Everything the menu and the inspector need from the extension around them. */
 export interface WorkflowMenuDeps {
@@ -49,12 +58,14 @@ export interface WorkflowMenuDeps {
 /**
  * Open the inspector for a workflow run.
  *
- * All six controls are wired: `onKill` aborts the run's controller, while
+ * All seven controls are wired: `onKill` aborts the run's controller, while
  * pause/resume and per-agent skip/retry go through `task.control`, the handle
  * `runWorkflow` hands back. `onOpenAgent` is the odd one out — it opens the
- * child's conversation rather than changing the run. The dialog derives its key
- * hints from the actions it is handed, so the footer advertises exactly what
- * works — see `WorkflowDialogActions`.
+ * child's conversation rather than changing the run. `f` at the detail or log
+ * level is the seventh: it resolves the overlay with `"toggle"` and the loop
+ * below reopens the window full-screen (or windowed again). The dialog derives
+ * its key hints from the actions it is handed, so the footer advertises
+ * exactly what works — see `WorkflowDialogActions`.
  */
 export async function showWorkflowDialog(
   ctx: ExtensionCommandContext,
@@ -73,87 +84,101 @@ export async function showWorkflowDialog(
   // nothing to peek out, and un-hiding puts the focus back on the dialog when
   // the panel closes.
   let overlay: { setHidden(hidden: boolean): void } | undefined;
-  await ctx.ui.custom<undefined>(
-    (tui, theme, _keybindings, done) =>
-      new WorkflowDialog(
-        tui,
-        // Re-read on every render: the run is in the background, so the
-        // dialog has to follow it rather than snapshot it at open time.
-        () => ({
-          progress: task.workflowProgress,
-          task: {
-            status: task.status,
-            workflowName: task.workflowName,
-            startTime: task.startTime,
-            endTime: task.endTime,
-            totalPausedMs: task.totalPausedMs,
+  // Windowed by default; `f` flips to the full-screen window and back — the
+  // agent hub's popup ↔ full-screen toggle. pi resolves an overlay's geometry
+  // once, at creation, so the toggle closes the overlay and this loop reopens
+  // it in the other mode, carrying the drill-down state through the shared
+  // resume object the dialog writes at toggle time.
+  let popup = true;
+  const resume: WorkflowDialogResumeState = {};
+  for (;;) {
+    const result = await ctx.ui.custom<"toggle" | undefined>(
+      (tui, theme, _keybindings, done) =>
+        new WorkflowDialog(
+          tui,
+          // Re-read on every render: the run is in the background, so the
+          // dialog has to follow it rather than snapshot it at open time.
+          () => ({
+            progress: task.workflowProgress,
+            task: {
+              status: task.status,
+              workflowName: task.workflowName,
+              startTime: task.startTime,
+              endTime: task.endTime,
+              totalPausedMs: task.totalPausedMs,
+            },
+            meta: task.meta,
+            agentCount: task.agentCount,
+          }),
+          theme,
+          done,
+          {
+            onKill: () => {
+              if (task.abortController.signal.aborted) return;
+              task.abortController.abort();
+              ctx.ui.notify(`Stopped workflow "${task.meta?.name ?? task.id}".`, "info");
+            },
+            onPause: () => {
+              if (pauseWorkflowTask(task)) {
+                // Named rather than implied: "paused" on a run whose agents are
+                // still finishing reads as a stronger promise than it is.
+                ctx.ui.notify("Paused — running agents finish, no new ones start.", "info");
+              }
+            },
+            onResume: () => {
+              if (resumeWorkflowTask(task)) ctx.ui.notify("Resumed.", "info");
+            },
+            onSkipAgent: index => {
+              if (task.control?.skip(index) !== true) {
+                ctx.ui.notify("Nothing to skip — that agent has already finished.", "info");
+              }
+            },
+            onRetryAgent: index => {
+              if (task.control?.retry(index) !== true) {
+                // The window is exactly "while it is running": before that
+                // there is nothing to stop, after it the script has its answer.
+                ctx.ui.notify("Only a running agent can be retried.", "info");
+              }
+            },
+            onOpenAgent: recordId => {
+              const record = deps.getRecord(recordId);
+              // A run's children are records like any other, so they are swept
+              // ten minutes after they finish — the row outlives the
+              // conversation it points at, and saying why beats an overlay that
+              // opens empty.
+              if (record === undefined) {
+                ctx.ui.notify("No conversation left — agent records are dropped ten minutes after they finish.", "info");
+                return;
+              }
+              overlay?.setHidden(true);
+              // Caught before the `finally`, so a viewer that fails to open
+              // still un-hides the dialog and cannot surface as an unhandled
+              // rejection out of a detached promise.
+              void deps.viewAgentConversation(ctx, record)
+                .catch(err => ctx.ui.notify(
+                  `Could not open the conversation: ${err instanceof Error ? err.message : String(err)}`,
+                  "warning",
+                ))
+                .finally(() => overlay?.setHidden(false));
+            },
           },
-          meta: task.meta,
-          agentCount: task.agentCount,
-        }),
-        theme,
-        done,
-        {
-          onKill: () => {
-            if (task.abortController.signal.aborted) return;
-            task.abortController.abort();
-            ctx.ui.notify(`Stopped workflow "${task.meta?.name ?? task.id}".`, "info");
-          },
-          onPause: () => {
-            if (pauseWorkflowTask(task)) {
-              // Named rather than implied: "paused" on a run whose agents are
-              // still finishing reads as a stronger promise than it is.
-              ctx.ui.notify("Paused — running agents finish, no new ones start.", "info");
-            }
-          },
-          onResume: () => {
-            if (resumeWorkflowTask(task)) ctx.ui.notify("Resumed.", "info");
-          },
-          onSkipAgent: index => {
-            if (task.control?.skip(index) !== true) {
-              ctx.ui.notify("Nothing to skip — that agent has already finished.", "info");
-            }
-          },
-          onRetryAgent: index => {
-            if (task.control?.retry(index) !== true) {
-              // The window is exactly "while it is running": before that
-              // there is nothing to stop, after it the script has its answer.
-              ctx.ui.notify("Only a running agent can be retried.", "info");
-            }
-          },
-          onOpenAgent: recordId => {
-            const record = deps.getRecord(recordId);
-            // A run's children are records like any other, so they are swept
-            // ten minutes after they finish — the row outlives the
-            // conversation it points at, and saying why beats an overlay that
-            // opens empty.
-            if (record === undefined) {
-              ctx.ui.notify("No conversation left — agent records are dropped ten minutes after they finish.", "info");
-              return;
-            }
-            overlay?.setHidden(true);
-            // Caught before the `finally`, so a viewer that fails to open
-            // still un-hides the dialog and cannot surface as an unhandled
-            // rejection out of a detached promise.
-            void deps.viewAgentConversation(ctx, record)
-              .catch(err => ctx.ui.notify(
-                `Could not open the conversation: ${err instanceof Error ? err.message : String(err)}`,
-                "warning",
-              ))
-              .finally(() => overlay?.setHidden(false));
-          },
+          // The third level: the same viewer knobs the hub gets, so the
+          // embedded log steers, aborts and copies like the hub's chat pane.
+          0,
+          deps.embeddedLog,
+          { popup, resume },
+        ),
+      {
+        overlay: true,
+        overlayOptions: popup ? POPUP_OVERLAY_OPTIONS : FULLSCREEN_OVERLAY_OPTIONS,
+        onHandle: handle => {
+          overlay = handle;
         },
-        // The third level: the same viewer knobs the hub gets, so the embedded
-        // log steers, aborts and copies like the hub's chat pane does.
-        0,
-        deps.embeddedLog,
-      ),
-    {
-      overlay: true,
-      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      onHandle: handle => { overlay = handle; },
-    },
-  );
+      },
+    );
+    if (result !== "toggle") return;
+    popup = !popup;
+  }
 }
 
 /**

@@ -1106,8 +1106,11 @@ describe("key hints reflect the wired actions", () => {
   });
 
   it("shows every hint once the terminal has room", () => {
-    const wide = dialog({ progress: everyKey, width: 100, state: { level: "agent" } }).at(-2) ?? "";
-    for (const key of ["↑↓ agent", "e prompt", "⏎ log", "s skip", "r retry", "p pause", "x stop", "esc back", "c convo"]) {
+    // 120, not 100: the footer gained `f expand` (the hub popup's key at this
+    // level), and this test is about which hints show, not the exact width
+    // they stop fitting at.
+    const wide = dialog({ progress: everyKey, width: 120, state: { level: "agent" } }).at(-2) ?? "";
+    for (const key of ["↑↓ agent", "e prompt", "⏎ log", "s skip", "r retry", "p pause", "x stop", "esc back", "f expand", "c convo"]) {
       expect(wide).toContain(key);
     }
     expect(wide).not.toContain("…");

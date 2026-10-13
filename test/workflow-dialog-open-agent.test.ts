@@ -36,7 +36,7 @@ const fakeSession = () => ({
 
 /** One overlay the extension asked `ui.custom` for, held open like a real one. */
 interface OpenOverlay {
-  options: { overlay?: boolean; onHandle?: (handle: unknown) => void };
+  options: { overlay?: boolean; overlayOptions?: Record<string, unknown>; onHandle?: (handle: unknown) => void };
   instance: {
     handleInput?(data: string): void;
     handleMouse?(event: Record<string, unknown>): unknown;
@@ -177,5 +177,32 @@ describe("the inspector opens a workflow agent's conversation", () => {
 
     ui.overlays[1].close();
     ui.overlays[0].close();
+  });
+
+  it("f expands the inspector to the full terminal and back, carrying the level", async () => {
+    const { command } = await bootWithChild();
+    const ui = overlayCtx();
+
+    void command.handler("", ui.context);
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
+    const dialog = ui.overlays[0].instance;
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-2)).toContain("c convo"));
+
+    // Descend to the detail level — the one below the overview, where `f` is
+    // the expand key (at the overview it is the filter cycle).
+    dialog.handleInput?.("\r");
+    dialog.handleInput?.("f");
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
+    // The hub's toggle contract: the overlay resolved with "toggle" and the
+    // opener reopened it full-screen.
+    expect(ui.overlays[1].options.overlayOptions).toMatchObject({ width: "100%", maxHeight: "100%" });
+    // The drill-down state carried: still on the detail pane, not the overview.
+    expect(ui.overlays[1].instance.render?.(160).join("\n")).toContain("Prompt");
+
+    // And `f` collapses back to the windowed popup.
+    ui.overlays[1].instance.handleInput?.("f");
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(3));
+    expect(ui.overlays[2].options.overlayOptions).toMatchObject({ width: "90%" });
+    ui.overlays[2].close();
   });
 });

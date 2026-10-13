@@ -79,6 +79,8 @@ import {
 } from "../workflow/progress.js";
 import { type AgentActivity, SPINNER, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { copyRecordResult } from "./copy-result.js";
+import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import {
   ASCII_GLYPHS,
   clampLine,
@@ -315,6 +317,20 @@ export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialo
   };
 }
 
+/** State carried across the popup ↔ full-screen reopen cycle. */
+export interface WorkflowDialogResumeState {
+  /** The previous instance's drill-down state, written back at toggle time. */
+  state?: WorkflowDialogState;
+}
+
+/** Optional constructor state: which window size to start in, and what to restore. */
+export interface WorkflowDialogInitial {
+  /** Start windowed (the default) or full-screen. */
+  popup?: boolean;
+  /** Shared object a toggle writes the live state into, for the reopen to restore. */
+  resume?: WorkflowDialogResumeState;
+}
+
 /** Everything the dialog reads about a run, so it can be driven from a stub. */
 export interface WorkflowDialogSource {
   progress: readonly WorkflowEntry[];
@@ -335,6 +351,8 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
    * here separately.
    */
   available?: Partial<Record<keyof WorkflowDialogActions | "onOpenLog", boolean>>;
+  /** Whether the dialog is showing full-screen — names the `f` hint accordingly. */
+  fullscreen?: boolean;
   now?: number;
   /** The *terminal* width; the content width is derived from it. */
   width?: number;
@@ -393,6 +411,14 @@ export interface WorkflowDialogLogDeps {
   scrollbarMode?: () => ScrollViewScrollbar;
   /** Surface a swept record. Omitted → silent. */
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
+  /**
+   * Pause/resume for the log level's `p` key, wired by the extension to the
+   * same funnel the `/agents` commands use — the hub's `AgentHubDeps` pair.
+   * `pauseAgent` returns why the pause was refused, so the toast never claims
+   * a pause that did not land. Omitted → `p` does nothing.
+   */
+  pauseAgent?: (id: string) => string | undefined;
+  resumeAgent?: (id: string) => boolean;
 }
 
 export type WorkflowDialogAction =
@@ -403,7 +429,8 @@ export type WorkflowDialogAction =
   | { kind: "skip"; index: number }
   | { kind: "retry"; index: number }
   | { kind: "open"; recordId: string }
-  | { kind: "open-log" };
+  | { kind: "open-log" }
+  | { kind: "toggle-fullscreen" };
 
 export interface ResolvedWorkflowDialog {
   groups: PhaseGroup[];
@@ -991,6 +1018,11 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   else if (view.workflowActive && can("onPause")) hints.push("p pause");
   if (view.workflowActive && can("onKill")) hints.push("x stop");
   hints.push(inPhases ? "esc close" : "esc back");
+  // The hub popup's expand key — offered at the detail level, where `f` is
+  // free. Full-screen names the way back instead. It sits after the way out
+  // (a narrow terminal drops it before `esc`) and before the two display-only
+  // handoffs below, which exist to be dropped first.
+  if (!inPhases) hints.push(input.fullscreen ? "f popup" : "f expand");
   // The two display-only hints sit AFTER the way out, because the footer is
   // clamped rather than wrapped: an 80-column terminal drops them — first
   // `c convo`, then `⏎ log` — before it drops the escape hatch. Both are gated
@@ -1089,6 +1121,13 @@ export function handleWorkflowDialogKey(
     return { state: { ...state, promptExpanded: !state.promptExpanded } };
   }
 
+  // The hub popup's expand key, at the one level below the overview where `f`
+  // is free (there it is the filter cycle). The component resolves the overlay
+  // with "toggle" and its opener reopens it full-screen — or windowed again.
+  if (matchesKey(data, "f") && state.level === "agent") {
+    return { state, action: { kind: "toggle-fullscreen" } };
+  }
+
   // The one key that opens something instead of changing the run, so unlike
   // skip/retry it works at both levels and on a settled agent: reading what a
   // finished child did is most of why anyone opens this dialog. A row with no
@@ -1132,6 +1171,12 @@ export function plainWorkflowDialogLines(lines: readonly WorkflowCardLine[]): st
   return lines.map(line => line.map(segment => segment.text).join(""));
 }
 
+/** The TUI/terminal surface mouse capture needs — structural, version-safe. */
+interface MouseTerminalHost {
+  mode?: string;
+  terminal?: { write?(data: string): void };
+}
+
 /**
  * The `/agents → Workflows` overlay.
  *
@@ -1149,25 +1194,46 @@ export class WorkflowDialog implements Component {
   private logViewer: ConversationViewer | undefined;
   /** The record id the viewer was built for, so switching agents rebuilds it. */
   private logRecordId: string | undefined;
+  /** Windowed popup vs full-screen window; flipped by `f` via the reopen loop. */
+  private readonly popup: boolean;
+  /** Shared object written back at toggle time so the reopen resumes here. */
+  private readonly resume: WorkflowDialogResumeState | undefined;
+  /** Whether this dialog enabled regular-mode mouse reporting (and must restore it). */
+  private mouseCaptured = false;
 
   constructor(
     private tui: TUI,
     private source: () => WorkflowDialogSource,
     private theme: Theme,
-    private done: (result: undefined) => void,
+    private done: (result: "toggle" | undefined) => void,
     private actions: WorkflowDialogActions = {},
     initialPhaseIndex = 0,
     private log?: WorkflowDialogLogDeps,
+    initial?: WorkflowDialogInitial,
   ) {
-    this.state = initialWorkflowDialogState(initialPhaseIndex);
+    this.state = initial?.resume?.state ?? initialWorkflowDialogState(initialPhaseIndex);
+    this.popup = initial?.popup ?? true;
+    this.resume = initial?.resume;
     this.timer = setInterval(() => {
       this.spinnerFrame++;
       if (!this.closed) this.tui.requestRender();
     }, WORKFLOW_DIALOG_SPINNER_MS);
     this.timer.unref?.();
+    // Regular TUI mode leaves the wheel to the terminal's own scrollback;
+    // capture it for the dialog's lifetime. No-op in fullscreen, where pi
+    // already parses mouse input and calls handleMouse instead.
+    this.mouseCaptured = enableTerminalMouse(this.tui as unknown as MouseTerminalHost);
   }
 
   handleInput(data: string): void {
+    // Mouse reports first. In regular mode the dialog captured mouse
+    // reporting, so wheel bytes arrive as input; the chunk is consumed either
+    // way so no escape sequence can leak into the editor.
+    const mouse = parseMouseInput(data);
+    if (mouse.sawMouse) {
+      if (mouse.wheelDelta !== 0) this.applyWheel(mouse.wheelDelta);
+      return;
+    }
     // Ctrl+C is the reflex for backing out of a full-screen overlay, and it
     // closes from EVERY level — including the log, where the embedded viewer
     // would otherwise turn it into a one-level step-back.
@@ -1187,6 +1253,52 @@ export class WorkflowDialog implements Component {
     // Leaving the log level — by any route — tears its viewer down.
     if (wasLevel === "log" && this.state.level !== "log") this.closeLogViewer();
     if (result.action) this.dispatch(result.action);
+    this.tui.requestRender();
+  }
+
+  /**
+   * Mouse wheel support, fullscreen route. pi's alt-screen renderer parses
+   * mouse input and dispatches wheel events to an overlay's top-level
+   * component — this dialog. In regular mode nothing arrives here;
+   * `handleInput` parses the reports instead (see `terminal-mouse.ts`).
+   *
+   * The shape is declared locally rather than imported: mouse dispatch landed
+   * in pi-tui 0.99 while this extension's peer floor is 0.84, so the method is
+   * duck-typed — hosts that support mouse call it, older hosts never do.
+   */
+  handleMouse(event: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined {
+    if (event.type !== "wheel") return undefined;
+    const delta = event.wheelDelta ?? 0;
+    if (delta === 0) return undefined;
+    this.applyWheel(delta);
+    return { handled: true };
+  }
+
+  /**
+   * One wheel movement, from whichever route delivered it. The log level
+   * scrolls the conversation — so follow-the-tail behaves exactly as with the
+   * scroll keys — and the two levels above move the visible selection a row
+   * per logical line, the hub roster's same rule. Consumed by the caller
+   * either way: an unhandled wheel would scroll the transcript underneath the
+   * overlay.
+   */
+  private applyWheel(delta: number): void {
+    if (this.state.level === "log" && this.logViewer) {
+      this.logViewer.scrollBy(delta);
+      this.tui.requestRender();
+      return;
+    }
+    const steps = Math.max(1, Math.round(Math.abs(delta)));
+    const view = resolveWorkflowDialog({ ...this.source(), state: this.state });
+    if (this.state.level === "phases") {
+      const next = clampIndex(view.clampedPhase + Math.sign(delta) * steps, view.groups.length);
+      // Changing phase re-points the agent list at a different set of rows, so
+      // the old row index would be meaningless — `j`/`k`'s same rule.
+      if (next !== view.clampedPhase) this.state = { ...this.state, selectedPhase: next, selectedAgent: 0 };
+    } else {
+      const next = clampIndex(view.clampedAgent + Math.sign(delta) * steps, view.visibleAgents.length);
+      if (next !== view.clampedAgent) this.state = { ...this.state, selectedAgent: next };
+    }
     this.tui.requestRender();
   }
 
@@ -1214,6 +1326,7 @@ export class WorkflowDialog implements Component {
       },
       width,
       spinnerFrame: this.spinnerFrame,
+      fullscreen: !this.popup,
       // The hub's popup size: fill the same 70%-of-terminal ceiling the
       // overlay clips at, minus the rows the window itself draws around the
       // panes. A host with no terminal reported (bare tests) falls back to the
@@ -1224,11 +1337,16 @@ export class WorkflowDialog implements Component {
     return styleWorkflowCardLines(lines, this.theme);
   }
 
+  /** Terminal share the window fills: the popup's 70%, full-screen's 100%. */
+  private viewportPct(): number {
+    return this.popup ? VIEWPORT_HEIGHT_PCT : 100;
+  }
+
   /** Body height for the pane window, from the hub's popup arithmetic. */
   private paneHeight(): number {
     const rows = this.tui.terminal?.rows;
     if (rows === undefined) return DEFAULT_PANE_BODY_ROWS;
-    return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * VIEWPORT_HEIGHT_PCT) / 100) - WINDOW_CHROME_ROWS);
+    return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * this.viewportPct()) / 100) - WINDOW_CHROME_ROWS);
   }
 
   invalidate(): void {
@@ -1238,6 +1356,11 @@ export class WorkflowDialog implements Component {
   dispose(): void {
     this.closed = true;
     this.closeLogViewer();
+    // Hand the wheel back to the terminal (native scrollback, text selection).
+    if (this.mouseCaptured) {
+      disableTerminalMouse(this.tui as unknown as MouseTerminalHost);
+      this.mouseCaptured = false;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -1279,20 +1402,43 @@ export class WorkflowDialog implements Component {
       {
         // The window around the pane spends rows too, so the viewer's ceiling
         // shrinks by their share of the terminal — the whole dialog stays
-        // under the overlay's 70% clip instead of losing its bottom border.
+        // under the overlay's clip instead of losing its bottom border. Full
+        // screen starts from the whole terminal instead of the popup's share.
         maxHeightPct: () =>
-          Math.max(20, VIEWPORT_HEIGHT_PCT - Math.ceil((WINDOW_CHROME_ROWS * 100) / Math.max(1, this.tui.terminal.rows))),
+          Math.max(
+            20,
+            this.viewportPct() - Math.ceil((WINDOW_CHROME_ROWS * 100) / Math.max(1, this.tui.terminal.rows)),
+          ),
         onBack: () => this.leaveLog(),
         // ↑/↓ are the pane list's selection keys, so the viewer must not
         // advertise them as scroll keys.
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
         frameless: () => true,
         onUnhandledKey: data => {
+          // ↑/↓ move the pane list's selection and the stream follows.
           const down = matchesKey(data, "down");
           const up = matchesKey(data, "up");
-          if (!down && !up) return false;
-          this.moveLogSelection(down ? 1 : -1);
-          return true;
+          if (down || up) {
+            this.moveLogSelection(down ? 1 : -1);
+            return true;
+          }
+          // `f` flips windowed ↔ full-screen, `c` copies the shown agent's
+          // settled result and `p` pauses/resumes it — the hub chat pane's
+          // extra keys. The composer check inside the viewer runs first, so a
+          // steering message still receives its f's, c's and p's.
+          if (matchesKey(data, "f")) {
+            this.requestToggle();
+            return true;
+          }
+          if (matchesKey(data, "c")) {
+            this.copyLogResult();
+            return true;
+          }
+          if (matchesKey(data, "p")) {
+            this.pauseResumeLogAgent();
+            return true;
+          }
+          return false;
         },
       },
     );
@@ -1324,6 +1470,52 @@ export class WorkflowDialog implements Component {
     this.tui.requestRender();
   }
 
+  /** `f`: flip windowed ↔ full-screen. pi sizes overlays once, so this writes
+   *  the live state into the shared resume object and resolves the overlay
+   *  with `"toggle"`; `showWorkflowDialog` reopens us resized, resuming there. */
+  private requestToggle(): void {
+    if (this.resume) this.resume.state = this.state;
+    this.done("toggle");
+  }
+
+  /** The record the log level is showing, fetched fresh — the hub fetches its
+   *  chat record fresh for the same reason: it may have settled or been swept
+   *  between renders. */
+  private logRecord(): AgentRecord | undefined {
+    const recordId = this.resolveLogState()?.recordId;
+    return recordId === undefined ? undefined : this.log?.getRecord(recordId);
+  }
+
+  /** `c` in the log: copy the shown agent's settled result — the hub chat
+   *  pane's same key, over the one implementation in `copyRecordResult`. */
+  private copyLogResult(): void {
+    const record = this.logRecord();
+    if (record) copyRecordResult(record, this.log?.notify);
+  }
+
+  /**
+   * `p` in the log: pause the agent being viewed if it is active, resume it if
+   * paused — the hub chat pane's same key and strings. Settled agents stay
+   * put: this pauses one child, never the run.
+   */
+  private pauseResumeLogAgent(): void {
+    const record = this.logRecord();
+    if (!record) return;
+    if (record.status === "running" || record.status === "queued") {
+      const why = this.log?.pauseAgent?.(record.id);
+      this.log?.notify?.(
+        why ? `Cannot pause "${record.description}" — ${why}.` : `Paused "${record.description}".`,
+        why ? "warning" : "info",
+      );
+    } else if (record.status === "paused") {
+      const started = this.log?.resumeAgent?.(record.id);
+      this.log?.notify?.(
+        started ? `Resuming "${record.description}".` : `Cannot resume "${record.description}".`,
+        started ? "info" : "warning",
+      );
+    }
+  }
+
   /** A viewer quit that is not `onBack` — close the dialog outright. */
   private closeFromLog(): void {
     this.closed = true;
@@ -1349,7 +1541,8 @@ export class WorkflowDialog implements Component {
    * │ ❯ ◌ verify:auth.ts   │ (live conversation) │
    * │   ✓ plan             │                     │
    * ├ ─────────────────────┴───────────────────── ┤
-   * │ ↑↓ agent · p pause · x stop · esc back     │
+   * │ ↑↓ agent · p pause · x stop · esc back ·    │
+   * │   c copy · f expand                         │
    * ╰────────────────────────────────────────────╯
    * ```
    */
@@ -1369,7 +1562,7 @@ export class WorkflowDialog implements Component {
     const rightWidth = Math.max(1, contentWidth - leftWidth - 3);
     // The window's non-body rows: borders, headers, two rules, footer.
     const chrome = WINDOW_CHROME_ROWS;
-    const bodyRows = Math.max(MIN_PANE_BODY_ROWS, Math.floor(((this.tui.terminal?.rows ?? 40) * VIEWPORT_HEIGHT_PCT) / 100) - chrome);
+    const bodyRows = Math.max(MIN_PANE_BODY_ROWS, Math.floor(((this.tui.terminal?.rows ?? 40) * this.viewportPct()) / 100) - chrome);
 
     const chat = viewer.render(rightWidth);
     if (chat.length === 0) return [];
@@ -1447,11 +1640,20 @@ export class WorkflowDialog implements Component {
     }
 
     lines.push(ruleRow(undefined, undefined));
+    // The level's own keys. `p` here pauses the AGENT being viewed — not the
+    // run — so it is gated on the record's lifecycle and the wiring, not on
+    // the run's. `c` and `f` sit after the way out so a narrow terminal drops
+    // them first, the display-only rule the segment footer follows.
     const hints: string[] = [`${glyphs.upDown} agent`];
-    if (view.paused) hints.push("p resume");
-    else if (view.workflowActive) hints.push("p pause");
+    const record = this.logRecord();
+    if (this.log?.pauseAgent !== undefined) {
+      if (record?.status === "paused") hints.push("p resume");
+      else if (record?.status === "running" || record?.status === "queued") hints.push("p pause");
+    }
     if (view.workflowActive) hints.push("x stop");
     hints.push("esc back");
+    hints.push("c copy");
+    hints.push(this.popup ? "f expand" : "f popup");
     lines.push(windowLine(th.fg("dim", hints.join(" · "))));
     lines.push(windowBottom());
     return lines;
@@ -1486,6 +1688,9 @@ export class WorkflowDialog implements Component {
         // The descend: flip the level and let the next render build the
         // viewer. A record with no conversation falls back in render().
         this.state = { ...this.state, level: "log", promptExpanded: false };
+        return;
+      case "toggle-fullscreen":
+        this.requestToggle();
         return;
     }
   }
