@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.10.14-r1] - 2026-10-14
+
 ### Added
 - **`subagents:rpc:steer` lets a cross-extension caller message an agent it spawned** ([#292](https://github.com/tintinweb/pi-subagents/pull/292) — thanks [@efpiva](https://github.com/efpiva)). The bus-side half of `steer_subagent`: id only, the same ownership guard as `stop`, `Agent is not running` once the agent has settled, and it emits `subagents:steered` like the tool does. Outside the `ping` handshake like `consume`.
 
