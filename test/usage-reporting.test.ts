@@ -369,6 +369,9 @@ describe("reporting subagent usage back to the parent session", () => {
         },
       });
       expect(typeof events[0].id).toBe("string");
+      // A top-level agent has no owner: the keys are absent, not `undefined`.
+      expect(events[0]).not.toHaveProperty("parentAgentId");
+      expect(events[0]).not.toHaveProperty("workflowId");
     });
 
     it("is emitted regardless of reportUsage", async () => {
@@ -397,6 +400,17 @@ describe("reporting subagent usage back to the parent session", () => {
       const { pi, tools } = boot({});
       let spawned = false;
       vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        if (spawned) {
+          // The child's session reports the level pi actually gave it; that is
+          // where the manager detects the clamp and keeps the request.
+          opts.onSessionCreated?.({
+            dispose: vi.fn(),
+            subscribe: vi.fn(() => () => {}),
+            messages: [],
+            model: { provider: "anthropic", id: "claude-haiku-4-5" },
+            thinkingLevel: "low",
+          });
+        }
         opts.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
         if (!spawned) {
           spawned = true;
@@ -406,7 +420,7 @@ describe("reporting subagent usage back to the parent session", () => {
             isBackground: false,
             parentAgentId,
             depth: 2,
-            invocation: { thinking: "low", requestedThinking: "minimal" },
+            invocation: { thinking: "minimal" },
           });
           await manager.getRecord(childId).promise;
         }
@@ -417,16 +431,43 @@ describe("reporting subagent usage back to the parent session", () => {
 
       const events = usageEvents(pi);
       expect(events.find((e: any) => e.description === "clamped")).toMatchObject({ thinking: "low", requestedThinking: "minimal" });
-      // An agent that got what it asked for carries no request.
-      expect(events.find((e: any) => e.description === "spend").requestedThinking).toBeUndefined();
+      // An agent that got what it asked for carries no request — no key at all.
+      expect(events.find((e: any) => e.description === "spend")).not.toHaveProperty("requestedThinking");
     });
 
-    it("announces subagents:disposed after shutdown has stopped every agent", async () => {
+    it("emits the last subagents:usage before subagents:disposed", async () => {
       // A ledger's own session_shutdown can run before this extension aborts
-      // the agents; this is its signal that no more usage can arrive.
-      const { pi, lifecycle } = boot({});
+      // the agents; `disposed` is its signal that no more usage can arrive. So
+      // it must come after abortAll() AND after the awaited child shutdown.
+      const { pi, tools, lifecycle } = boot({});
+      let fake: any;
+      vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        fake = {
+          // The last message, reported from dispose(): shutdownChildSession
+          // calls it synchronously inside manager.dispose(), i.e. during the
+          // window the handler is awaiting — a message_end landing then still
+          // reaches onUsage.
+          dispose: vi.fn(() => opts.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 })),
+          subscribe: vi.fn(() => () => {}),
+          messages: [],
+        };
+        opts.onSessionCreated?.(fake);
+        return new Promise(() => {});
+      });
+
+      await tools.get("Agent").execute(
+        "tc-1",
+        { prompt: "go", description: "spend", subagent_type: "general-purpose", run_in_background: true },
+        undefined, undefined, ctx(),
+      );
       await lifecycle.get("session_shutdown")?.({}, ctx());
-      const names = pi.events.emit.mock.calls.map((c: any[]) => c[0]);
+
+      const calls = pi.events.emit.mock.calls;
+      const names = calls.map((c: any[]) => c[0]);
+      const usageIdx = calls.findIndex((c: any[]) => c[0] === "subagents:usage" && c[1]?.usage?.cost?.total === 0.001);
+      expect(fake.dispose).toHaveBeenCalledTimes(1);
+      expect(usageIdx).toBeGreaterThan(-1);
+      expect(usageIdx).toBeLessThan(names.lastIndexOf("subagents:disposed"));
       expect(names.at(-1)).toBe("subagents:disposed");
     });
 

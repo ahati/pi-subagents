@@ -694,20 +694,24 @@ export default function (pi: ExtensionAPI) {
     // has clamped the level to the model (see `onSessionCreated`).
     const reported = toReportedUsage(usage);
     if (!reported) return;
+    // A key whose value is unknown is omitted, never `undefined`: `model` and
+    // `thinking` until the session has reported them, `parentAgentId` and
+    // `workflowId` on a top-level agent.
+    const invocation = record.invocation;
     try {
       pi.events.emit("subagents:usage", {
         id: record.id,
         type: record.type,
         description: record.description,
-        model: record.invocation?.modelId,
-        thinking: record.invocation?.thinking,
+        ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
+        ...(invocation?.thinking !== undefined ? { thinking: invocation.thinking } : {}),
         // Set only when the caller did not get the level it asked for (pi
         // clamped it to the model, or an agent file outranked it), so a ledger
         // can show `low (asked minimal)` instead of silently relabelling.
-        requestedThinking: record.invocation?.requestedThinking,
+        ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
         depth: record.depth ?? 1,
-        parentAgentId: record.parentAgentId,
-        workflowId: record.workflowId,
+        ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
+        ...(record.workflowId !== undefined ? { workflowId: record.workflowId } : {}),
         usage: reported,
       });
     } catch {
@@ -1231,6 +1235,14 @@ export default function (pi: ExtensionAPI) {
       }
     }
     manager.abortAll();
+    // Activation-owned UI and group state (#256): `session_shutdown` also runs for
+    // reload and session replacement, where the Node process survives, so a live
+    // widget render interval or a pending group-join timeout from this activation
+    // would outlive it and fire into the next session's UI and group state.
+    // `session_before_switch` deliberately keeps both: a vetoed switch continues
+    // this session, where the live UI and group state must survive.
+    groupJoin.dispose();
+    widget.dispose();
     outbox.dispose();
     fleet.dispose();
     unsubHandoffKey?.();
@@ -1245,7 +1257,8 @@ export default function (pi: ExtensionAPI) {
     // `subagents:usage` can arrive. A ledger flushing in its own
     // `session_shutdown` may have run before this handler aborted the agents
     // (handlers run in load order) and missed their last messages; this is the
-    // point after which a final flush is complete.
+    // point after which a synchronous final flush is complete. Synchronous:
+    // `emit` does not await listeners, and pi exits once this handler returns.
     try {
       pi.events.emit("subagents:disposed", {});
     } catch {

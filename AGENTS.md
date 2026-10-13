@@ -148,6 +148,7 @@ Before a release:
   ```
   `PI_E2E_LIVE=1` swaps the scripted faux suite for the live one (the faux suite is `skipIf(LIVE)`).
   (`prepublishOnly` runs lint + typecheck + test + build; the live e2e is the smoke test to run by hand before publishing.)
+- Inspect the publish tarball with `npm pack --dry-run` and eyeball the output: the version is right, `src/` (pi loads `pi.extensions: ./src/index.ts`), `dist/`, `README.md`, `CHANGELOG.md` and `LICENSE` are present, and nothing stray slipped past `.npmignore`. Read-only; it writes no tarball. `prepublishOnly` builds but never checks what actually ships.
 
 **Never publish.** The user runs `npm version` / `npm publish` and any tagging manually. Do not run those commands unless the user explicitly asks.
 

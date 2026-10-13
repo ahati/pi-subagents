@@ -9,6 +9,14 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`subagents:usage` omits keys whose value is unknown instead of sending `undefined`** (upstream [#377](https://github.com/tintinweb/pi-subagents/pull/377)). The merge replaces the ported emit with upstream's evolved one: `model` and `thinking` are absent until the session has reported them, and `parentAgentId`/`workflowId` are absent on a top-level agent, so an in-process listener's `Object.keys` sees only real values. The shutdown emit is documented as synchronous — `emit` does not await listeners, and pi exits once the shutdown handler returns.
+
+### Fixed
+
+- **`session_shutdown` now disposes the widget and group-join manager** (fixes [#256](https://github.com/tintinweb/pi-subagents/issues/256), [#316](https://github.com/tintinweb/pi-subagents/pull/316) — thanks [@joshua-zyy](https://github.com/joshua-zyy)). The handler released the fleet, scheduler and manager but left the `AgentWidget` render interval and the `GroupJoinManager` group timeouts running. Because `session_shutdown` also fires on reload and session replacement, where the Node process survives, those timers outlived the activation and fired into the next session's UI and group state, accumulating across reloads. `session_before_switch` still keeps both, since a vetoed switch continues the session.
+
 ## [2026.10.13-r1] - 2026-10-13
 
 ### Fixed
