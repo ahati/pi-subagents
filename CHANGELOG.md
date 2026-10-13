@@ -9,6 +9,8 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+## [2026.10.13-r1] - 2026-10-13
+
 ### Fixed
 
 - **Workflow inspector's log level catches up to the agent hub's log view.** The embedded conversation now scrolls with the mouse wheel on both TUI routes (pi's fullscreen dispatch and regular-mode capture, released when the dialog closes); `f` expands the inspector to the full terminal and back, carrying the level and selection across the reopen; `c` copies the shown agent's settled result; and `p` pauses or resumes it through the same funnel as `/agents pause` — a key the footer had been advertising all along without wiring. The log footer now advertises `c copy` and `f expand` alongside the existing hints, and its `p` hint is gated on the agent's lifecycle and the wiring instead of lying in both directions. At the two levels above the log, the wheel moves the visible selection, the hub roster's rule. Copy is one shared implementation (`copy-result.ts`) for the hub and the inspector.
