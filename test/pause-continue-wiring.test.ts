@@ -22,6 +22,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { PauseStore, resolvePauseStorePath } from "../src/pause-store.js";
+import { finalReportFromSessionFile } from "../src/session-continue.js";
 import { type BootedPi, ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -375,6 +376,11 @@ describe("/continue", () => {
       await flush();
       expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
       expect(warn.mock.calls.filter(c => String(c[0]).includes("[pi-subagents-hub]"))).toEqual([]);
+      // Control: the same file read for delivery (not the probe) DOES warn and
+      // says why. Asserting only the silence above would pass on the code
+      // before the probe existed, since nothing warned there at all.
+      expect(finalReportFromSessionFile(sessionFile)).toBeUndefined();
+      expect(warn.mock.calls.map(c => String(c[0])).some(m => m.includes("[pi-subagents-hub]") && m.includes("unanswered tool call"))).toBe(true);
     } finally {
       warn.mockRestore();
     }

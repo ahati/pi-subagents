@@ -113,8 +113,10 @@ function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
 /**
  * Create an AgentActivity state and spawn callbacks for tracking tool usage.
  * Used by both foreground and background paths to avoid duplication.
+ * Exported for the activity-tracking tests: it is the counter that decides
+ * whether a `warning` probe becomes a tool use.
  */
-function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
+export function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   const state: AgentActivity = {
     activeTools: new Map(),
     toolUses: 0,
@@ -3683,6 +3685,13 @@ Terse command-style prompts produce shallow, generic work.
     const undelivered: PausedAgentEntry[] = [];
     for (const entry of deliverable) {
       const live = manager.getRecord(entry.id);
+      // Deliberately a SECOND read, not the probe's result: the probe only
+      // classified the row, and delivery is what an undeliverable result must
+      // be reported at. The file can change between the two reads (a resumed
+      // session appends, another process rewrites it), so this read is the
+      // authoritative sample — if it no longer ends on a report the non-quiet
+      // call warns with the reason and the row stays in the manifest as
+      // `undelivered` for a later `/continue` rather than being dropped.
       const report = live ? (live.result ?? live.error ?? "") : finalReportFromSessionFile(entry.sessionFile);
       if (!live && report === undefined) {
         // No record and no final answer in the session file (deleted, or a

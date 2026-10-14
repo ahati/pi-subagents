@@ -5,12 +5,15 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
+import { createActivityTracker } from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  // Spread the real module: this file also imports src/index.js (for the
+  // activity tracker below), which reaches other agent-runner exports.
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
@@ -2310,6 +2313,11 @@ describe("AgentManager — background resume", () => {
 
   it("does not count probe warnings as tool uses", async () => {
     manager = new AgentManager();
+    // The warning is counted by the extension's activity tracker — the counter
+    // that regressed when a `warning` fell into its `end` branch — so the test
+    // wires the real tracker into the spawn rather than trusting the manager's
+    // record bookkeeping, which never counted non-`end` activity.
+    const { state, callbacks } = createActivityTracker();
     vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
       opts.onToolActivity?.({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
       return { responseText: "ok", session: mockSession(), aborted: false, steered: false };
@@ -2318,18 +2326,24 @@ describe("AgentManager — background resume", () => {
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "task", {
       description: "task",
       isBackground: true,
+      onToolActivity: callbacks.onToolActivity,
     });
     await manager.getRecord(id)!.promise;
 
     expect(manager.getRecord(id)!.status).toBe("completed");
     expect(manager.getRecord(id)!.toolUses).toBe(0);
+    expect(state.toolUses).toBe(0);
+    expect(state.activeTools.size).toBe(0);
   });
 
   it("counts a matched start/end pair once and still forwards warnings", async () => {
     manager = new AgentManager();
     const id = await spawnSettled(manager);
 
-    const onToolActivity = vi.fn();
+    // A spy over the real tracker: the warning must reach the caller (and the
+    // tracker) untouched, and only the matched end may add a tool use.
+    const { state, callbacks } = createActivityTracker();
+    const onToolActivity = vi.fn(callbacks.onToolActivity);
     vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onToolActivity?.({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
       opts.onToolActivity?.({ type: "start", toolName: "grep" });
@@ -2342,6 +2356,8 @@ describe("AgentManager — background resume", () => {
 
     expect(onToolActivity).toHaveBeenCalledWith({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
     expect(manager.getRecord(id)!.toolUses).toBe(1);
+    expect(state.toolUses).toBe(1);
+    expect(state.activeTools.size).toBe(0);
   });
 
   it("queues a background resume when the concurrency pool is full", async () => {

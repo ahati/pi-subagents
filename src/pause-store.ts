@@ -75,9 +75,19 @@ export function resolvePauseStorePath(cwd: string, sessionId: string): string {
  *
  * A manifest is keyed by session id (`<sessionId>.json`); once that session
  * is deleted the park can never be continued, and nothing else ever removes
- * the file. `sessionExists` is the caller's proof of life and must be total
- * (a throw would abort the sweep) — the wiring passes a closure over
- * `SessionManager.findById` plus the current session id.
+ * the file.
+ *
+ * LIMITATION — `sessionExists(id) === false` is taken as proof of death, so a
+ * false negative deletes a live park. The predicate must therefore be able to
+ * see every session an id could belong to; the wiring passes a closure over
+ * the current session id (checked directly, no lookup) plus
+ * `SessionManager.findById(cwd, id, sessionDir)` inside the resolved session
+ * directory, and it skips the sweep entirely when that directory is unknown.
+ * An id whose session lives elsewhere (a different session dir, another
+ * machine) cannot be proven alive here and would be swept, which is why the
+ * caller must gate on a resolvable session dir rather than pass `() => false`
+ * as a fallback. `sessionExists` must also be total (a throw would abort the
+ * sweep).
  *
  * Only whole manifest files are considered: `.json.tmp` snapshots and every
  * other name are left alone, and a manifest's contents are never parsed — a
