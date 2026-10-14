@@ -408,15 +408,24 @@ describe("cleanupWorktree — failure path", () => {
     // or externally-detached worktree looks like. The agent's work is lost
     // either way; what matters is that cleanup does not reject out of the
     // manager's settle path and take the whole record down with it.
-    const wt = (await createWorktree(pi, repoDir, "corrupt"))!;
-    writeFileSync(join(wt.path, "work.txt"), "agent output");
-    // Break the worktree's link back to the repo.
-    writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
+    const baseDir = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-"));
+    try {
+      const wt = (await createWorktree(pi, repoDir, "corrupt", baseDir))!;
+      writeFileSync(join(wt.path, "work.txt"), "agent output");
+      // Break the worktree's link back to the repo.
+      writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
 
-    const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
+      const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
 
-    expect(result.hasChanges).toBe(false);
-    expect(result.branch).toBeUndefined();
+      expect(result.hasChanges).toBe(false);
+      expect(result.branch).toBeUndefined();
+      // The corruption defeats cleanup on purpose, so the directory is still
+      // there — the reason this test disposes of it itself. Created under its
+      // own base dir, that leaves nothing behind in the system temp dir.
+      expect(existsSync(wt.path)).toBe(true);
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 
   it("reports no changes when the preservation commit fails", async () => {
