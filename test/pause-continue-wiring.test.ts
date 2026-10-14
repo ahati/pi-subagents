@@ -162,25 +162,40 @@ describe("/pause", () => {
     expect(entries[0].pausedAt).toBeTruthy();
   });
 
-  it("reports agents without a persisted session as lost on quit, and manifests none of them", async () => {
+  it("manifests an agent without a persisted session as a respawn recipe", async () => {
     const b = boot();
     // A plain fake session: no sessionManager, so the record gets no sessionFile.
-    await spawnRunning(b, () => ({
+    const id = await spawnRunning(b, () => ({
       steer: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn(),
       subscribe: vi.fn(() => () => {}),
       messages: [],
       getActiveToolNames: vi.fn(() => []),
     }));
+    // The invocation the live record holds at pause time is the best-effort
+    // part of the recipe; pin that it travels.
+    manager().getRecord(id).invocation = { modelId: "fake/model", requestedThinking: "low", maxTurns: 7, isolated: true };
 
     const { cmdCtx } = runCommand(b, "pause");
     await flush();
 
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
-      "Paused 1 agent; 1 without a persisted session — quitting loses it.",
+      "Paused 1 agent; 1 with no session — /continue re-runs it from scratch.",
       "info",
     );
-    expect(manifest().list()).toEqual([]);
+    const entries = manifest().list();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].sessionFile).toBeUndefined();
+    expect(entries[0].respawn).toEqual({
+      prompt: "go",
+      model: "fake/model",
+      thinking: "low",
+      maxTurns: 7,
+      isolated: true,
+    });
+    expect(entries[0].type).toBe("Explore");
+    expect(entries[0].handle).toBe("explore");
+    expect(entries[0].description).toBe("find flaky tests");
   });
 
   it("arms while the main model is streaming instead of refusing", async () => {
@@ -302,6 +317,147 @@ describe("/continue", () => {
     );
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
+    expect(manifest().list()).toEqual([]);
+  });
+
+  it("resumes an ephemeral live record in place, without re-running it", async () => {
+    const b = boot();
+    const id = await spawnRunning(b, () => ({
+      steer: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+      messages: [],
+      getActiveToolNames: vi.fn(() => []),
+    }));
+    await runCommand(b, "pause").result;
+    await flush();
+
+    vi.mocked(runAgent).mockClear();
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(manager().getRecord(id).status).toBe("running");
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
+    expect(manifest().list()).toEqual([]);
+  });
+
+  it("re-runs a respawn row from scratch after a simulated restart", async () => {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-gone",
+        type: "Explore",
+        handle: "explore",
+        alias: "auth-audit",
+        description: "find flaky tests",
+        respawn: { prompt: "go" },
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const b = bootOnly();
+    heldRun(resumableSession);
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    const spawnOpts = vi.mocked(runAgent).mock.calls.at(-1)![3] as any;
+    expect(vi.mocked(runAgent).mock.calls.at(-1)![2]).toBe("go");
+    expect(spawnOpts.resumeSessionFile).toBeUndefined();
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
+      "Re-running @auth-audit from scratch — the earlier transcript and tool state are gone.",
+      "info",
+    );
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("1 re-ran from scratch (transcript not restored).", "info");
+    expect(manifest().list()).toEqual([]);
+    // The fresh run answers to the manifest's names again.
+    const started = vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:started").at(-1)!;
+    const respawned = manager().getRecord(started[1].id);
+    expect(respawned?.handle).toBe("explore");
+    expect(respawned?.alias).toBe("auth-audit");
+  });
+
+  it("keeps a respawn row whose model no longer resolves", async () => {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-gone",
+        type: "Explore",
+        handle: "explore",
+        description: "find flaky tests",
+        respawn: { prompt: "go", model: "no/such-model" },
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const b = bootOnly();
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    const notifies = vi.mocked(cmdCtx.ui.notify).mock.calls.map(c => String(c[0]));
+    expect(notifies.some(m => m.startsWith("Could not re-run @explore —"))).toBe(true);
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("1 could not be re-run (kept in the manifest).", "warning");
+    expect(manifest().list()).toHaveLength(1);
+  });
+
+  it("keeps a respawn row whose agent type is no longer available", async () => {
+    hermetic = hermeticDir({
+      settings: { outputTranscript: false },
+      agentFiles: { Explore: "---\nenabled: false\n---\ndisabled override" },
+    });
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-gone",
+        type: "Explore",
+        handle: "explore",
+        description: "find flaky tests",
+        respawn: { prompt: "go" },
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const b = bootOnly();
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
+      "Could not re-run @explore — the Explore agent is no longer available.",
+      "warning",
+    );
+    expect(manifest().list()).toHaveLength(1);
+  });
+
+  it("revives a session-backed entry and re-runs a respawn row in one /continue", async () => {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    const sessionFile = join(hermetic.dir, "agent-session.jsonl");
+    writeFileSync(sessionFile, "");
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-old1",
+        type: "Explore",
+        handle: "explore",
+        description: "resumable",
+        sessionFile,
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "agent-gone",
+        type: "Explore",
+        handle: "explore-2",
+        description: "ephemeral",
+        respawn: { prompt: "go" },
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const b = bootOnly();
+    heldRun(resumableSession);
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent; 1 re-ran from scratch (transcript not restored).", "info");
     expect(manifest().list()).toEqual([]);
   });
 

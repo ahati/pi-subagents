@@ -82,7 +82,7 @@ describe("PauseStore mainTurn (v2)", () => {
     expect(new PauseStore(file).getMainTurn()).toBeUndefined();
   });
 
-  it("round-trips a main turn and writes version 2", () => {
+  it("round-trips a main turn and writes version 3", () => {
     const file = join(tempDir(), "manifest.json");
     const store = new PauseStore(file);
     const turn = mainTurn({ pendingTools: 3 });
@@ -91,7 +91,7 @@ describe("PauseStore mainTurn (v2)", () => {
 
     expect(store.getMainTurn()).toEqual(turn);
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(2);
+    expect(onDisk.version).toBe(3);
     expect(onDisk.mainTurn).toEqual(turn);
     expect(onDisk.entries).toEqual([]);
   });
@@ -184,6 +184,64 @@ describe("PauseStore mainTurn (v2)", () => {
     const store = new PauseStore(file);
     expect(store.list()).toEqual([]);
     expect(store.getMainTurn()).toBeUndefined();
+  });
+});
+
+describe("PauseStore respawn rows (v3)", () => {
+  it("round-trips a respawn row with no session file", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const row: PausedAgentEntry = {
+      id: "agent-e",
+      type: "Explore",
+      handle: "explore",
+      alias: "auth-audit",
+      description: "find flaky tests",
+      respawn: { prompt: "go", model: "anthropic/claude-haiku-4.5", thinking: "low", maxTurns: 12 },
+      pausedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    store.replace([row]);
+
+    expect(store.list()).toEqual([row]);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.version).toBe(3);
+    expect(onDisk.entries[0].sessionFile).toBeUndefined();
+    expect(onDisk.entries[0].respawn.prompt).toBe("go");
+  });
+
+  it("round-trips a session-backed row with no respawn", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const row = entry();
+
+    store.replace([row]);
+
+    expect(store.list()).toEqual([row]);
+    expect(store.list()[0].respawn).toBeUndefined();
+  });
+
+  it("loads a hand-written v2 manifest and rewrites it as v3", () => {
+    const file = join(tempDir(), "manifest.json");
+    const row = entry();
+    writeFileSync(file, JSON.stringify({ version: 2, entries: [row] }));
+    const store = new PauseStore(file);
+
+    expect(store.list()).toEqual([row]);
+
+    store.replace([row]);
+    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(3);
+  });
+
+  it("replace([]) clears a file holding only a respawn row", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.replace([{ id: "agent-e", type: "Explore", description: "d", respawn: { prompt: "go" }, pausedAt: "t" }]);
+    expect(existsSync(file)).toBe(true);
+
+    store.replace([]);
+    expect(existsSync(file)).toBe(false);
   });
 });
 

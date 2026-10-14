@@ -717,6 +717,9 @@ export class AgentManager {
       workflowId: options.workflowId,
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
+      // The one thing a fresh re-run can replay: `/pause` writes this into the
+      // manifest for a record that ends up with no session file to reopen.
+      spawnPrompt: prompt,
     };
     this.agents.set(id, record);
     // After the insert, so `takenHandles()` already counts this record's own
@@ -1388,6 +1391,11 @@ export class AgentManager {
     // only ever sent for a non-parked record resumed with one (mentions).
     // prompt ignored — resume is bare (docs/pause-quit-resume-continue.md §4.2 FR-C2)
     const effectivePrompt = bare ? undefined : prompt;
+    // A resume that carries a prompt (an `@handle <text>` continuation) is the
+    // latest intent for this agent; a bare park resume leaves the original one
+    // in place, which is what a later respawn replays. Set here, not in
+    // startResume: the foreground branch below runs resumeAgent inline.
+    if (effectivePrompt !== undefined) record.spawnPrompt = effectivePrompt;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still

@@ -76,7 +76,10 @@ the first subagent-related call.
   is lost by quitting quickly.
 - **FR-P9 (visibility)** Each landing reports what was parked: the main
   turn, how many pending tool calls, which subagents parked, which were
-  skipped and why, and how much held input is stored for `/continue`.
+  skipped and why, and how much held input is stored for `/continue`. The
+  subagent count is split: agents with a session file are revived exactly,
+  agents without one are re-run from scratch by `/continue`, and only a
+  record with neither a session nor a prompt is reported as lost on quit.
 
 ### 4.2 `/continue`
 
@@ -90,19 +93,24 @@ the first subagent-related call.
   Subagents parked out of the queue re-enter with their original prompt
   (that prompt is their task, not a continuation). A subagent whose transcript
   ends with unanswered tool calls gets those calls executed, then continues
-  bare.
+  bare. A subagent that left no session file at all (`persist_session: false`,
+  or a queued spawn) is re-run fresh from its original prompt — a new
+  conversation, never a synthetic continuation.
 - **FR-C3 (completed work)** A parked agent whose transcript ends with its
   final answer is recognized as done: it is revived as a completed agent
   with that answer as its result, and the result is delivered to the user
   through the ordinary completion notification. No model call is made for it.
 - **FR-C4 (across restart)** After quit and a fresh `/resume`, `/continue`
-  restores the same state: subagent entries are revived from their session
-  files, and the parked main turn's pending tool calls are executed and the
-  turn continued from the reloaded transcript. A provider cache miss after
+  restores the same state: subagent entries with a session file are revived
+  from it, entries carrying only a respawn recipe are re-run from scratch,
+  and the parked main turn's pending tool calls are executed and the turn
+  continued from the reloaded transcript. A provider cache miss after
   long inactivity is acceptable.
 - **FR-C5 (empty parks)** If nothing was parked, `/continue` says so. If
   only some entries can be restored (deleted session file, disabled agent
-  type), those stay parked for a later attempt and the failure is reported.
+  type, a model that no longer resolves), those stay parked for a later
+  attempt and the failure is reported. Re-run rows are counted separately
+  and the report says the earlier transcript and tool state are gone.
 - **FR-C6 (typing while parked)** Input typed while armed or parked behaves
   like input typed during any run: it is queued by pi and delivered when the
   run resumes. It does not survive quitting.
@@ -153,8 +161,10 @@ session before the gate closes.
 ### 5.2 Park manifest
 
 The park state that must survive a process lives in a per-session manifest
-next to the project: one JSON file holding the parked subagent rows (with
-their session files, handles and aliases), the main turn's parked flag with
+next to the project: one JSON file holding the parked subagent rows (each with
+its handle and alias, plus either its session file or a respawn recipe — the
+original prompt and the invocation fields the live record held at pause time),
+the main turn's parked flag with
 its pending-call count, a liveness claim (pid + time) so two pi windows
 cannot double-run a park, and timestamps. The manifest is rewritten
 atomically on every state change and every rewrite **preserves** fields it
@@ -242,6 +252,9 @@ real sessions and the real resume flow.
    bare; queued agents re-enter with their original prompt.
 10. A second live window cannot claim a park that the first window is
     continuing.
+11. An agent with `persist_session: false` parked, then quit → `/continue`
+    re-runs it with its original prompt and reclaims its handle and alias;
+    the notification says the earlier transcript and tool state are gone.
 
 ## 7. Known limitations
 
@@ -255,4 +268,13 @@ real sessions and the real resume flow.
   that one turn; a provider error appears as an error turn in the adopted
   transcript.
 - Input typed while parked is lost on quit (pi-native queueing behaviour).
+- A respawned agent starts a new conversation: the earlier transcript, tool
+  state, structured-output schema, group/join membership and usage history
+  are not restored. Model, thinking, max turns and isolation are replayed
+  only as far as the live record held them — a queued or mention-spawned
+  agent has no invocation snapshot, so the agent config and pi defaults
+  decide. The stored prompt is kept verbatim, which grows the manifest.
+- An agent that settled while parked keeps `paused` status and has no
+  session file, so after a restart `/continue` re-runs it: the work is
+  repeated, not lost.
 - Prompt-cache misses after long pauses are expected and accepted.

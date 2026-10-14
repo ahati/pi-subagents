@@ -8,10 +8,12 @@
  * revives each conversation from its session file — the same
  * `resumeSessionFile` path `/agents revive` and `@handle` use.
  *
- * Only disk-resumable agents are listed. A paused agent without a session
- * file (`persist_session: false`, or paused out of the queue) has nothing to
- * reopen, so quitting loses it regardless; `/pause` reports that split
- * instead of pretending otherwise.
+ * A row carries either the agent's session file — `/continue` reopens that
+ * conversation — or a `respawn` recipe (the prompt and the invocation fields
+ * the live record held when it was parked), for an agent paused with nothing
+ * on disk (`persist_session: false`, or paused out of the queue). A respawn is
+ * a fresh run of the original task: the earlier transcript, tool state and
+ * usage history are gone. `/pause` reports that split.
  *
  * Concurrency: writes are whole-file snapshots via temp+rename (POSIX
  * atomic), and every access re-reads from disk, so there is no cache to go
@@ -23,7 +25,22 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { SubagentType } from "./types.js";
+import type { SubagentType, ThinkingLevel } from "./types.js";
+
+/**
+ * Minimal recipe for re-running an agent parked without a persisted session.
+ * Best-effort by construction: only what the live record held at pause time.
+ */
+export interface PausedRespawnSpec {
+  /** The prompt the last full run was started with, verbatim. */
+  prompt: string;
+  /** Canonical `provider/modelId` as the run's session reported it. */
+  model?: string;
+  thinking?: ThinkingLevel;
+  maxTurns?: number;
+  isolated?: boolean;
+  inheritContext?: boolean;
+}
 
 /** One manifest row: enough to reopen the conversation and reclaim its names. */
 export interface PausedAgentEntry {
@@ -33,8 +50,10 @@ export interface PausedAgentEntry {
   handle?: string;
   alias?: string;
   description: string;
-  /** The agent's persisted pi session — the whole point of the entry. */
-  sessionFile: string;
+  /** Present when the run has a persisted session: `/continue` revives it. */
+  sessionFile?: string;
+  /** Present when it has none: `/continue` re-runs it from scratch. Never both. */
+  respawn?: PausedRespawnSpec;
   /** ISO timestamp of when the pause landed (kept across re-syncs). */
   pausedAt: string;
 }
@@ -53,9 +72,15 @@ export interface PausedMainTurn {
   pausedAt: string;
 }
 
-/** Manifest v2: the paused-agent rows plus an optional parked main turn. */
+/**
+ * Manifest v3: the paused-agent rows plus an optional parked main turn. `read()`
+ * is version-agnostic, so a v2 file loads unchanged (its rows always carry a
+ * session file). The bump is documentary — and a downgrade signal: an older
+ * build's `reviveTombstone` calls `existsSync` on the row's missing
+ * `sessionFile`, so mixing versions is not safe.
+ */
 export interface PauseStoreData {
-  version: 2;
+  version: 3;
   entries: PausedAgentEntry[];
   mainTurn?: PausedMainTurn;
 }
@@ -153,7 +178,7 @@ export class PauseStore {
   /** Whole-file snapshot via temp+rename. */
   private write(entries: PausedAgentEntry[], mainTurn: PausedMainTurn | undefined): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
-    const data: PauseStoreData = { version: 2, entries, ...(mainTurn ? { mainTurn } : {}) };
+    const data: PauseStoreData = { version: 3, entries, ...(mainTurn ? { mainTurn } : {}) };
     const tmp = this.filePath + ".tmp";
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, this.filePath);

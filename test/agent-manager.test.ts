@@ -2766,3 +2766,42 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
     expect(createWorktree).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("AgentManager — spawnPrompt (ephemeral respawn recipe)", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("records the spawn prompt and lets a prompt-carrying resume replace it", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    vi.mocked(resumeAgent).mockResolvedValue({
+      responseText: "again",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    } as any);
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "original task", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.spawnPrompt).toBe("original task");
+
+    // A bare park resume replays the transcript, so the original prompt — the
+    // only thing a later respawn could re-run — must survive it.
+    await manager.resume(id, undefined);
+    await record.promise;
+    expect(record.spawnPrompt).toBe("original task");
+
+    // An `@handle <text>` resume is the latest intent; a respawn replays that.
+    await manager.resume(id, "new intent");
+    await record.promise;
+    expect(record.spawnPrompt).toBe("new intent");
+  });
+});

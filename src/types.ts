@@ -238,6 +238,14 @@ export interface AgentRecord {
    * in-memory session, which leaves nothing to reopen.
    */
   sessionFile?: string;
+  /**
+   * The prompt of this agent's last full run — the only thing a fresh re-run
+   * can replay when the run has no session file (`/pause` + `/continue`).
+   * Updated by `startResume` when a resume carries a prompt of its own, so it
+   * always names the most recent intent; undefined only for a bare
+   * `resumeSessionFile` revive, which has a session file to reopen.
+   */
+  spawnPrompt?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**

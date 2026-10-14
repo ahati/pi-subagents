@@ -35,7 +35,7 @@ import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
-import { type PausedAgentEntry, type PausedMainTurn, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
+import { type PausedAgentEntry, type PausedMainTurn, type PausedRespawnSpec, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { continueSessionBare, countUnansweredToolCalls, finalReportFromSessionFile } from "./session-continue.js";
@@ -962,6 +962,8 @@ export default function (pi: ExtensionAPI) {
         if (parked.length > 0) {
           hint.push(`${parked.length} subagent${parked.length === 1 ? "" : "s"} paused here`);
         }
+        const respawnCount = parked.filter(e => e.respawn !== undefined).length;
+        if (respawnCount > 0) hint.push(`${respawnCount} to re-run from scratch`);
         if (mainTurn?.parked) {
           hint.push(`the main turn is parked (${mainTurn.pendingTools} pending tool call${mainTurn.pendingTools === 1 ? "" : "s"})`);
         }
@@ -3286,6 +3288,49 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   /**
+   * The recipe for re-running a paused record that has no session file. Only
+   * what the live record holds: the prompt the last run was started with, plus
+   * the invocation fields a session reported. A queued/mention-spawned record
+   * has no `invocation` yet, so model and thinking fall back to the agent's
+   * config and pi's defaults — the same resolution the original spawn used.
+   */
+  function respawnSpecFor(record: AgentRecord): PausedRespawnSpec | undefined {
+    if (record.spawnPrompt === undefined) return undefined;
+    const invocation = record.invocation;
+    const thinking = invocation?.requestedThinking ?? invocation?.thinking;
+    return {
+      prompt: record.spawnPrompt,
+      ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
+      ...(thinking !== undefined && thinking !== "off" ? { thinking } : {}),
+      ...(invocation?.maxTurns !== undefined ? { maxTurns: invocation.maxTurns } : {}),
+      ...(invocation?.isolated !== undefined ? { isolated: invocation.isolated } : {}),
+      ...(invocation?.inheritContext !== undefined ? { inheritContext: invocation.inheritContext } : {}),
+    };
+  }
+
+  /**
+   * The manifest row a live paused record is listed under: its session file
+   * when there is one (the exact revive), otherwise the respawn recipe.
+   * Undefined only for a paused record with neither — which `/pause` reports
+   * as lost, because nothing can bring it back.
+   */
+  function pausedAgentRow(record: AgentRecord): PausedAgentEntry | undefined {
+    const sessionFile = record.sessionFile;
+    if (typeof sessionFile === "string") return pauseEntryFor({ ...record, sessionFile });
+    const respawn = respawnSpecFor(record);
+    if (!respawn) return undefined;
+    return {
+      id: record.id,
+      type: record.type,
+      handle: record.handle,
+      alias: record.alias,
+      description: record.description,
+      respawn,
+      pausedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
    * A settled top-level agent whose report nobody has read yet and whose
    * conversation is on disk: `/pause` captures it so a later `/continue` can
    * deliver the result the completion nudge may never get to. Not gated or
@@ -3385,6 +3430,7 @@ Terse command-style prompts produce shallow, generic work.
     const captured = captureSettledResults(ctx);
     let paused = 0;
     let ephemeral = 0;
+    let lost = 0;
     const refused: string[] = [];
     for (const record of manager.listAgents().filter(isTopLevelAgent)) {
       if (record.status !== "running" && record.status !== "queued") continue;
@@ -3394,7 +3440,13 @@ Terse command-style prompts produce shallow, generic work.
         continue;
       }
       paused++;
-      if (!record.sessionFile) ephemeral++;
+      // No session on disk: the manifest carries a respawn recipe instead, so
+      // `/continue` re-runs it. A record with no prompt either is the only
+      // thing quitting can still lose.
+      if (!record.sessionFile) {
+        if (respawnSpecFor(record)) ephemeral++;
+        else lost++;
+      }
     }
     syncPauseManifest(ctx);
     const mainTurn: PausedMainTurn = {
@@ -3407,7 +3459,8 @@ Terse command-style prompts produce shallow, generic work.
     const parts = [`Main turn parked at its boundary (${pendingTools} pending tool call${pendingTools === 1 ? "" : "s"})`];
     if (paused > 0) parts.push(`parked ${paused} agent${paused === 1 ? "" : "s"}`);
     if (captured > 0) parts.push(`captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue`);
-    if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
+    if (ephemeral > 0) parts.push(`${ephemeral} with no session — /continue re-runs ${ephemeral === 1 ? "it" : "them"} from scratch`);
+    if (lost > 0) parts.push(`${lost} without a persisted session — quitting loses ${lost === 1 ? "it" : "them"}`);
     if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
     ctx.ui.notify(parts.join("; ") + " — /continue resumes.", "info");
   }
@@ -3497,16 +3550,10 @@ Terse command-style prompts produce shallow, generic work.
       const previous = new Map(store.list().map(e => [e.id, e.pausedAt]));
       const entries: PausedAgentEntry[] = manager.listAgents()
         .filter(isTopLevelAgent)
-        .filter((a): a is AgentRecord & { sessionFile: string } => a.status === "paused" && typeof a.sessionFile === "string")
-        .map(a => ({
-          id: a.id,
-          type: a.type,
-          handle: a.handle,
-          alias: a.alias,
-          description: a.description,
-          sessionFile: a.sessionFile,
-          pausedAt: previous.get(a.id) ?? new Date().toISOString(),
-        }));
+        .filter(a => a.status === "paused")
+        .map(a => pausedAgentRow(a))
+        .filter((a): a is PausedAgentEntry => a !== undefined)
+        .map(a => ({ ...a, pausedAt: previous.get(a.id) ?? a.pausedAt }));
       // Captured settled results ride the same rewrite: their runs are done,
       // but their reports are still owed. A result consumed since capture is
       // dropped here; one whose record is gone (restart, eviction timer) stays
@@ -3558,6 +3605,7 @@ Terse command-style prompts produce shallow, generic work.
     }
     let paused = 0;
     let ephemeral = 0;
+    let lost = 0;
     const refused: string[] = [];
     for (const record of active) {
       const refusal = pauseAgentRecord(record);
@@ -3566,15 +3614,20 @@ Terse command-style prompts produce shallow, generic work.
         continue;
       }
       paused++;
-      // Paused with no session on disk: the manifest cannot carry it, so
-      // quitting would lose it. Say so rather than let the split go unnoticed.
-      if (!record.sessionFile) ephemeral++;
+      // No session on disk: the manifest carries a respawn recipe instead, so
+      // `/continue` re-runs it. A record with no prompt either is the only
+      // thing quitting can still lose — say so rather than let it go silently.
+      if (!record.sessionFile) {
+        if (respawnSpecFor(record)) ephemeral++;
+        else lost++;
+      }
     }
     syncPauseManifest(ctx);
     const parts: string[] = [];
     if (paused > 0) parts.push(`Paused ${paused} agent${paused === 1 ? "" : "s"}`);
     if (captured > 0) parts.push(`Captured ${captured} completed result${captured === 1 ? "" : "s"} for /continue`);
-    if (ephemeral > 0) parts.push(`${ephemeral} without a persisted session — quitting loses ${ephemeral === 1 ? "it" : "them"}`);
+    if (ephemeral > 0) parts.push(`${ephemeral} with no session — /continue re-runs ${ephemeral === 1 ? "it" : "them"} from scratch`);
+    if (lost > 0) parts.push(`${lost} without a persisted session — quitting loses ${lost === 1 ? "it" : "them"}`);
     if (refused.length > 0) parts.push(`skipped ${refused.join(", ")}`);
     ctx.ui.notify(parts.join("; ") + ".", "info");
   }
@@ -3582,18 +3635,27 @@ Terse command-style prompts produce shallow, generic work.
   /**
    * What one manifest entry does on `/continue`. "resumed" — a live paused
    * record continued in place, or a gone one revived from its session file;
-   * "stale" — the live record already moved on after the pause (resumed,
-   * stopped, finished), so the entry is dropped; "failed" — revival was
-   * refused (session file gone, agent type unavailable) and the entry stays
-   * for a later attempt.
+   * "respawned" — a gone record with no session file was re-run from scratch
+   * with its original prompt; "stale" — the live record already moved on after
+   * the pause (resumed, stopped, finished), so the entry is dropped; "failed" —
+   * revival was refused (session file gone, agent type or model unavailable)
+   * and the entry stays for a later attempt.
    */
-  async function continuePausedEntry(ctx: ExtensionContext, entry: PausedAgentEntry): Promise<"resumed" | "stale" | "failed"> {
+  async function continuePausedEntry(
+    ctx: ExtensionContext,
+    entry: PausedAgentEntry,
+  ): Promise<"resumed" | "respawned" | "stale" | "failed"> {
     // A live record outranks the manifest: pausing without quitting leaves
     // the record in memory, where resume is cheaper and exact.
     const live = manager.listAgents().find(a => a.id === entry.id);
     if (live) {
       if (live.status !== "paused") return "stale";
       return (await resumeAgentById(ctx, live)) ? "resumed" : "failed";
+    }
+    // A record with no session file cannot be reopened: re-run the original
+    // task fresh instead of skipping the row forever.
+    if (entry.sessionFile === undefined) {
+      return (await respawnPausedEntry(ctx, entry)) ? "respawned" : "failed";
     }
     // Records and tombstones die with the process; only the manifest
     // remains. Reopen the conversation from its session file — the revive
@@ -3609,6 +3671,63 @@ Terse command-style prompts produce shallow, generic work.
       completedAt: Date.now(),
     };
     return (await reviveTombstone(ctx, tombstone, undefined, "Continuing")) ? "resumed" : "failed";
+  }
+
+  /**
+   * Re-run a paused agent that left no session behind: a fresh conversation
+   * with the original prompt and the invocation fields the record held.
+   * Modeled on `reviveTombstone` — a type or model that no longer resolves
+   * keeps the row for a later attempt rather than dropping it. Returns false
+   * when the run could not start.
+   */
+  async function respawnPausedEntry(ctx: ExtensionContext, entry: PausedAgentEntry): Promise<boolean> {
+    const respawn = entry.respawn;
+    const target = `@${entry.alias ?? entry.handle ?? entry.id}`;
+    if (!respawn) return false;
+    // Same strictness as a revive: falling back to another agent type would
+    // run a different agent, not re-run this task.
+    reloadCustomAgents();
+    const dispatch = resolveSpawnType(entry.type);
+    if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
+      ctx.ui.notify(`Could not re-run ${target} — the ${entry.type} agent is no longer available.`, "warning");
+      return false;
+    }
+    let model: unknown;
+    if (respawn.model !== undefined) {
+      const resolved = resolveModel(respawn.model, ctx.modelRegistry);
+      if (typeof resolved === "string") {
+        // Kept for a later attempt: re-enabling the model makes it work again.
+        ctx.ui.notify(`Could not re-run ${target} — ${resolved}`, "warning");
+        return false;
+      }
+      model = resolved;
+    }
+    try {
+      // spawnResolved, not spawnTopLevel: the latter strips `reclaim`, which
+      // this path (like reviveTombstone) must pass through to hand the agent
+      // back its handle and alias.
+      const id = spawnResolved(pi, ctx, dispatch.type, respawn.prompt, {
+        description: entry.description,
+        reclaim: { handle: entry.handle ?? entry.id, alias: entry.alias },
+        isBackground: true,
+        ...(model !== undefined ? { model } : {}),
+        ...(respawn.thinking !== undefined ? { thinkingLevel: respawn.thinking } : {}),
+        ...(respawn.maxTurns !== undefined ? { maxTurns: respawn.maxTurns } : {}),
+        ...(respawn.isolated !== undefined ? { isolated: respawn.isolated } : {}),
+        ...(respawn.inheritContext !== undefined ? { inheritContext: respawn.inheritContext } : {}),
+      });
+      // The agent may still be starting — wait, so a startup failure is
+      // reported instead of announced as a re-run.
+      await manager.awaitStartup(id);
+      ctx.ui.notify(`Re-running ${target} from scratch — the earlier transcript and tool state are gone.`, "info");
+      return true;
+    } catch (err) {
+      ctx.ui.notify(
+        `Could not re-run ${target}: ${err instanceof Error ? err.message : String(err)}`,
+        "warning",
+      );
+      return false;
+    }
   }
 
   /**
@@ -3656,7 +3775,7 @@ Terse command-style prompts produce shallow, generic work.
       // run's result, not a parked run to revive (PRD §5.5; session
       // 01a12ae5); a transcript parked at a tool boundary has no final report
       // and revives as before.
-      if (!manager.getRecord(entry.id) && finalReportFromSessionFile(entry.sessionFile) !== undefined) {
+      if (!manager.getRecord(entry.id) && entry.sessionFile !== undefined && finalReportFromSessionFile(entry.sessionFile) !== undefined) {
         deliverable.push(entry);
         continue;
       }
@@ -3670,7 +3789,14 @@ Terse command-style prompts produce shallow, generic work.
     const undelivered: PausedAgentEntry[] = [];
     for (const entry of deliverable) {
       const live = manager.getRecord(entry.id);
-      const report = live ? (live.result ?? live.error ?? "") : finalReportFromSessionFile(entry.sessionFile);
+      // Every deliverable row is session-backed (a captured settled result, or
+      // a transcript that ended on its final report); a respawn row is never
+      // deliverable. The guard is for the type system, not a real case.
+      const report = live
+        ? (live.result ?? live.error ?? "")
+        : entry.sessionFile === undefined
+          ? undefined
+          : finalReportFromSessionFile(entry.sessionFile);
       if (!live && report === undefined) {
         // No record and no final answer in the session file (deleted, or a
         // transcript that does not end on one): keep the row for a later
@@ -3719,13 +3845,21 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     let resumed = 0;
+    let respawned = 0;
     let stale = 0;
+    let failedRevive = 0;
+    let failedRespawn = 0;
     const failed: PausedAgentEntry[] = [];
     for (const entry of revivable) {
       const outcome = await continuePausedEntry(ctx, entry);
       if (outcome === "resumed") resumed++;
+      else if (outcome === "respawned") respawned++;
       else if (outcome === "stale") stale++;
-      else failed.push(entry);
+      else {
+        failed.push(entry);
+        if (entry.sessionFile === undefined) failedRespawn++;
+        else failedRevive++;
+      }
     }
     // One final rewrite: revived/stale rows are gone, failed revivals and
     // undelivered captures stay for a later `/continue`.
@@ -3734,12 +3868,14 @@ Terse command-style prompts produce shallow, generic work.
     const parts: string[] = [];
     if (continuedMain) parts.push("Continued the parked main turn");
     if (resumed > 0) parts.push(`Continued ${resumed} agent${resumed === 1 ? "" : "s"}`);
+    if (respawned > 0) parts.push(`${respawned} re-ran from scratch (transcript not restored)`);
     if (stale > 0) parts.push(`${stale} already handled`);
     if (delivered > 0) parts.push(`Delivered ${delivered} completed agent result${delivered === 1 ? "" : "s"}`);
-    if (failed.length > 0) parts.push(`${failed.length} could not be revived (kept in the manifest)`);
+    if (failedRevive > 0) parts.push(`${failedRevive} could not be revived (kept in the manifest)`);
+    if (failedRespawn > 0) parts.push(`${failedRespawn} could not be re-run (kept in the manifest)`);
     if (undelivered.length > 0) parts.push(`${undelivered.length} result${undelivered.length === 1 ? "" : "s"} could not be delivered (kept in the manifest)`);
     if (parts.length === 0) parts.push("Nothing left to continue");
-    ctx.ui.notify(parts.join("; ") + ".", !continuedMain && resumed === 0 && delivered === 0 && failed.length > 0 ? "warning" : "info");
+    ctx.ui.notify(parts.join("; ") + ".", !continuedMain && resumed === 0 && respawned === 0 && delivered === 0 && failed.length > 0 ? "warning" : "info");
   }
 
   /**
@@ -3897,7 +4033,7 @@ Terse command-style prompts produce shallow, generic work.
               for (const entry of entries) failed.push(entry);
             } else {
               for (const entry of entries) {
-                let outcome: "resumed" | "stale" | "failed" = "failed";
+                let outcome: "resumed" | "respawned" | "stale" | "failed" = "failed";
                 try {
                   outcome = await revive(runCtx, entry);
                 } catch (err) {
@@ -3906,7 +4042,7 @@ Terse command-style prompts produce shallow, generic work.
                   // an adoption that actually succeeded.
                   notify(`Could not revive a parked agent: ${err instanceof Error ? err.message : String(err)}`, "warning");
                 }
-                if (outcome !== "resumed") failed.push(entry);
+                if (outcome !== "resumed" && outcome !== "respawned") failed.push(entry);
               }
             }
             store.setMainTurn(undefined);
