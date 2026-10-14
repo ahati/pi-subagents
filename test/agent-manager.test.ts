@@ -1895,6 +1895,63 @@ describe("AgentManager — pool slot accounting on settle", () => {
 
     expect(manager.getRecord(siblingId)?.status).toBe("running");
   });
+
+  it("a background resume of a foreground-charged record claims the background pool", async () => {
+    // A foreground SPAWN charges the foreground counter and leaves
+    // `chargedPool === "foreground"` on the settled record. A later background
+    // resume then run in the background pool — so it must move the field with
+    // the counter, or the next pause()/settle frees the foreground slot this
+    // run never held (underflowing it) while `runningBackground` stays pinned
+    // and the queue behind it never drains.
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "first",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    manager = new AgentManager(undefined, 1);
+    manager.setMaxConcurrentForeground(1);
+
+    const { id, record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
+      description: "first",
+    });
+    expect(record.status).toBe("completed");
+    expect(record.chargedPool).toBe("foreground");
+
+    let releaseResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(
+      () => new Promise<any>(resolve => { releaseResume = resolve; }),
+    );
+    let releaseSibling!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(
+      () => new Promise<any>(resolve => { releaseSibling = resolve; }),
+    );
+
+    const resumed = await manager.resume(id, undefined, undefined, { isBackground: true });
+    expect(resumed?.chargedPool).toBe("background");
+    expect((manager as any).runningBackground).toBe(1);
+    expect((manager as any).runningForeground).toBe(0);
+
+    // Observable side of the claim: the queued sibling waits on the BACKGROUND
+    // pool and starts when the resumed run is parked and hands its slot back.
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling", isBackground: true,
+    });
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+
+    expect(manager.pause(id)).toBe(true);
+    expect(manager.getRecord(siblingId)?.status).toBe("running");
+
+    releaseSibling!({
+      responseText: "sibling",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await manager.getRecord(siblingId)?.promise;
+    releaseResume({ text: "resumed" });
+    await manager.getRecord(id)?.promise;
+  });
 });
 
 describe("AgentManager — drainQueue failure handling", () => {

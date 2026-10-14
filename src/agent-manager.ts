@@ -810,6 +810,42 @@ export class AgentManager {
   }
 
   /**
+   * Take `record.chargedPool`'s counter for this run. Idempotent, so a resume
+   * that re-takes a slot pause() handed back cannot double-charge; a no-op for a
+   * record charged to neither pool (nested children, workflow agents, detached
+   * spawns), which must never be queued behind their own parent.
+   */
+  private acquireSlot(record: AgentRecord): void {
+    if (record.slotHeld || record.chargedPool === undefined) return;
+    record.slotHeld = true;
+    this.chargePool(record.chargedPool, 1);
+  }
+
+  /**
+   * Hand the slot back. Idempotent — the settle path runs after `pause()` may
+   * already have released it, and a second decrement would underflow the
+   * counter. Never drains: the caller that freed a slot is the only one that
+   * knows a drain is due.
+   */
+  private releaseSlot(record: AgentRecord): void {
+    if (!record.slotHeld) return;
+    record.slotHeld = false;
+    this.chargePool(record.chargedPool, -1);
+  }
+
+  /**
+   * Stop the live run behind a closed gate — parked, or waiting to reopen.
+   * Releasing the gate alone would let the boundary proceed, aborting alone
+   * would let the run continue to its next boundary; do both, in one
+   * synchronous frame, in the same order `removeRecord` uses.
+   */
+  private stopGatedRun(record: AgentRecord): void {
+    if (!gateOf(record)?.closed) return;
+    releaseGate(record);
+    record.abortController?.abort();
+  }
+
+  /**
    * Kick off an agent's startup and register it under `startups`. The returned
    * promise never rejects — the failure is delivered through `awaitStartup`,
    * and to the record.
@@ -899,7 +935,7 @@ export class AgentManager {
     record.status = "running";
     record.startedAt = Date.now();
     record.startGate = undefined;
-    this.chargePool(record.chargedPool, 1);
+    this.acquireSlot(record);
 
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done BEFORE
@@ -918,7 +954,7 @@ export class AgentManager {
     if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
       if (!wt) {
-        this.chargePool(record.chargedPool, -1);
+        this.releaseSlot(record);
         throw new Error(
           'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
           'Initialize git and commit at least once, or omit `isolation`.',
@@ -944,7 +980,7 @@ export class AgentManager {
       // burn tokens on work nobody is waiting for: discard the fresh (and by
       // definition unchanged) worktree instead.
       if (record.status !== "running") {
-        this.chargePool(record.chargedPool, -1);
+        this.releaseSlot(record);
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
         this.drainQueue();
         return;
@@ -1167,7 +1203,9 @@ export class AgentManager {
     // like a spawn `sendToBackground` could hand off.
     record.blocking = false;
     const pool = record.chargedPool;
-    this.chargePool(pool, -1);
+    // The flag, not a recomputed predicate: pause() may already have handed the
+    // slot back, and only `slotHeld` knows whether this settle still owns one.
+    this.releaseSlot(record);
 
     if (guardCallback) {
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -1326,9 +1364,14 @@ export class AgentManager {
     if (!record?.blocking || !isTopLevelAgent(record) || record.status !== "running" || !record.promise) return false;
 
     this.detachParentAbort(record);
-    this.chargePool(record.chargedPool, -1);
+    // Through the slot helpers, not the counter directly: this record may hold
+    // NO slot at all (a foreground spawn with the foreground pool unlimited is
+    // charged to neither), and the move must leave `slotHeld` describing the
+    // background charge it takes — or the settle path would free nothing and
+    // the count would stay pinned, wedging the queue behind it.
+    this.releaseSlot(record);
     record.chargedPool = "background";
-    this.chargePool(record.chargedPool, 1);
+    this.acquireSlot(record);
     record.blocking = false;
     record.isBackground = true;
     record.resultConsumed = false;
@@ -1367,10 +1410,38 @@ export class AgentManager {
     if (!record) return undefined;
 
     const gate = gateOf(record);
+    if (gate?.closed && record.status === "queued") {
+      // A reopen is already queued: this call has nothing left to add, and
+      // falling through would either re-run the foreground resume or trip the
+      // background "already processing" refusal. Report the record as it is.
+      return record;
+    }
     if (gate?.closed && record.status === "paused") {
-      // The run is still alive behind its gate. Reopening it IS the resume.
-      // The gate stays on the record (opened): `resume()` again is a no-op-ish
-      // pass-through and the gate test observes `closed === false` here.
+      // The run is still alive behind its gate. Reopening it IS the resume —
+      // but only once the pool slot pause() handed back is re-taken. A resumed
+      // agent does not jump the queue it was parked out of: when the pool is
+      // full the reopen is queued (FIFO) and opens the gate when the drain
+      // reaches it. A record charged to neither pool (nested child, workflow
+      // agent) has nothing to wait behind and opens immediately.
+      const pool = record.chargedPool;
+      if (pool !== undefined && !this.poolHasRoom(pool)) {
+        record.status = "queued";
+        record.completedAt = undefined;
+        this.queue.push({
+          id,
+          pool,
+          start: async () => {
+            this.acquireSlot(record);
+            gate.open();
+            record.status = "running";
+          },
+          // Detached work nobody is blocked on: there is no caller to wake,
+          // and `pause()` on this record replays it as a fresh resume instead.
+          release: () => {},
+        });
+        return record;
+      }
+      this.acquireSlot(record);
       gate.open();
       record.status = "running";
       record.completedAt = undefined;
@@ -1557,7 +1628,15 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    if (occupiesPoolSlot(record)) {
+      // The claim moves the FIELD with the counter. A foreground spawn leaves
+      // `chargedPool === "foreground"` on the settled record, so charging the
+      // background counter without moving it would make a later pause()/settle
+      // release the foreground slot this run never held (underflow) while
+      // `runningBackground` stayed pinned — the queue behind it would never drain.
+      record.chargedPool = "background";
+      this.acquireSlot(record);
+    }
     this.onStart?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
@@ -1591,7 +1670,7 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
-      if (occupiesPoolSlot(record)) this.runningBackground--;
+      this.releaseSlot(record);
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
@@ -1735,6 +1814,19 @@ export class AgentManager {
     );
   }
 
+  /**
+   * Stop an active agent: a running run has its abort signal fired, a queued
+   * one leaves the queue (with its slot never taken). A queued record can be a
+   * parked run whose resume was queued behind a full pool — the only parked run
+   * abort() reaches — so that branch also releases its gate and stops the run
+   * behind it.
+   *
+   * A record merely "paused" is neither running nor queued, so this returns
+   * false and leaves it parked. That asymmetry is deliberate: a parked run is
+   * alive behind its gate, resumable, and was parked on purpose — abort() does
+   * not kill it. A parked run with no queued reopen is stopped only by eviction
+   * (`removeRecord` releases the gate and aborts the run itself).
+   */
   abort(id: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
@@ -1746,6 +1838,10 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      // A reopen-queued parked run is still alive behind its gate: dropping the
+      // entry would leave it pinned at a boundary nothing can reopen, and the
+      // "stopped" status puts it beyond every later abort().
+      this.stopGatedRun(record);
       return true;
     }
 
@@ -1763,10 +1859,12 @@ export class AgentManager {
    *
    * A running pause does NOT abort anything. A closed gate holds the run's next
    * `beforeToolCall`/`finishTurn` boundary, so a tool already executing finishes
-   * and is persisted, and nothing else starts; the run stays alive, keeps its
-   * concurrency slot, and continues in place when resume() opens the gate. The
-   * gate races the record's abort signal, so an abort while parked releases the
-   * suspended call and pi's `session.abort()` cannot deadlock.
+   * and is persisted, and nothing else starts; the run stays alive, hands its
+   * concurrency slot back for the duration of the park, and continues in place
+   * when resume() opens the gate — which re-takes the slot first, queueing the
+   * reopen if the pool has filled up meanwhile. The gate races the record's
+   * abort signal, so an abort while parked releases the suspended call and pi's
+   * `session.abort()` cannot deadlock.
    *
    * The status is set to "paused" synchronously, and the settle path leaves it
    * alone (externallyHalted) if the run dies while parked — so nothing
@@ -1786,9 +1884,11 @@ export class AgentManager {
    *     result while implying the task might still continue;
    *   - already terminal — nothing to pause.
    *
-   * A QUEUED agent pauses by leaving the queue: its entry is parked on
-   * `pausedQueued` and replayed verbatim by unpause(), so nothing starts it
-   * when a concurrency slot frees.
+   * A QUEUED agent pauses by leaving the queue: a spawn that never started has
+   * its entry parked on `pausedQueued` and replayed verbatim by unpause(), so
+   * nothing starts it when a concurrency slot frees — while a parked run whose
+   * reopen was queued simply drops the entry, since only resuming it again can
+   * open its gate.
    */
   pause(id: string): boolean {
     const record = this.agents.get(id);
@@ -1799,7 +1899,10 @@ export class AgentManager {
       const i = this.queue.findIndex(e => e.id === id);
       if (i !== -1) {
         const [entry] = this.queue.splice(i, 1);
-        this.pausedQueued.set(id, entry);
+        // A parked run's entry dies with the resume it was waiting on; only a
+        // spawn that never started has something for unpause() to replay.
+        if (gateOf(record)?.closed) entry.release();
+        else this.pausedQueued.set(id, entry);
       }
       record.status = "paused";
       record.completedAt = Date.now();
@@ -1816,6 +1919,13 @@ export class AgentManager {
     installPauseGate(record as GatedRecord, record.session);
     record.status = "paused";
     record.completedAt = Date.now();
+    // A slot is a licence to run concurrently and a parked run is not running.
+    // Held, it would sit out the whole park, and since paused records are exempt
+    // from cleanup() nothing would ever hand it back. The drain is what the
+    // release is FOR: without it a queue behind parked agents waits forever.
+    const freed = record.slotHeld;
+    this.releaseSlot(record);
+    if (freed) this.drainQueue();
     return true;
   }
 
@@ -1844,10 +1954,11 @@ export class AgentManager {
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
     // A parked run is ALIVE behind its gate: eviction must not leave it hung at
-    // a boundary (the gate's wait would never resolve) or running unseen while
-    // it holds a concurrency slot. Release the gate, then abort so the settle
-    // path frees the slot — a session boundary sweeping a paused record is the
-    // same statement as an abort, just delivered from the other direction.
+    // a boundary (the gate's wait would never resolve) or running unseen with an
+    // abort no one will ever deliver. Release the gate, then abort so the settle
+    // path frees whatever slot the run still holds — a session boundary sweeping
+    // a paused record is the same statement as an abort, just delivered from the
+    // other direction.
     releaseGate(record);
     record.abortController?.abort();
     this.tombstone(record);
@@ -1941,11 +2052,16 @@ export class AgentManager {
     // Clear queued agents first
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
-      if (record) {
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        count++;
-      }
+      // A parked reopen that settled while queued is already terminal: the
+      // entry is stale (drainQueue drops it), and overwriting its outcome with
+      // "stopped" would report a stop that never happened.
+      if (!record || record.status !== "queued") continue;
+      record.status = "stopped";
+      record.completedAt = Date.now();
+      // Same as abort()'s queued branch: a reopen-queued parked run must have
+      // its gate released and its run stopped, not just its entry dropped.
+      this.stopGatedRun(record);
+      count++;
     }
     this.dequeue(() => true);
     // Abort running agents

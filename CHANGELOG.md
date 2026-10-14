@@ -28,6 +28,8 @@ check the entries below for behaviour changes.
 ### Fixed
 
 - **The pause funnel now refuses agents another agent or a workflow owns, and names that as the reason.** `pauseAgentRecord` checked foreground and worktree-isolated runs only, so a workflow's child was refused as "it is blocking its caller" — the symptom rather than the reason the park is forbidden — and a nested background record handed to the funnel would have parked. The funnel now applies the same `isTopLevelAgent` test the RPC layer's `assertOwned` always did, first, so the reason reads "it is owned by another agent or workflow". This is defence in depth rather than a fix for a reachable path: the fleet list and hub roster list only top-level agents, a by-id `/agents pause` never resolves a record with a `parentAgentId`, and the RPC refuses earlier. The callers' own filters and the RPC guard are unchanged.
+### Fixed
+- **A paused agent hands its concurrency slot back until it is resumed.** `pause()` parked the run behind its gate but left it counted against `maxConcurrent`/`maxConcurrentForeground`, and since paused records are exempt from the 10-minute cleanup nothing ever reclaimed the slot — a wall of parked agents starved the queue behind them permanently. The slot is now released at park time (which is what lets the queue drain) and re-taken by `resume()` before the gate reopens. A resume whose pool is full is no longer run over the limit: the agent comes back as `queued` and the drain reopens it in FIFO order, so `/continue` on a large park resumes in pool-sized waves. Nested children and workflow agents take no slot and still reopen immediately, and the GC exemption for paused records is unchanged.
 
 
 ## [2026.10.14-r1] - 2026-10-14

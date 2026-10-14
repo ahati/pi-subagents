@@ -88,7 +88,7 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Agent is owned by another agent or workflow` | stop, pause, resume — the ownership guard below |
 | `Agent is not running` | stop handler. The record exists, so it has already settled |
 | `Agent is not pausable` | pause handler — the agent is still starting, worktree-isolated, foreground (a caller is blocked on it), or already settled |
-| `Agent cannot be resumed` | resume handler — the agent is still running or queued, or has neither a session nor a parked queue position to replay |
+| `Agent cannot be resumed` | resume handler — the agent is still running, or queued for a reason other than an already-queued gate reopen, or has neither a session nor a parked queue position to replay. Resuming a parked agent while its pool is full is not refused: it succeeds and the record reports as `queued` until the drain reopens its gate |
 | `Agent not found or still running` | consume handler |
 | `Steer message must be a non-empty string` | steer handler — `message` missing, not a string, or whitespace |
 | `Agent not found` / `Agent is owned by another agent or workflow` / `Agent is not running` | steer handler — same lookup, ownership guard and settled check as stop |

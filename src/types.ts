@@ -199,22 +199,35 @@ export interface AgentRecord {
    */
   blocking?: boolean;
   /**
-   * The concurrency pool this run's slot is charged to, set once when it
-   * starts. `settleRun` releases exactly this; `sendToBackground` is the only
-   * thing that moves it, together with the counters.
+   * The concurrency pool this run's slot is charged to, set when it starts.
+   * `settleRun` releases exactly this, and only while `slotHeld` says a slot is
+   * actually held. Two things move it, together with the counters:
+   * `sendToBackground` (a live foreground run handed to the background pool)
+   * and `startResume` (a resumed run always runs detached, in the background
+   * pool).
    */
   chargedPool?: Pool;
+  /**
+   * Whether this run's slot in `chargedPool` is currently counted. Set when the
+   * run starts, cleared by `pause()` — which hands the slot back for as long as
+   * the run is parked — and set again by the resume that re-takes it. The settle
+   * path releases only what this says is held, so a run that settles after being
+   * parked cannot free a slot twice (which would underflow the counter and
+   * silently lift the limit).
+   */
+  slotHeld?: boolean;
   /**
    * Removes the listener that stops this run when its caller's signal aborts.
    * At most one is armed at a time — queueing arms one, starting replaces it.
    */
   detachParentAbort?: () => void;
   /**
-   * Present only while the record is "queued": resolves when it leaves the
-   * queue, started or aborted. `spawnAndWait` waits on this because a queued
-   * record has no `promise` yet. Always resolves, never rejects — a rejection
-   * would escape into the caller's tool `execute` and take down pi's whole
-   * Promise.all tool batch.
+   * Present only while a SPAWN is queued: resolves when it leaves the queue,
+   * started or aborted. `spawnAndWait` waits on this because a freshly queued
+   * spawn has no `promise` yet. A parked record whose gate reopen was queued
+   * carries no `startGate` — the parked run already has a `promise`. Always
+   * resolves, never rejects — a rejection would escape into the caller's tool
+   * `execute` and take down pi's whole Promise.all tool batch.
    */
   startGate?: Promise<void>;
   groupId?: string;

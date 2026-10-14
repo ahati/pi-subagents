@@ -4259,7 +4259,16 @@ Terse command-style prompts produce shallow, generic work.
       }
       if (record.session) {
         const ok = await resumeAgentById(ctx, record);
-        ctx.ui.notify(ok ? `Resumed @${name}.` : `Could not resume @${name}.`, ok ? "info" : "warning");
+        // Re-read rather than reuse `record.status`: the guard above narrowed
+        // it out of "queued", and a resume whose pool is full comes back there
+        // — say so instead of reporting a run that has not started yet.
+        const queued = manager.getRecord(record.id)?.status === "queued";
+        const message = !ok
+          ? `Could not resume @${name}.`
+          : queued
+            ? `Resumed @${name} — queued.`
+            : `Resumed @${name}.`;
+        ctx.ui.notify(message, ok ? "info" : "warning");
         return;
       }
       if (manager.unpause(record.id)) {
