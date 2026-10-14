@@ -53,11 +53,31 @@ export interface PausedMainTurn {
   pausedAt: string;
 }
 
-/** Manifest v2: the paused-agent rows plus an optional parked main turn. */
+/**
+ * One parked workflow run. `/pause` stops a run at its next settle boundary
+ * and records this row; `/continue` re-runs the script through the
+ * journal-resume path, so the longest unchanged prefix replays cheaply.
+ */
+export interface PausedWorkflowEntry {
+  /** The parked run id; becomes `resumedFrom` on the restart. */
+  id: string;
+  /** The settled-call journal to replay. */
+  journalPath: string;
+  /** The exact source the run was started from — temp dirs get swept. */
+  script: string;
+  /** Verbatim `args`: prompts are derived from them, so replay keys need them. */
+  args?: unknown;
+  /** So the restarted run's notification correlates with the original call. */
+  toolCallId?: string;
+  pausedAt: string;
+}
+
+/** Manifest v3: the paused-agent rows, a parked main turn, and parked runs. */
 export interface PauseStoreData {
-  version: 2;
+  version: 3;
   entries: PausedAgentEntry[];
   mainTurn?: PausedMainTurn;
+  workflows?: PausedWorkflowEntry[];
 }
 
 /** Resolve the canonical storage path for a session-scoped pause manifest. */
@@ -108,52 +128,89 @@ export class PauseStore {
     return this.read().mainTurn;
   }
 
+  /** The parked workflow runs, in parking order. */
+  listWorkflows(): PausedWorkflowEntry[] {
+    return this.read().workflows;
+  }
+
   /**
    * Record (or clear, with `undefined`) the parked main turn without touching
-   * the entry rows. Clearing with no entries left removes the file.
+   * the entry or workflow rows. Clearing with nothing else left removes the
+   * file.
    */
   setMainTurn(turn: PausedMainTurn | undefined): void {
     const current = this.read();
     if (!turn) {
-      if (current.entries.length === 0) {
+      if (!current.entries.length && !current.workflows.length) {
         this.clear();
         return;
       }
-      this.write(current.entries, undefined);
+      this.write(current.entries, undefined, current.workflows);
       return;
     }
-    this.write(current.entries, turn);
+    this.write(current.entries, turn, current.workflows);
   }
 
   /**
-   * Replace the entry rows. A main turn already on disk survives (the
-   * settle/quit funnel rewrites the entries while the parked turn waits for
-   * `/continue`); an empty list with no main turn clears the file.
+   * Replace the entry rows. A main turn and any parked workflow runs already on
+   * disk survive (the settle/quit funnel rewrites the entries while the parked
+   * turn waits for `/continue`); an empty list with nothing else left clears the
+   * file.
    */
   replace(entries: PausedAgentEntry[]): void {
-    const { mainTurn } = this.read();
-    if (entries.length === 0 && !mainTurn) {
+    const { mainTurn, workflows } = this.read();
+    if (entries.length === 0 && workflows.length === 0 && !mainTurn) {
       this.clear();
       return;
     }
-    this.write(entries, mainTurn);
+    this.write(entries, mainTurn, workflows);
   }
 
-  /** Read entries and main turn tolerantly: v1 files, garbage and all. */
-  private read(): { entries: PausedAgentEntry[]; mainTurn?: PausedMainTurn } {
-    if (!existsSync(this.filePath)) return { entries: [] };
+  /**
+   * Replace the parked workflow rows, preserving the entry rows and the parked
+   * main turn — the mirror of {@link replace} for the workflow collection.
+   */
+  replaceWorkflows(workflows: PausedWorkflowEntry[]): void {
+    const { entries, mainTurn } = this.read();
+    if (entries.length === 0 && workflows.length === 0 && !mainTurn) {
+      this.clear();
+      return;
+    }
+    this.write(entries, mainTurn, workflows);
+  }
+
+  /** Read rows and main turn tolerantly: v1/v2 files, garbage and all. */
+  private read(): {
+    entries: PausedAgentEntry[];
+    mainTurn?: PausedMainTurn;
+    workflows: PausedWorkflowEntry[];
+  } {
+    if (!existsSync(this.filePath)) return { entries: [], workflows: [] };
     try {
       const data: Partial<PauseStoreData> = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      return { entries: data.entries ?? [], mainTurn: data.mainTurn };
+      return {
+        entries: data.entries ?? [],
+        mainTurn: data.mainTurn,
+        workflows: Array.isArray(data.workflows) ? data.workflows : [],
+      };
     } catch {
-      return { entries: [] };
+      return { entries: [], workflows: [] };
     }
   }
 
   /** Whole-file snapshot via temp+rename. */
-  private write(entries: PausedAgentEntry[], mainTurn: PausedMainTurn | undefined): void {
+  private write(
+    entries: PausedAgentEntry[],
+    mainTurn: PausedMainTurn | undefined,
+    workflows: PausedWorkflowEntry[],
+  ): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
-    const data: PauseStoreData = { version: 2, entries, ...(mainTurn ? { mainTurn } : {}) };
+    const data: PauseStoreData = {
+      version: 3,
+      entries,
+      ...(mainTurn ? { mainTurn } : {}),
+      ...(workflows.length > 0 ? { workflows } : {}),
+    };
     const tmp = this.filePath + ".tmp";
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, this.filePath);

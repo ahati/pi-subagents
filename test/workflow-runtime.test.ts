@@ -7,6 +7,7 @@ import {
   runWorkflow,
   WORKFLOW_AGENT_CAP,
   WORKFLOW_ITEM_CAP,
+  WORKFLOW_PARK_STOP_ERROR,
   type WorkflowControl,
   type WorkflowHost,
   type WorkflowRunResult,
@@ -875,6 +876,101 @@ describe("run control", () => {
     abort.abort();
     // Resolves at all: a held agent must not outlive the run it belongs to.
     expect((await done).status).toBe("killed");
+  });
+
+  describe("stopping a parked run at a settle boundary", () => {
+    it("lets the running agent finish, journals it, and starts nothing else", async () => {
+      const stub = controllableHost();
+      const recorded: WorkflowJournalEntry[] = [];
+      let control: WorkflowControl | undefined;
+      const done = run(
+        "const a = await agent('one'); const b = await agent('two'); return [a, b].join('|');",
+        {
+          host: stub.host,
+          concurrency: 4,
+          journal: { append: e => recorded.push(e) },
+          onControl: c => { control = c; },
+        },
+      );
+
+      await until(() => stub.started().length === 1, "the first agent to start");
+      control?.stopWhenIdle();
+      stub.finish("wf-agent-0", "first");
+
+      const result = await done;
+      expect(result.status).toBe("killed");
+      expect(result.error).toBe(WORKFLOW_PARK_STOP_ERROR);
+      expect(stub.started()).toEqual(["wf-agent-0"]);
+      expect(stub.aborted()).toEqual([]);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].ok).toBe(true);
+    });
+
+    it("ends immediately when nothing is in flight", async () => {
+      const stub = controllableHost();
+      let control: WorkflowControl | undefined;
+      const done = run("return await agent('one');", {
+        host: stub.host,
+        onControl: c => { control = c; c.pause(); },
+      });
+
+      control?.stopWhenIdle();
+      const result = await done;
+      expect(result.status).toBe("killed");
+      expect(result.error).toBe(WORKFLOW_PARK_STOP_ERROR);
+      expect(stub.started()).toEqual([]);
+    });
+
+    it("a later resume() does not restart agents", async () => {
+      const stub = controllableHost();
+      let control: WorkflowControl | undefined;
+      const done = run(
+        "const a = await agent('one'); const b = await agent('two'); return [a, b].join('|');",
+        { host: stub.host, concurrency: 4, onControl: c => { control = c; } },
+      );
+
+      await until(() => stub.started().length === 1, "the first agent to start");
+      control?.stopWhenIdle();
+      control?.resume();
+      stub.finish("wf-agent-0", "first");
+
+      const result = await done;
+      expect(result.status).toBe("killed");
+      await sleep(40);
+      expect(stub.started()).toEqual(["wf-agent-0"]);
+    });
+
+    it("does not spin when a queued call is held", async () => {
+      const stub = controllableHost();
+      let control: WorkflowControl | undefined;
+      const done = run(
+        "const [a, b] = await Promise.all([agent('one'), agent('two')]); return [a, b].join('|');",
+        { host: stub.host, concurrency: 1, onControl: c => { control = c; } },
+      );
+
+      await until(() => stub.started().length === 1, "the first agent to start");
+      control?.stopWhenIdle();
+      stub.finish("wf-agent-0", "first");
+
+      const result = await done;
+      expect(result.status).toBe("killed");
+      expect(stub.started()).toEqual(["wf-agent-0"]);
+    });
+
+    it("abort still aborts in-flight children", async () => {
+      const controller = new AbortController();
+      const stub = controllableHost();
+      const done = run("await agent('one'); return 'x';", {
+        host: stub.host,
+        signal: controller.signal,
+      });
+      await until(() => stub.started().length === 1, "the agent to start");
+      controller.abort();
+      const result = await done;
+      expect(result.status).toBe("killed");
+      expect(result.error).toBe("Workflow aborted.");
+      expect(stub.aborted()).toEqual(["wf-agent-0"]);
+    });
   });
 });
 
