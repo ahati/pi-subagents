@@ -38,6 +38,13 @@ export const WORKFLOW_ITEM_CAP = 4096;
 /** Nested `workflow()` invocations allowed per run. */
 export const WORKFLOW_NESTED_CAP = 256;
 
+/**
+ * The result error a park stop leaves behind. Named because `/pause` and the
+ * session-load hint both have to recognize it rather than re-deriving the
+ * reason from a `killed` status the user could also have caused by hand.
+ */
+export const WORKFLOW_PARK_STOP_ERROR = "Workflow stopped at its park boundary.";
+
 /** How much of a prompt or result is kept for the UI. */
 const PREVIEW_LENGTH = 200;
 
@@ -268,7 +275,23 @@ export interface WorkflowControl {
    */
   pause(): void;
   resume(): void;
+  /**
+   * Whether the run is currently withholding agent starts — a dialog pause or a
+   * {@link stopWhenIdle} park, which close the same gate. After a park this
+   * stays true even once `resume()` clears the dialog's hold: a draining run is
+   * still not starting anything.
+   */
   isPaused(): boolean;
+  /**
+   * Park the run at its next settle boundary: no further agent is started,
+   * every in-flight one is left to settle and be journaled, and the run ends
+   * `killed` once nothing is in flight.
+   *
+   * One-way, unlike {@link pause}/{@link resume}: a later `resume()` clears
+   * the dialog's hold but must not restart starts, because the point is that
+   * the run is over and its journal prefix is what a park replay re-runs.
+   */
+  stopWhenIdle(): void;
   /**
    * Give up on the agent at `index`: its `agent()` call returns `null`, exactly
    * as a terminal failure does, and the row renders skipped.
@@ -699,8 +722,19 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   let spentOutputTokens = 0;
 
   let paused = false;
+  /**
+   * Set by {@link WorkflowControl.stopWhenIdle} and never cleared: a parked run
+   * stays parked, whatever the dialog's `resume()` does next.
+   */
+  let draining = false;
   /** Read through a call for the same reason `intent()` is — see below. */
-  const isPaused = () => paused;
+  const isPaused = () => paused || draining;
+  /**
+   * End the run once a park stop has nothing left in flight. Assigned inside
+   * the run promise, where `finish` exists; the control surface only calls it
+   * after that.
+   */
+  let maybeFinishDrain = (): void => {};
   const pauseWaiters = new Set<() => void>();
   /** Release everyone held at a pause — on resume, and on the way out. */
   function releasePause(): void {
@@ -709,7 +743,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   }
   /** Park here while the run is paused, so no new agent is started. */
   function pauseGate(live: LiveAgent): Promise<void> {
-    if (!paused || aborted || settled) return Promise.resolve();
+    // `isPaused()` rather than `paused`: a draining run still parks at the gate.
+    // If it returned immediately, a call that already held a permit would spin
+    // through `release(); continue;` until the last in-flight agent settled.
+    if (!isPaused() || aborted || settled) return Promise.resolve();
     return new Promise<void>(resolve => {
       const wake = () => {
         pauseWaiters.delete(wake);
@@ -724,7 +761,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   options.onControl?.({
     pause: () => { paused = true; },
     resume: () => { paused = false; releasePause(); },
-    isPaused: () => paused,
+    isPaused: () => isPaused(),
+    stopWhenIdle: () => {
+      draining = true;
+      // Not `releasePause()`: a woken caller that is still parked behind the
+      // park sees `settled` and bails at the acquire check, and waking them
+      // here would only race the finish below.
+      maybeFinishDrain();
+    },
     skip: index => {
       const live = liveAgents.get(index);
       if (live === undefined || live.intent !== undefined) return false;
@@ -815,6 +859,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       }
       options.signal.addEventListener("abort", onAbort, { once: true });
     }
+
+    maybeFinishDrain = () => {
+      if (!draining || settled || inflight.size > 0) return;
+      finish({ status: "killed", error: WORKFLOW_PARK_STOP_ERROR });
+    };
 
     async function handleAgent(callId: number, payload: AgentCallPayload): Promise<void> {
       // Bound now: the optional methods are checked once, up front, so a
@@ -1248,7 +1297,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             respond(message.callId, false, undefined, `Unknown workflow host method "${message.method}".`, true);
             break;
           }
-          void handleAgent(message.callId, message.payload as AgentCallPayload);
+          // Then, not in handleAgent's `finally`: the permit is released before
+          // the last settled call reaches the journal, and draining there would
+          // finish the run before its journal prefix was written.
+          void handleAgent(message.callId, message.payload as AgentCallPayload).then(maybeFinishDrain, error => {
+            // A rejected call leaves nothing to start, so a park stop still has
+            // to see it settle. Outside a park the rejection propagates exactly
+            // as this fire-and-forget dispatch always let it.
+            maybeFinishDrain();
+            if (!draining) throw error;
+          });
           break;
         case "complete": {
           // The script is done, so every launch it made should have been

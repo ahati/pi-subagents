@@ -1,13 +1,14 @@
 /**
- * pause-store.test.ts — manifest v2: the paused-agent rows PLUS the parked
- * main-turn record (`mainTurn`), and the cwd-independent manifest lookup.
+ * pause-store.test.ts — manifest v3: the paused-agent rows, the parked
+ * main-turn record (`mainTurn`) and the parked workflow runs (`workflows`),
+ * plus the cwd-independent manifest lookup.
  *
  * Pure fs: every test gets its own temp dir, no extension, no process.cwd
- * games. The v2 surface does not exist yet, so the tests fail on the missing
- * exports/behaviour, not on syntax.
+ * games. The suites below pin the v3 surface: version 3 on disk, the parked
+ * workflow rows preserved across rewrites, and a v1/v2 file still readable.
  *
  * Pinned contract (from docs/pause-quit-resume-continue.md §5.2):
- *   - PauseStoreData { version: 2, entries, mainTurn? }
+ *   - PauseStoreData { version: 3, entries, mainTurn?, workflows? }
  *   - store.getMainTurn() / store.setMainTurn(turn | undefined)
  *   - replace(entries) never deletes a present mainTurn; replace([]) still
  *     clears a file that has only entries.
@@ -273,5 +274,101 @@ describe("resolvePauseManifestPath fallback", () => {
     const resolved = resolveManifestPath(dir, "nope");
     expect(typeof resolved).toBe("string");
     expect(existsSync(resolved)).toBe(false);
+  });
+});
+
+/** A v3 parked-workflow row. */
+function workflowRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "wf_abc123",
+    journalPath: "/tmp/journal.jsonl",
+    script: "export const meta = { name: 'x' };\nreturn 1;",
+    args: { topic: "t" },
+    toolCallId: "tool-1",
+    pausedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("PauseStore workflows (v3)", () => {
+  it("round-trips a workflow row and writes version 3", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const row = workflowRow();
+
+    store.replaceWorkflows([row]);
+
+    expect(store.listWorkflows()).toEqual([row]);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.version).toBe(3);
+    expect(onDisk.workflows).toEqual([row]);
+    expect(onDisk.entries).toEqual([]);
+  });
+
+  it("replace(entries) preserves parked workflow rows already on disk", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    store.replaceWorkflows([workflowRow()]);
+
+    store.replace([entry({ id: "agent-2" })]);
+
+    expect(store.list()).toEqual([entry({ id: "agent-2" })]);
+    expect(store.listWorkflows()).toEqual([workflowRow()]);
+  });
+
+  it("replaceWorkflows(rows) preserves entries and the main turn", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const turn = mainTurn();
+    store.replace([entry()]);
+    store.setMainTurn(turn);
+
+    store.replaceWorkflows([workflowRow()]);
+
+    expect(store.list()).toEqual([entry()]);
+    expect(store.getMainTurn()).toEqual(turn);
+    expect(store.listWorkflows()).toEqual([workflowRow()]);
+  });
+
+  it("replace([]) with only workflow rows keeps the file", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    store.replaceWorkflows([workflowRow()]);
+
+    store.replace([]);
+
+    expect(existsSync(file)).toBe(true);
+    expect(store.listWorkflows()).toEqual([workflowRow()]);
+  });
+
+  it("clears only when entries, workflows and mainTurn are all empty", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    store.replaceWorkflows([workflowRow()]);
+    store.replaceWorkflows([]);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("setMainTurn(undefined) keeps workflow rows", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    store.replaceWorkflows([workflowRow()]);
+    store.setMainTurn(mainTurn());
+
+    store.setMainTurn(undefined);
+
+    expect(existsSync(file)).toBe(true);
+    expect(store.listWorkflows()).toEqual([workflowRow()]);
+  });
+
+  it("reads a v2 file (no workflows) as none, and ignores a non-array", () => {
+    const dir = tempDir();
+    const v2 = join(dir, "v2.json");
+    writeFileSync(v2, JSON.stringify({ version: 2, entries: [entry()] }));
+    expect(new PauseStore(v2).listWorkflows()).toEqual([]);
+
+    const bogus = join(dir, "bogus.json");
+    writeFileSync(bogus, JSON.stringify({ version: 3, entries: [], workflows: "nope" }));
+    expect(new PauseStore(bogus).listWorkflows()).toEqual([]);
   });
 });

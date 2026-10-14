@@ -77,6 +77,12 @@ export interface WorkflowTask {
   totalToolCalls: number;
   logs: string[];
 
+  /**
+   * A park stopped this run: `/continue` re-runs it from its journal, so its
+   * own `Stopped` notification would only say what the resumed run says again.
+   */
+  parkStopped?: boolean;
+
   abortController: AbortController;
   startTime: number;
   endTime?: number;
