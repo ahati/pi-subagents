@@ -35,8 +35,9 @@ the first subagent-related call.
 
 ## 3. Non-goals
 
-- Pausing foreground agents a caller is blocked on, or worktree-isolated
-  runs (existing refusals remain).
+- Pausing foreground agents a caller is blocked on, worktree-isolated
+  runs, or agents owned by another agent or a workflow (existing refusals
+  remain).
 - Keeping a parked run alive across a crash (in-flight model streams are
   process-bound; the persisted transcript is the recovery surface).
 - Delivering results of agents the user already consumed before pausing.
@@ -48,7 +49,8 @@ the first subagent-related call.
 - **FR-P1 (idle)** With the main agent idle, `/pause` parks every active
   top-level subagent and every completed-but-unconsumed agent (see 4.4), and
   writes the park manifest. Agents a caller is blocked on and
-  worktree-isolated runs are refused with a visible reason.
+  worktree-isolated runs are refused with a visible reason; owned agents are
+  outside the park's selection, which addresses top-level agents.
 - **FR-P2 (streaming → armed)** With the main model producing output,
   `/pause` arms the park instead of acting. Nothing is parked yet; a second
   `/pause` cancels the arming.
@@ -63,6 +65,8 @@ the first subagent-related call.
 - **FR-P5 (scope)** The park includes every active top-level subagent and
   the main turn. Refusals (foreground, worktree-isolated) are named in the
   landing summary and excluded from the manifest; everything else parks.
+  Owned agents are not selected in the first place, so they are neither
+  parked nor named (FR-P1).
 - **FR-P6 (cancel)** `/pause` while armed disarms. A later boundary then
   lands nothing.
 - **FR-P7 (Esc)** Pressing Esc while armed still lands the park (the user
