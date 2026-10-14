@@ -185,6 +185,40 @@ describe("/agents resume", () => {
     expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed @explore.", "info");
+    expect(b.pi.events.emit).toHaveBeenCalledWith("subagents:resumed", {
+      id,
+      type: "Explore",
+      description: "find flaky tests",
+    });
+  });
+
+  it("emits subagents:resumed for a queued agent resumed by handle", async () => {
+    const b = boot({ maxConcurrent: 1 });
+    await spawnRunning(b, "holds the only slot");
+    const queued = await spawnRunning(b, "waits for the slot");
+    expect(manager().getRecord(queued).status).toBe("queued");
+
+    runCommand(b, "pause @explore-2");
+    await flush();
+    expect(manager().getRecord(queued).status).toBe("paused");
+    expect(b.pi.events.emit).toHaveBeenCalledWith("subagents:paused", {
+      id: queued,
+      type: "Explore",
+      description: "waits for the slot",
+    });
+
+    const { cmdCtx } = runCommand(b, "resume @explore-2");
+    await flush();
+
+    // Re-queued behind the held agent — and the one resume funnel still
+    // announced it, exactly as it does for a session-bearing resume.
+    expect(manager().getRecord(queued).status).toBe("queued");
+    expect(b.pi.events.emit).toHaveBeenCalledWith("subagents:resumed", {
+      id: queued,
+      type: "Explore",
+      description: "waits for the slot",
+    });
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed @explore-2 — queued.", "info");
   });
 
   it("reports a resume the full pool queued, not one that started", async () => {
@@ -219,6 +253,9 @@ describe("/agents resume", () => {
     expect(manager().getRecord(one).status).toBe("running");
     expect(manager().getRecord(two).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed 2 of 2 agents.", "info");
+    // One event per agent, mirroring the bulk pause.
+    const resumed = vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:resumed");
+    expect(resumed).toHaveLength(2);
   });
 
   it("refuses an agent that is still active", async () => {
@@ -230,6 +267,8 @@ describe("/agents resume", () => {
 
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("@explore is already active.", "warning");
     expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
+    // A refusal is not a resume: nothing is announced.
+    expect(b.pi.events.emit).not.toHaveBeenCalledWith("subagents:resumed", expect.anything());
   });
 });
 

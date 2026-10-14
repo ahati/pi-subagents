@@ -3522,14 +3522,29 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   /**
-   * Continue a settled agent — the resume funnel behind `/agents resume`, the
-   * hub and fleet `p` keys, and the RPC channel. An agent paused out of the
-   * queue (no session) is re-queued; one with a session has that session
-   * continued. False when there is nothing to continue.
+   * Continue a settled agent — the resume funnel behind `/agents resume`,
+   * `/continue`, the hub and fleet `p` keys, the workflow inspector's log, and
+   * the RPC channel — so the `subagents:resumed` event cannot drift from any
+   * surface's idea of what happened; the mirror of `pauseAgentRecord`'s
+   * `subagents:paused`. Fired when the resume is ACCEPTED, not when a run's
+   * first turn starts: a gate-parked resume reopens the original run and emits
+   * no new `subagents:started`. Silent about refusals, like the pause funnel —
+   * each caller's feedback shape differs. An agent paused out of the queue (no
+   * session) is re-queued; one with a session has that session continued.
+   * False when there is nothing to continue.
    */
-  function resumeAgentById(ctx: ExtensionContext, record: AgentRecord, prompt?: string): Promise<boolean> {
-    if (record.session) return resumeAgentSession(ctx, record, prompt);
-    return Promise.resolve(manager.unpause(record.id));
+  async function resumeAgentById(ctx: ExtensionContext, record: AgentRecord, prompt?: string): Promise<boolean> {
+    const resumed = record.session
+      ? await resumeAgentSession(ctx, record, prompt)
+      : manager.unpause(record.id);
+    if (resumed) {
+      pi.events.emit("subagents:resumed", {
+        id: record.id,
+        type: record.type,
+        description: record.description,
+      });
+    }
+    return resumed;
   }
 
   /**
@@ -4297,6 +4312,8 @@ Terse command-style prompts produce shallow, generic work.
         return;
       }
       if (record.session) {
+        // One resume funnel, so a queued (pool-full) resume announces itself
+        // with `subagents:resumed` exactly as an immediate one does.
         const ok = await resumeAgentById(ctx, record);
         // Re-read rather than reuse `record.status`: the guard above narrowed
         // it out of "queued", and a resume whose pool is full comes back there
@@ -4310,11 +4327,6 @@ Terse command-style prompts produce shallow, generic work.
         ctx.ui.notify(message, ok ? "info" : "warning");
         return;
       }
-      if (manager.unpause(record.id)) {
-        ctx.ui.notify(`Resumed @${name} — queued.`, "info");
-        return;
-      }
-      ctx.ui.notify(`Could not resume @${name} — nothing to continue.`, "warning");
       return;
     }
 

@@ -354,6 +354,17 @@ describe("/continue", () => {
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
     expect(manifest().list()).toEqual([]);
+    // The gate path announces the resume but starts no new run: one
+    // `resumed`, and the spawn's single `started` still the only one.
+    expect(b.pi.events.emit).toHaveBeenCalledWith("subagents:resumed", {
+      id,
+      type: "Explore",
+      description: "find flaky tests",
+    });
+    const resumed = vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:resumed");
+    expect(resumed).toHaveLength(1);
+    const started = vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:started" && c[1].id === id);
+    expect(started).toHaveLength(1);
   });
 
   it("resumes an ephemeral live record in place, without re-running it", async () => {
@@ -525,6 +536,9 @@ describe("/continue", () => {
     const revived = manager().getRecord(started[1].id);
     expect(revived?.handle).toBe("explore");
     expect(revived?.alias).toBe("auth-audit");
+    // Revive is a spawn, not a resume: the boundary that keeps
+    // `subagents:resumed` from double-announcing a manifest-only entry.
+    expect(vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:resumed")).toEqual([]);
   });
 
   it("keeps entries it could not revive (session file gone) and reports the failure", async () => {
@@ -574,12 +588,16 @@ describe("/continue", () => {
     // The resume's own resumeAgent call is expected; only a SECOND one during
     // /continue would be the double-resume bug.
     vi.mocked(resumeAgent).mockClear();
+    const resumedBefore = vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:resumed");
+    expect(resumedBefore, "the out-of-band resume announced itself").toHaveLength(1);
     const { cmdCtx } = runCommand(b, "continue");
     await flush();
 
     expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("1 already handled.", "info");
     expect(manifest().list()).toEqual([]);
+    // "Already handled" is not a resume: still the one event.
+    expect(vi.mocked(b.pi.events.emit).mock.calls.filter(c => c[0] === "subagents:resumed")).toHaveLength(1);
   });
 
   it("reports when nothing was paused", async () => {
