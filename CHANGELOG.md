@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+- **`SubagentWorkflow`'s tool description no longer states three things the runtime contradicts.** It quotes the real concurrency floor (`max(1, min(16, cpus - 2))`), no longer promises a 100% cache hit on resume — calls are numbered as they arrive, so a differently interleaved `pipeline()` misses from that point, and a journal carrying an `agent({ resume })` call declines the whole cache; a miss runs the call live rather than returning the wrong answer — and describes `meta.phases` titles as fuzzily matched instead of exact. Model-facing text only; no behavior change.
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added
