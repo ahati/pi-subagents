@@ -166,6 +166,17 @@ The pending tool calls themselves are never duplicated into the manifest:
 the transcript already holds them, and the transcript is the source of
 truth.
 
+The manifest carries a format version; **version 3** is current. It adds an
+optional `workflows` array, one row per parked workflow run — run id, journal
+path, the exact script source, its `args`, the tool call that started it, and
+the park time — because a run specified inline has no file on disk to replay
+from. Reads stay tolerant of every earlier version: the version field is
+informational, a missing or shorter `workflows` array reads as no parked runs,
+and a v1/v2 manifest keeps working. An older build reading a v3 file sees the
+subagent rows and the parked main turn it already understands, but drops the
+workflow rows it does not know about on its next write; a newer build
+rewrites the file as v3.
+
 ### 5.3 Shadow continuation (cross-restart main turn)
 
 After a restart, no run exists to un-gate, and pi offers no way to start a

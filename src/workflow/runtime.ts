@@ -252,6 +252,12 @@ export interface WorkflowControl {
    */
   pause(): void;
   resume(): void;
+  /**
+   * Whether the run is currently withholding agent starts — a dialog pause or a
+   * {@link stopWhenIdle} park, which close the same gate. After a park this
+   * stays true even once `resume()` clears the dialog's hold: a draining run is
+   * still not starting anything.
+   */
   isPaused(): boolean;
   /**
    * Park the run at its next settle boundary: no further agent is started,
@@ -716,7 +722,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
   options.onControl?.({
     pause: () => { paused = true; },
     resume: () => { paused = false; releasePause(); },
-    isPaused: () => paused,
+    isPaused: () => isPaused(),
     stopWhenIdle: () => {
       draining = true;
       // Not `releasePause()`: a woken caller that is still parked behind the
@@ -1228,10 +1234,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // Then, not in handleAgent's `finally`: the permit is released before
           // the last settled call reaches the journal, and draining there would
           // finish the run before its journal prefix was written.
-          void handleAgent(message.callId, message.payload as AgentCallPayload).then(
-            maybeFinishDrain,
-            maybeFinishDrain,
-          );
+          void handleAgent(message.callId, message.payload as AgentCallPayload).then(maybeFinishDrain, error => {
+            // A rejected call leaves nothing to start, so a park stop still has
+            // to see it settle. Outside a park the rejection propagates exactly
+            // as this fire-and-forget dispatch always let it.
+            maybeFinishDrain();
+            if (!draining) throw error;
+          });
           break;
         case "complete": {
           // The script is done, so every launch it made should have been

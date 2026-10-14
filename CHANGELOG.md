@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Changed
+- **The pause manifest is version 3.** The on-disk format gains an optional `workflows` array — one row per parked workflow run, holding the run id, its journal path, the exact script source, its `args`, the tool call that started one and the park time, so an inline run can be replayed without a file on disk. Reads stay tolerant: the version field is informational, a v1/v2 manifest reads as no parked workflows, and a newer build rewrites the file as v3 on its next state change. Documented in [docs/pause-quit-resume-continue.md §5.2](docs/pause-quit-resume-continue.md).
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added

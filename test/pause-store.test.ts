@@ -4,8 +4,8 @@
  * plus the cwd-independent manifest lookup.
  *
  * Pure fs: every test gets its own temp dir, no extension, no process.cwd
- * games. The v2 surface does not exist yet, so the tests fail on the missing
- * exports/behaviour, not on syntax.
+ * games. The suites below pin the v3 surface: version 3 on disk, the parked
+ * workflow rows preserved across rewrites, and a v1/v2 file still readable.
  *
  * Pinned contract (from docs/pause-quit-resume-continue.md §5.2):
  *   - PauseStoreData { version: 3, entries, mainTurn?, workflows? }
