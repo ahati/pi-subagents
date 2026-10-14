@@ -76,6 +76,48 @@ function chatGroupRank(status: AgentRecord["status"]): number {
 /** Pane labels for the three lifecycle groups, in rank order. */
 const CHAT_GROUP_LABELS = ["ACTIVE", "COMPLETED", "FAILED"] as const;
 
+/**
+ * The roster's top-level group headers, in display order. The subagents
+ * section keeps the chat pane's lifecycle grouping inside it (active →
+ * completed → failed, via {@link chatGroupRank}); workflow runs follow as one
+ * section, sorted by launch time.
+ */
+const ROSTER_SUBAGENTS_LABEL = "SUBAGENTS";
+const ROSTER_WORKFLOWS_LABEL = "WORKFLOWS";
+
+/**
+ * The run-state glyph for a roster workflow row, the same vocabulary the
+ * subagent rows use: running `●`, paused `‖`, completed `✓`, failed/killed `✗`.
+ */
+export function workflowStatusGlyph(status: FleetWorkflow["status"], th: Theme): string {
+  switch (status) {
+    case "running":
+      return th.fg("accent", "●");
+    case "paused":
+      return th.fg("dim", "‖");
+    case "completed":
+      return th.fg("success", "✓");
+    // failed / killed
+    default:
+      return th.fg("error", "✗");
+  }
+}
+
+/** The word a workflow row's status tail uses, one per run state. */
+function workflowStatusWord(status: FleetWorkflow["status"]): string {
+  switch (status) {
+    case "running":
+      return "running";
+    case "paused":
+      return "paused";
+    case "completed":
+      return "completed";
+    // failed / killed
+    default:
+      return "failed";
+  }
+}
+
 /** Result of a wheel dispatch — structural subset of pi-tui's mouse types. */
 interface HubMouseEvent {
   type: string;
@@ -94,6 +136,13 @@ type HubView = "table" | "activity" | "chat";
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type HubEntry = WorkflowEntry | AgentEntry;
+
+/**
+ * One roster row: either a non-selectable section header or an entry. Headers
+ * take a line but no cursor slot, so `selected` stays an index into the
+ * selectable rows while the display list carries the headers.
+ */
+type HubRosterItem = { kind: "header"; label: string } | HubEntry;
 
 /** Minimal UI surface the hub needs from `ctx.ui` (structural subset). */
 export type HubUICtx = {
@@ -249,8 +298,12 @@ export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: A
 
 /** The agent a popup expansion from the roster would show: the selection, else the next openable agent below it. */
 function pickChatAgent(deps: AgentHubDeps, resume: HubResumeState): AgentRecord | undefined {
-  const entries = [...hubWorkflows(deps).map(workflow => ({ kind: "workflow" as const, workflow })),
-    ...hubAgents(deps).map(record => ({ kind: "agent" as const, record }))];
+  // The same order the roster draws: the subagents section first, then the
+  // runs — the index is into that list, not into a workflows-first one.
+  const entries: HubEntry[] = [
+    ...hubAgents(deps).map(record => ({ kind: "agent" as const, record })),
+    ...hubWorkflows(deps).map(workflow => ({ kind: "workflow" as const, workflow })),
+  ];
   for (let i = Math.max(0, resume.selected); i < entries.length; i++) {
     const e = entries[i];
     if (e.kind === "agent" && e.record.session) return e.record;
@@ -408,7 +461,33 @@ export class AgentHub implements Component {
   }
 
   private entries(): HubEntry[] {
-    return this.roster().filter(e => this.matchesFilter(e));
+    const matching = this.roster().filter(e => this.matchesFilter(e));
+    const agents = matching
+      .filter((e): e is AgentEntry => e.kind === "agent")
+      .sort((a, b) => chatGroupRank(a.record.status) - chatGroupRank(b.record.status) || a.record.startedAt - b.record.startedAt);
+    const workflows = matching.filter((e): e is WorkflowEntry => e.kind === "workflow");
+    return [...agents, ...workflows];
+  }
+
+  /**
+   * The roster's display rows: the `SUBAGENTS` section first, its agents in
+   * lifecycle order, then the `WORKFLOWS` section. Headers are drawn but never
+   * selected — the cursor crosses them seamlessly, which is why the selection
+   * index counts entries, not rows.
+   */
+  private rosterItems(entries: readonly HubEntry[]): HubRosterItem[] {
+    const items: HubRosterItem[] = [];
+    const agents = entries.filter((e): e is AgentEntry => e.kind === "agent");
+    const workflows = entries.filter((e): e is WorkflowEntry => e.kind === "workflow");
+    if (agents.length > 0) {
+      items.push({ kind: "header", label: ROSTER_SUBAGENTS_LABEL });
+      items.push(...agents);
+    }
+    if (workflows.length > 0) {
+      items.push({ kind: "header", label: ROSTER_WORKFLOWS_LABEL });
+      items.push(...workflows);
+    }
+    return items;
   }
 
   // ---- Key handling ----
@@ -927,22 +1006,30 @@ export class AgentHub implements Component {
       return lines;
     }
 
-    // Pad the name column to the widest visible name so descriptions align.
+    // Pad the name column to the widest visible name so descriptions align,
+    // counting the status glyph every row now carries.
     let nameCol = 0;
     for (const e of items) {
       const name = e.kind === "workflow" ? e.workflow.name : renderAgentRecordName(e.record, this.theme, {});
-      nameCol = Math.max(nameCol, visibleWidth(name) + (e.kind === "workflow" ? "workflow ".length : 0));
+      nameCol = Math.max(nameCol, visibleWidth(name) + 2);
     }
     nameCol = Math.min(nameCol, MAX_NAME_COL);
 
-    // Window the rows so the selection stays visible.
-    const slice = windowRange(this.selected, items.length, bodyRows);
+    // The display list carries the section headers; the selection counts only
+    // the rows, so `selAt` finds the selection's row position under the headers.
+    const display = this.rosterItems(items);
+    const selectedEntry = items[this.selected];
+    const selAt = Math.max(0, display.findIndex(item => item !== null && item.kind !== "header" && item === selectedEntry));
+    const slice = windowRange(selAt, display.length, bodyRows);
 
     for (let i = 0; i < bodyRows; i++) {
-      const entry = items[slice.start + i];
-      if (!entry) { lines.push(fullRow("")); continue; }
-      const index = slice.start + i;
-      lines.push(fullRow(this.renderEntry(entry, index === this.selected, nameCol, innerW)));
+      const item = display[slice.start + i];
+      if (!item) { lines.push(fullRow("")); continue; }
+      if (item.kind === "header") {
+        lines.push(fullRow(this.theme.fg("dim", this.theme.bold(item.label))));
+        continue;
+      }
+      lines.push(fullRow(this.renderEntry(item, item === selectedEntry, nameCol, innerW)));
     }
     return lines;
   }
@@ -952,17 +1039,16 @@ export class AgentHub implements Component {
     const marker = selected ? th.fg("accent", "▸") : " ";
     if (entry.kind === "workflow") {
       const wf = entry.workflow;
-      const kind = th.fg(selected ? "text" : "muted", "workflow");
-      const name = selected ? th.fg("text", wf.name) : wf.name;
-      const label = `${kind} ${name}`;
-      const left = `${marker} ${label}`;
+      const glyph = workflowStatusGlyph(wf.status, th);
+      const name = selected ? th.fg("text", wf.name) : th.fg("muted", wf.name);
+      const left = `${marker} ${glyph} ${name}`;
       const elapsed = (wf.completedAt ?? Date.now()) - wf.startedAt;
-      const agents = `${wf.doneCount}/${wf.totalCount}`;
-      const stats = `${agents} agents · ${formatFleetElapsed(elapsed)} · ↓${compactCount(wf.tokens)}`;
-      return finishRow(left, nameCol + 2, selected ? th.fg("text", stats) : th.fg("dim", stats), width);
+      const stats = `${wf.doneCount}/${wf.totalCount} agents · ${workflowStatusWord(wf.status)} · ${formatFleetElapsed(elapsed)}`;
+      return finishRow(left, nameCol + 4, selected ? th.fg("text", stats) : th.fg("dim", stats), width);
     }
 
     const record = entry.record;
+    const glyph = statusGlyph(record.status, th);
     const name = renderAgentRecordName(record, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
@@ -974,7 +1060,7 @@ export class AgentHub implements Component {
       const act = this.deps.agentActivity.get(record.id);
       if (act) activity = th.fg("dim", ` — ${describeActivity(act.activeTools, act.responseText)}`);
     }
-    const left = `${marker} ${name.padEnd(nameCol)} ${description}${activity}`;
+    const left = `${marker} ${glyph} ${name.padEnd(nameCol - 2)} ${description}${activity}`;
 
     const toolUses = this.deps.agentActivity.get(record.id)?.toolUses ?? record.toolUses;
     const stats: string[] = [];
@@ -995,7 +1081,7 @@ export class AgentHub implements Component {
       const stopNote = selected && this.stopArmed
         ? th.fg("error", " x to STOP")
         : "";
-    return finishRow(left, nameCol + 2, (selected ? th.fg("text", stats.join(" · ")) : th.fg("dim", stats.join(" · "))) + stopNote, width);
+    return finishRow(left, nameCol + 4, (selected ? th.fg("text", stats.join(" · ")) : th.fg("dim", stats.join(" · "))) + stopNote, width);
   }
 
   private renderActivity(bodyRows: number): WindowRow[] {

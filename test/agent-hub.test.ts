@@ -137,15 +137,15 @@ describe("agent hub mouse wheel", () => {
       makeRecord({ id: "a3", description: "gamma task" }),
     ]);
     expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
-    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
     component.handleMouse({ type: "wheel", wheelDelta: 1 });
-    expect(h.frame().join("\n")).toContain("▸ Agent gamma task");
+    expect(h.frame().join("\n")).toContain("▸ ● Agent gamma task");
     // Clamps at the end instead of wrapping.
     component.handleMouse({ type: "wheel", wheelDelta: 5 });
-    expect(h.frame().join("\n")).toContain("▸ Agent gamma task");
+    expect(h.frame().join("\n")).toContain("▸ ● Agent gamma task");
     // Wheel up.
     component.handleMouse({ type: "wheel", wheelDelta: -1 });
-    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
   });
 
   it("ignores non-wheel events and empty deltas", () => {
@@ -220,7 +220,7 @@ describe("agent hub mouse in regular TUI mode", () => {
     ]);
     h.open();
     h.press(wheel(65)); // wheel down → next row
-    expect(h.frame().join("\n")).toContain("▸ Agent beta task");
+    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
   });
 
   it("consumes non-wheel mouse reports without moving anything", () => {
@@ -644,13 +644,39 @@ describe("agent hub roster", () => {
       openWorkflow,
     });
     h.open();
-    const opened = h.open.length ? undefined : undefined; // noop; keep shape
-    void opened;
-    // The workflow row sits above agents: selection 0 is the run.
+    // The roster groups SUBAGENTS first, then WORKFLOWS: the workflow row is
+    // one below the single agent row, and the header between them takes no
+    // cursor slot.
+    h.press("\u001b[B");
     h.press("\r");
     expect(openWorkflow).toHaveBeenCalledWith("wf_1");
     expect(h.settled()).toBe(false);
     expect(h.components).toHaveLength(1);
+  });
+
+  it("groups the roster: SUBAGENTS, then WORKFLOWS, with non-selectable headers", () => {
+    const h = harness(
+      [makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 })],
+      {
+        workflows: () => [{
+          id: "wf_1", name: "audit", status: "running", doneCount: 1, totalCount: 2,
+          startedAt: Date.now() - 1000, tokens: 500,
+        }],
+      },
+    );
+    h.open();
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("SUBAGENTS");
+    expect(frame).toContain("WORKFLOWS");
+    // The workflow row carries the run-state glyph and the done/total count.
+    expect(frame).toContain("● audit");
+    expect(frame).toContain("1/2 agents · running");
+    // The cursor starts on the first agent, not on the SUBAGENTS header.
+    expect(frame).toContain("▸ ● Agent alpha task");
+    // One ↓ crosses the WORKFLOWS header onto the run row — headers take no
+    // cursor slot, so the very next press selects the workflow.
+    h.press("\u001b[B");
+    expect(h.frame().join("\n")).toContain("▸ ● audit");
   });
 
   it("Enter on an agent row opens its conversation", () => {
