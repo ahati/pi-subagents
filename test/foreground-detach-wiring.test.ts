@@ -40,6 +40,7 @@ vi.mock("../src/ui/fleet-list.js", async () => {
       }
       setUICtx = vi.fn();
       setWorkflowSource = vi.fn();
+      setWorkflowRunSource = vi.fn();
       /** The fork's pause/resume funnel for the roster's `p` key. */
       setLifecycleActions = vi.fn();
       /** The real one peeks at the TUI's focused component; tests flip this. */

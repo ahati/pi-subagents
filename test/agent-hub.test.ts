@@ -137,15 +137,17 @@ describe("agent hub mouse wheel", () => {
       makeRecord({ id: "a3", description: "gamma task" }),
     ]);
     expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
-    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
+    // Wide frame: the test theme's fake colour markers are zero-width in a
+    // real terminal but count here, and the roster pane is half the window.
+    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
     component.handleMouse({ type: "wheel", wheelDelta: 1 });
-    expect(h.frame().join("\n")).toContain("▸ ● Agent gamma task");
+    expect(h.frame(240).join("\n")).toContain("▸ ● Agent gamma task");
     // Clamps at the end instead of wrapping.
     component.handleMouse({ type: "wheel", wheelDelta: 5 });
-    expect(h.frame().join("\n")).toContain("▸ ● Agent gamma task");
+    expect(h.frame(240).join("\n")).toContain("▸ ● Agent gamma task");
     // Wheel up.
     component.handleMouse({ type: "wheel", wheelDelta: -1 });
-    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
+    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
   });
 
   it("ignores non-wheel events and empty deltas", () => {
@@ -220,7 +222,7 @@ describe("agent hub mouse in regular TUI mode", () => {
     ]);
     h.open();
     h.press(wheel(65)); // wheel down → next row
-    expect(h.frame().join("\n")).toContain("▸ ● Agent beta task");
+    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
   });
 
   it("consumes non-wheel mouse reports without moving anything", () => {
@@ -464,8 +466,8 @@ describe("agent hub open modes", () => {
     const h = harness([makeRecord()]);
     h.open();
     expect(h.optionSets[0]?.overlayOptions).toMatchObject({ width: "100%", maxHeight: "100%" });
-    const frame = h.frame().join("\n");
-    expect(frame).toContain("Agent Hub");
+    const frame = h.frame(240).join("\n");
+    expect(frame).toContain("Agents & Workflows");
     expect(frame).toContain("Sleep then report 1");
   });
 });
@@ -499,7 +501,7 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     h.press("f");
     await h.flush();
     h.press(ESC); // chat → roster
-    expect(h.frame().join("\n")).toContain("Agent Hub");
+    expect(h.frame().join("\n")).toContain("Agents & Workflows");
     expect(h.settled()).toBe(false);
     h.press(ESC); // roster → close
     await h.flush();
@@ -538,7 +540,7 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     h2.press("/"); // filter open
     for (const ch of "beta") h2.press(ch);
     h2.press("\r"); // apply
-    const frame = h2.frame().join("\n");
+    const frame = h2.frame(240).join("\n");
     expect(frame).toContain("beta task");
     expect(frame).not.toContain("alpha task");
     expect(frame).toContain("1/2 match");
@@ -556,7 +558,7 @@ describe("agent hub roster", () => {
     for (const ch of "zzz") h.press(ch);
     expect(h.frame().join("\n")).toContain("no matches");
     h.press(ESC); // clears the filter
-    expect(h.frame().join("\n")).toContain("alpha task");
+    expect(h.frame(240).join("\n")).toContain("alpha task");
   });
 
   it("activity tab describes what each agent is doing", () => {
@@ -568,7 +570,7 @@ describe("agent hub roster", () => {
     h.open();
     h.press("2");
     const frame = h.frame().join("\n");
-    expect(frame).toContain("2 Activity");
+    expect(frame).toContain("activity");
     expect(frame).toContain("Agent"); // the display name of general-purpose
     expect(frame.toLowerCase()).toContain("read");
   });
@@ -649,9 +651,14 @@ describe("agent hub roster", () => {
     // cursor slot.
     h.press("\u001b[B");
     h.press("\r");
-    expect(openWorkflow).toHaveBeenCalledWith("wf_1");
+    // The run opens as page W inside the same window; the legacy inspector is
+    // not opened (it stays the fallback adapter for non-hub entry points).
+    expect(openWorkflow).not.toHaveBeenCalled();
     expect(h.settled()).toBe(false);
     expect(h.components).toHaveLength(1);
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("Agents & Workflows › audit");
+    expect(frame).toContain("⏎ agent");
   });
 
   it("groups the roster: SUBAGENTS, then WORKFLOWS, with non-selectable headers", () => {
@@ -665,7 +672,7 @@ describe("agent hub roster", () => {
       },
     );
     h.open();
-    const frame = h.frame().join("\n");
+    const frame = h.frame(240).join("\n");
     expect(frame).toContain("SUBAGENTS");
     expect(frame).toContain("WORKFLOWS");
     // The workflow row carries the run-state glyph and the done/total count.
@@ -676,7 +683,7 @@ describe("agent hub roster", () => {
     // One ↓ crosses the WORKFLOWS header onto the run row — headers take no
     // cursor slot, so the very next press selects the workflow.
     h.press("\u001b[B");
-    expect(h.frame().join("\n")).toContain("▸ ● audit");
+    expect(h.frame(240).join("\n")).toContain("▸ ● audit");
   });
 
   it("Enter on an agent row opens its conversation", () => {

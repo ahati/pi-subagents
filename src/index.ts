@@ -5664,4 +5664,32 @@ Write the file using the write tool. Only write the file, nothing else.`;
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+  // The hub's run pages (W/WA/L) read the same run task the inspector does;
+  // its `s` stops the run through the same abort controller. One source, so
+  // the hub and the legacy inspector cannot disagree about a run.
+  fleet.setWorkflowRunSource(
+    id => {
+      const task = workflowTasks.get(id);
+      return task === undefined
+        ? undefined
+        : {
+            progress: task.workflowProgress,
+            task: {
+              status: task.status,
+              workflowName: task.workflowName,
+              startTime: task.startTime,
+              endTime: task.endTime,
+              totalPausedMs: task.totalPausedMs,
+            },
+            meta: task.meta,
+            agentCount: task.agentCount,
+          };
+    },
+    id => {
+      const task = workflowTasks.get(id);
+      if (task === undefined || task.abortController.signal.aborted) return;
+      task.abortController.abort();
+      currentCtx?.ui.notify(`Stopped workflow "${task.meta?.name ?? task.id}".`, "info");
+    },
+  );
 }

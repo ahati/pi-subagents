@@ -26,6 +26,7 @@ import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { buildPhaseGroups, displayState, type WorkflowAgentEntry } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
@@ -35,6 +36,7 @@ import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./te
 import type { ViewerKeybindings } from "./viewer-keys.js";
 import {
   hintLine,
+  hubPaneGeometry,
   paneGeometry,
   renderWindow,
   TWO_PANE_MIN_WIDTH,
@@ -44,6 +46,13 @@ import {
   windowRange,
 } from "./window-frame.js";
 import type { WorkflowCardLine } from "./workflow-card.js";
+import { clampLine } from "./workflow-card.js";
+import {
+  agentRow,
+  phaseListRows,
+  UNICODE_DIALOG_GLYPHS,
+  type WorkflowDialogSource,
+} from "./workflow-dialog.js";
 
 /** How long a settled workflow run lingers in the roster (matches the fleet list). */
 const FINISHED_LINGER_MS = 4000;
@@ -53,8 +62,6 @@ const TICK_MS = 200;
 const MIN_BODY_ROWS = 3;
 /** Cap on the padded name column so descriptions keep room on narrow terminals. */
 const MAX_NAME_COL = 24;
-/** A terminal shorter than this renders the empty state instead of a broken table. */
-const MIN_TERMINAL_ROWS = 8;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
 function chatGroupRank(status: AgentRecord["status"]): number {
@@ -133,6 +140,49 @@ interface MouseTerminalHost {
 
 type HubView = "table" | "activity" | "chat";
 
+/**
+ * The window's pages — the spec's one-window model. `R` is the roster; every
+ * other page is a nesting level inside the same frame, reached with `⏎` and
+ * left with `esc`, each with the previous view demoted into the left pane.
+ *
+ * `T`/`WA` show a conversation, `SL`/`SAL` an agent's event log, `W` a run's
+ * phases and agents and `L` the run's event log. `TD` is deliberately absent:
+ * an expanded tool-call is a view state of the page it was opened on, never a
+ * page of its own.
+ */
+type HubPage = "R" | "T" | "SL" | "W" | "WA" | "SAL" | "L";
+
+/** `esc`'s walk back from a page: one level up, never further. */
+const PAGE_PARENT: Record<HubPage, HubPage | undefined> = {
+  R: undefined,
+  T: "R",
+  SL: "T",
+  W: "R",
+  WA: "W",
+  SAL: "WA",
+  L: "W",
+};
+
+/** The footer's keys, per page — the spec's bottom-controls table, as data. */
+const PAGE_KEYS: Record<HubPage, readonly string[]> = {
+  R: ["↑↓ select", "⏎ transcript", "l log", "p pause", "c copy", "f full", "esc close"],
+  T: ["↑↓ scroll", "o expand", "l log", "p pause", "r resume", "c copy", "k stop", "f full", "esc roster"],
+  SL: ["↑↓ scroll", "c copy tail", "p pause agent", "f full", "esc back"],
+  W: ["↑↓ item", "⏎ agent", "l run log", "s stop run", "f full", "esc roster"],
+  WA: ["p pause", "r resume", "o expand", "c copy", "l log", "k stop", "f full", "esc back"],
+  SAL: ["↑↓ scroll", "c copy tail", "p pause agent", "f full", "esc back"],
+  L: ["↑↓ scroll", "c copy tail", "s stop run", "f full", "esc back"],
+};
+
+/** The hub window's refuse/single-pane/two-pane thresholds (spec size ladder). */
+const HUB_MIN_WIDTH = 40;
+const HUB_MIN_ROWS = 10;
+const HUB_FULL_ROWS = 16;
+/** The status strip's prefix — `describeActivity`'s output follows it. */
+const STATUS_PREFIX = "❞";
+/** How the window refuses a terminal under the ladder. */
+export const HUB_SIZE_REFUSAL = "Agent hub needs a terminal ≥ 40×10";
+
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type HubEntry = WorkflowEntry | AgentEntry;
@@ -165,8 +215,16 @@ export interface AgentHubDeps {
   onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
   /** Workflow runs, on the same terms as the fleet list. */
   workflows?: () => readonly FleetWorkflow[];
-  /** Open the workflow inspector for a run id. */
+  /**
+   * The run's detail for the hub's run pages (**W**, **WA**, **L**): the same
+   * source the workflow inspector reads. Omitted → the run pages have no pane
+   * content and say so; the roster still shows the run.
+   */
+  workflowRun?: (id: string) => WorkflowDialogSource | undefined;
+  /** Open the workflow inspector for a run id. The legacy adapter entry point. */
   openWorkflow?: (id: string) => Promise<void> | void;
+  /** `s` on a workflow row: stop the run. Omitted → `s` does nothing. */
+  stopWorkflow?: (id: string) => void;
   /** Surface stop confirmations. Omitted → silent. */
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
   /**
@@ -334,6 +392,20 @@ export class AgentHub implements Component {
   private chatFrameless = true;
   /** Windowed popup vs full-screen hub; flipped by `f` via the reopen loop. */
   private readonly popup: boolean;
+  /** The current page — the roster, or one nesting level below it. */
+  private page: HubPage = "R";
+  /** The run a W/WA/L page is showing; kept across the loop back. */
+  private runId: string | undefined;
+  /** Cursor in the run's agent list, on WA/SAL/L. */
+  private runAgentSel = 0;
+  /** Cursor in the run's phase list, on **L**. */
+  private runPhaseSel = 0;
+  /** For a log opened straight from the roster: what `esc` returns to. */
+  private logBack: HubPage = "T";
+  /** Log pages' scroll offset, reset when none is up. */
+  private logScroll = 0;
+  /** Whether the too-small refusal has already been announced. */
+  private refused = false;
   /** Shared state object written back on close/toggle so the loop can resume. */
   private readonly resume: HubResumeState;
   /** Resolve the overlay with `"toggle"`, making `openAgentHub` reopen us in the other mode. */
@@ -358,6 +430,9 @@ export class AgentHub implements Component {
     this.selected = this.resume.selected;
     this.filterText = this.resume.filterText;
     this.chatRecordId = this.resume.chatRecordId;
+    // Resumed on a conversation full-screen: that is page T, the roster beside
+    // the transcript. (Windowed, the conversation is the popup's whole frame.)
+    if (this.view === "chat" && !this.popup) this.page = "T";
     if (this.view === "chat") {
       const record = this.chatRecordId
         ? this.deps.manager.listAgents().find(a => a.id === this.chatRecordId)
@@ -509,11 +584,42 @@ export class AgentHub implements Component {
       return;
     }
 
-    // Chat view: the embedded viewer owns everything, exactly as it did as a
-    // standalone overlay — including its quit keys, which come back here.
-    if (this.view === "chat") {
+    // Chat view (the popup): the embedded viewer owns everything, exactly as
+    // it did as a standalone overlay — including its quit keys.
+    if (this.view === "chat" && this.popup) {
       this.chatViewer?.handleInput(data);
       this.tui.requestRender();
+      return;
+    }
+
+    // The transcript pages own their keys through the same viewer; `esc` walks
+    // back one level via the viewer's `onBack`, and the page keys arrive
+    // through its `onUnhandledKey` hook.
+    if (this.page === "T" || this.page === "WA") {
+      if (this.page === "WA" && (matchesKey(data, "down") || matchesKey(data, "up"))) {
+        this.moveRunSelection(matchesKey(data, "down") ? 1 : -1);
+        return;
+      }
+      if (this.chatViewer) {
+        this.chatViewer.handleInput(data);
+        this.tui.requestRender();
+        return;
+      }
+    }
+
+    // The log pages (SL/SAL/L): scroll, copy, pause, stop, back.
+    if ((this.page === "SL" || this.page === "SAL" || this.page === "L") && this.handleLogKey(data)) return;
+
+    // **W**: ↑↓ moves the item cursor in the run pane, ⏎ descends to its agent.
+    if (this.page === "W") {
+      if (matchesKey(data, "down")) { this.moveRunSelection(1); return; }
+      if (matchesKey(data, "up")) { this.moveRunSelection(-1); return; }
+      if (matchesKey(data, "enter")) { this.enterPage(this.entries()); return; }
+      if (matchesKey(data, "l")) { this.pushLogPage(); return; }
+      if (matchesKey(data, "s")) { this.stopRun(); return; }
+      if (matchesKey(data, "c")) { this.copyFocusedResult(); return; }
+      if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.popPage(); return; }
+      if (matchesKey(data, "f")) { this.requestToggle(); return; }
       return;
     }
 
@@ -544,6 +650,9 @@ export class AgentHub implements Component {
 
     const items = this.entries();
     this.clampSelection();
+    // Per-row keys: subagent rows keep the lifecycle bindings, workflow rows
+    // get the run's safe set (⏎ / s / c) and nothing that a run cannot take.
+    const row = items[this.selected];
 
     if (matchesKey(data, "down")) {
       this.selected = Math.min(items.length - 1, this.selected + 1);
@@ -561,17 +670,28 @@ export class AgentHub implements Component {
     if (matchesKey(data, "end")) { this.selected = Math.max(0, items.length - 1); this.stopArmed = false; this.requestRender(); return; }
 
     if (matchesKey(data, "enter")) {
-      this.stopArmed = false;
-      this.openSelected(items);
+      this.enterPage(items);
       return;
     }
 
-    if (matchesKey(data, "x")) {
+    if (matchesKey(data, "l")) { this.pushLogPage(); return; }
+    if (matchesKey(data, "c") && row?.kind === "workflow") { this.copyFocusedResult(); return; }
+    if (matchesKey(data, "s") && row?.kind === "workflow") { this.stopRun(); return; }
+
+    if (matchesKey(data, "x") || matchesKey(data, "k")) {
       this.stopSelected(items);
       return;
     }
     if (matchesKey(data, "p")) {
       this.pauseResumeSelected(items);
+      return;
+    }
+    if (matchesKey(data, "c")) {
+      const entry = items[this.selected];
+      if (entry?.kind === "agent") {
+        const record = this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record;
+        copyRecordResult(record, (message, type) => this.deps.notify?.(message, type));
+      }
       return;
     }
 
@@ -636,21 +756,6 @@ export class AgentHub implements Component {
     };
     this.filterInput = input;
     this.requestRender();
-  }
-
-  private openSelected(items: HubEntry[]): void {
-    const entry = items[this.selected];
-    if (!entry) return;
-    if (entry.kind === "workflow") {
-      void Promise.resolve(this.deps.openWorkflow?.(entry.workflow.id));
-      return;
-    }
-    const current = this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record;
-    if (!current.session) {
-      this.deps.notify?.(`Agent is ${current.status} — no session available.`, "info");
-      return;
-    }
-    this.enterChat(current);
   }
 
   /** Switch to the chat view for `record`, embedding the detailed-log viewer. */
@@ -838,45 +943,165 @@ export class AgentHub implements Component {
   // ---- Rendering ----
 
   render(width: number): string[] {
-    if (width < 6) return [];
-    if (this.view === "chat" && this.chatViewer) return this.renderChat(width);
-    const rows = this.tui.terminal.rows;
-    if (rows < MIN_TERMINAL_ROWS) return [truncateToWidth(this.headerTitle(width), width)];
-
-    const th = this.theme;
-    const innerW = windowInnerWidth(width);
-
-    // The window's non-body rows: the title (plus the live filter when one is
-    // open), the rule under it, and — below the body — the rule, the footer
-    // and the bottom edge. The shared window draws them; this decides what
-    // goes in them.
-    const header: WindowRow[] = [{ kind: "full", cells: [{ text: this.headerTitle(innerW) }] }];
-    if (this.filterInput || this.filterText) {
-      header.push({ kind: "full", cells: [{ text: this.filterLine(innerW) }] });
+    const terminalRows = this.tui.terminal?.rows ?? 24;
+    if (width < HUB_MIN_WIDTH || terminalRows < HUB_MIN_ROWS) {
+      this.refuseSize();
+      return [];
     }
-    const bodyRows = Math.max(MIN_BODY_ROWS, rows - header.length - 4); // rule + rule + footer + hrBot
-    const body = this.view === "activity"
-      ? this.renderActivity(bodyRows)
-      : this.renderTable(bodyRows, innerW);
-    // A full-width rule: the window clamps the run of dashes to its own inner
-    // width, so the surface only says it wants one.
+    if (this.view === "chat" && this.popup && this.chatViewer) return this.renderChat(width);
+    if (this.view === "activity") return this.renderActivityWindow(width, terminalRows);
+    return this.renderHubPage(width, terminalRows);
+  }
+
+  /**
+   * The window under the ladder: below 40×10 it refuses to open at all — no
+   * partial frame, one notification, then the overlay closes. Called from
+   * `render`, where the terminal's size is finally known.
+   */
+  private refuseSize(): void {
+    if (this.refused) return;
+    this.refused = true;
+    this.deps.notify?.(HUB_SIZE_REFUSAL, "warning");
+    this.close();
+  }
+
+  /**
+   * The unified window: the roster (or a run's agent list) on the left, the
+   * current page's detail on the right, one breadcrumb title, a full-width
+   * status strip, and the page's own footer.
+   *
+   * Two-pane down to {@link TWO_PANE_MIN_WIDTH}, stacked below it: the pane
+   * policy is the size ladder's, the columns are the shared window's.
+   */
+  private renderHubPage(width: number, terminalRows: number): string[] {
+    const twoPane = width >= TWO_PANE_MIN_WIDTH;
+    const header: WindowRow[] = [{ kind: "full", cells: [{ text: this.breadcrumb(width) }] }];
+    if (this.filterInput || this.filterText) {
+      header.push({ kind: "full", cells: [{ text: this.filterLine(windowInnerWidth(width)) }] });
+    }
+    // The first thing height scarcity drops, then the blank row, then the
+    // summaries — the spec's degradation order.
+    const showStatus = terminalRows >= HUB_FULL_ROWS;
+    const showBlank = terminalRows >= 12;
+    const chrome = header.length + 4 + (showStatus ? 1 : 0) + (showBlank ? 1 : 0);
+    const bodyRows = Math.max(MIN_BODY_ROWS, terminalRows - chrome);
+
     const dimRule: WindowRow = { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] };
+    const body: WindowRow[] = [];
+
+    if (!twoPane) {
+      // Stacked: one full-width page. `⏎` pushes the right pane's content as
+      // its own page; `esc` pops it — the page model unchanged, one column.
+      for (const line of this.stackedLines(width - 4, bodyRows)) body.push({ kind: "full", cells: line });
+    } else {
+      const panes = hubPaneGeometry(width);
+      const left = this.leftPaneLines(panes.listWidth, bodyRows);
+      const right = this.rightPaneLines(panes.detailWidth, bodyRows);
+      for (let i = 0; i < bodyRows; i++) {
+        body.push({ kind: "split", left: left[i] ?? [], right: right[i] ?? [] });
+      }
+    }
+
+    const rows: WindowRow[] = [...header, dimRule, ...body];
+    if (showBlank) rows.push({ kind: "full", cells: [{ text: "" }] });
+    if (showStatus) rows.push({ kind: "full", cells: [{ text: this.statusStrip(windowInnerWidth(width)) }] });
+    rows.push(dimRule, { kind: "full", cells: [{ text: this.pageFooter(windowInnerWidth(width)) }] });
 
     return paintWindow(
       renderWindow({
         width,
         box: UNICODE_PANE_BOX,
-        rows: [
-          ...header,
-          dimRule,
-          ...body,
-          dimRule,
-          { kind: "full", cells: [{ text: this.footer(innerW) }] },
-        ],
-        ellipsis: "...",
+        panes: twoPane ? hubPaneGeometry(width) : undefined,
+        title: ` ${this.breadcrumb(windowInnerWidth(width))} `,
+        rows,
+        ellipsis: "…",
       }),
-      th,
+      this.theme,
     );
+  }
+
+  /** `Agents & Workflows › run › agent › log` — the page trail, truncated to fit. */
+  private breadcrumb(width: number): string {
+    const th = this.theme;
+    const parts = ["Agents & Workflows"];
+    const run = this.currentRun();
+    if (this.page === "W" || this.page === "WA" || this.page === "SAL" || this.page === "L") {
+      if (run) parts.push(run.name);
+    }
+    if (this.page === "WA" || this.page === "SAL") parts.push(this.selectedRunAgentLabel() ?? "agent");
+    if (this.page === "T" || this.page === "SL") parts.push(this.selectedAgentLabel() ?? "agent");
+    if (this.page === "SL" || this.page === "SAL" || this.page === "L") parts.push("log");
+    return truncateToWidth(th.bold(parts.join(th.fg("dim", " › "))), width);
+  }
+
+  /**
+   * The status strip: the focused item's last activity, from the SAME
+   * `describeActivity` the agent widget's subtext uses, prefixed with `❞` and
+   * truncated at the window edge.
+   */
+  private statusStrip(width: number): string {
+    const th = this.theme;
+    const record = this.focusedRecord();
+    let doing: string | undefined;
+    if (record) {
+      const activity = this.deps.agentActivity.get(record.id);
+      if (record.status === "running" || record.status === "queued" || record.status === "paused") {
+        doing = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
+      } else {
+        doing = record.status;
+      }
+    } else {
+      const run = this.currentRun();
+      if (run) {
+        const source = this.runSource(run.id);
+        const live = source ? flattenRunAgents(source).filter(e => displayState(e, true) === "running") : [];
+        doing = live.length > 0 ? `${live.length} agent${live.length === 1 ? "" : "s"} in flight` : workflowStatusWord(run.status);
+      }
+    }
+    return truncateToWidth(`${th.fg("accent", STATUS_PREFIX)} ${th.fg("dim", doing ?? "idle")}`, width);
+  }
+
+  /**
+   * The page's own footer. The keys belong to the PAGE, so the same hints
+   * render in the popup twin and maximized alike; the shared fitter drops
+   * whole hints from the right.
+   */
+  private pageFooter(width: number): string {
+    const th = this.theme;
+    // Per-row keys: workflow rows get the run's safe set, subagent rows the
+    // lifecycle set. The footer says which row type the cursor is on.
+    const keys = this.page === "R" && this.entries()[this.selected]?.kind === "workflow"
+      ? ["↑↓ select", "⏎ open run", "s stop run", "c copy", "f full", "esc close"]
+      : [...PAGE_KEYS[this.page]];
+    if (this.stopArmed) return truncateToWidth(`${th.fg("error", "x again to STOP")} ${hintLine(keys, Math.max(1, width - 16))}`, width);
+    return truncateToWidth(hintLine(keys, width), width);
+  }
+
+  /** The legacy activity list, still reachable with `2` — the roster's sibling view. */
+  private renderActivityWindow(width: number, terminalRows: number): string[] {
+    const rows = Math.max(MIN_BODY_ROWS, terminalRows - 4);
+    return paintWindow(
+      renderWindow({
+        width,
+        box: UNICODE_PANE_BOX,
+        rows: [
+          { kind: "full", cells: [{ text: this.activityTitle(width) }] },
+          { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
+          ...this.renderActivity(rows),
+          { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
+          { kind: "full", cells: [{ text: "↑↓ select · Enter open · x stop · p pause · 1 agents · f popup · q close" }] },
+        ],
+        ellipsis: "…",
+      }),
+      this.theme,
+    );
+  }
+
+  private activityTitle(width: number): string {
+    const th = this.theme;
+    const agents = this.agentRecords();
+    const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
+    return truncateToWidth(`${th.bold("Agents & Workflows")} ${th.fg("dim", `· activity · ${agents.length} agents · ${running} active`)}`, width);
   }
 
   /**
@@ -964,27 +1189,6 @@ export class AgentHub implements Component {
     return `${marker} ${statusGlyph(record.status, th)} ${name}`;
   }
 
-  private headerTitle(width: number): string {
-    const th = this.theme;
-    const agents = this.agentRecords();
-    const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
-    const parts: string[] = [];
-    const tab = (label: string, active: boolean) =>
-      active ? th.fg("accent", th.bold(` ${label} `)) : th.fg("dim", ` ${label} `);
-    const tabs = `[${tab("1 Agents", this.view !== "activity")}${tab("2 Activity", this.view === "activity")}]`;
-    parts.push(th.bold("Agent Hub"));
-    if (this.activeFilter()) parts.push(th.fg("accent", `filter: ${this.activeFilter()}`));
-    parts.push(
-      agents.length === 0
-        ? th.fg("dim", "no agents")
-        : `${agents.length} agent${agents.length === 1 ? "" : "s"} · ${running} active`,
-    );
-    const wfCount = this.workflows().length;
-    if (wfCount > 0) parts.push(th.fg("dim", `${wfCount} workflow${wfCount === 1 ? "" : "s"}`));
-    parts.push(tabs);
-    return truncateToWidth(parts.join(th.fg("dim", " · ")), width);
-  }
-
   private filterLine(width: number): string {
     const th = this.theme;
     if (this.filterInput) {
@@ -997,15 +1201,13 @@ export class AgentHub implements Component {
     return truncateToWidth(th.fg("accent", `/ ${this.filterText}`) + th.fg("dim", `  — ${shown}/${total} match${shown === 1 ? "" : "es"}`), width);
   }
 
-  private renderTable(bodyRows: number, innerW: number): WindowRow[] {
+  /** The roster's rows for a pane: section headers, windowed on the selection. */
+  private rosterLines(width: number, rows: number): WorkflowCardLine[] {
     const items = this.entries();
     this.clampSelection();
-    const lines: WindowRow[] = [];
     if (items.length === 0) {
-      lines.push(fullRow(this.theme.fg("dim", this.activeFilter() ? "no matches" : "(no agents yet — spawn one to see it here)")));
-      return lines;
+      return [clampLine([{ text: this.theme.fg("dim", this.activeFilter() ? "no matches" : "(no agents yet — spawn one to see it here)") }], width)];
     }
-
     // Pad the name column to the widest visible name so descriptions align,
     // counting the status glyph every row now carries.
     let nameCol = 0;
@@ -1019,19 +1221,497 @@ export class AgentHub implements Component {
     // the rows, so `selAt` finds the selection's row position under the headers.
     const display = this.rosterItems(items);
     const selectedEntry = items[this.selected];
-    const selAt = Math.max(0, display.findIndex(item => item !== null && item.kind !== "header" && item === selectedEntry));
-    const slice = windowRange(selAt, display.length, bodyRows);
+    const selAt = Math.max(0, display.findIndex(item => item.kind !== "header" && item === selectedEntry));
+    const slice = windowRange(selAt, display.length, rows);
 
-    for (let i = 0; i < bodyRows; i++) {
+    const lines: WorkflowCardLine[] = [];
+    for (let i = 0; i < rows; i++) {
       const item = display[slice.start + i];
-      if (!item) { lines.push(fullRow("")); continue; }
+      if (!item) { lines.push([]); continue; }
       if (item.kind === "header") {
-        lines.push(fullRow(this.theme.fg("dim", this.theme.bold(item.label))));
+        lines.push([{ text: item.label, color: "dim", bold: true }]);
         continue;
       }
-      lines.push(fullRow(this.renderEntry(item, item === selectedEntry, nameCol, innerW)));
+      lines.push(clampLine([{ text: this.renderEntry(item, item === selectedEntry, nameCol, width) }], width));
     }
     return lines;
+  }
+
+  // ---- Pages (the one window) ----
+
+  /** The left pane: the parent level for whichever page is up. */
+  private leftPaneLines(width: number, rows: number): WorkflowCardLine[] {
+    switch (this.page) {
+      case "WA":
+      case "SAL":
+      case "L":
+        return this.runLeftLines(width, rows);
+      default:
+        return this.rosterLines(width, rows);
+    }
+  }
+
+  /** The right pane: the selected item's detail, per page. */
+  private rightPaneLines(width: number, rows: number): WorkflowCardLine[] {
+    switch (this.page) {
+      case "R":
+        return this.previewLines(width, rows);
+      case "T":
+      case "WA":
+        return this.transcriptLines(width, rows);
+      case "SL":
+      case "SAL":
+        return this.agentLogLines(width, rows);
+      case "W":
+        return this.runPaneLines(width, rows);
+      case "L":
+        return this.runLogLines(width, rows);
+    }
+  }
+
+  /** **R**'s detail: a run overview for a workflow row, the transcript for an agent. */
+  private previewLines(width: number, rows: number): WorkflowCardLine[] {
+    const entry = this.entries()[this.selected];
+    if (entry?.kind === "workflow") return this.runOverviewLines(entry.workflow, width, rows);
+    return this.transcriptLines(width, rows);
+  }
+
+  /** The run overview **R** shows for a selected workflow row (spec R2). */
+  private runOverviewLines(run: FleetWorkflow, width: number, rows: number): WorkflowCardLine[] {
+    const lines: WorkflowCardLine[] = [
+      clampLine([{ text: run.name, color: "toolTitle", bold: true }], width),
+      clampLine(
+        [{ text: `${workflowStatusWord(run.status)} · ${formatFleetElapsed((run.completedAt ?? Date.now()) - run.startedAt)} · ${run.doneCount}/${run.totalCount} agents`, color: "dim" }],
+        width,
+      ),
+    ];
+    const source = this.runSource(run.id);
+    const groups = source ? buildPhaseGroups(source.progress, source.meta?.phases) : [];
+    if (groups.length === 0) return padLines([...lines, []], rows);
+    lines.push([]);
+    lines.push(clampLine([{ text: "PHASES", color: "muted", bold: true }], width));
+    lines.push(
+      ...phaseListRows({
+        groups,
+        selectedPhase: 0,
+        capacity: Math.max(1, rows - lines.length - 1),
+        width,
+        glyphs: UNICODE_DIALOG_GLYPHS,
+      }),
+    );
+    lines.push(clampLine([{ text: "(⏎ opens the run page)", color: "dim" }], width));
+    return padLines(lines, rows);
+  }
+
+  /**
+   * The transcript pages' right pane: the selected agent's full conversation,
+   * through the same `ConversationViewer` the popup shows — user, thinking,
+   * assistant, tool-call, diff and streaming blocks, with `o`/`ctrl+o`
+   * expanding a tool-call in place (a view state, never a page).
+   */
+  private transcriptLines(width: number, rows: number): WorkflowCardLine[] {
+    const record = this.focusedRecord();
+    if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
+    if (!record.session) {
+      return [clampLine([{ text: this.theme.fg("dim", `transcript unavailable — agent is ${record.status}`) }], width)];
+    }
+    const viewer = this.ensureViewer(record);
+    if (!viewer) return [];
+    return padLines(viewer.render(width).map((text): WorkflowCardLine => [{ text }]), rows);
+  }
+
+  /**
+   * **W**: the run's phases followed by its agents — the level the next `⏎`
+   * descends into. Rows come from the inspector's own builders.
+   */
+  private runPaneLines(width: number, rows: number): WorkflowCardLine[] {
+    const run = this.currentRun();
+    const source = run ? this.runSource(run.id) : undefined;
+    if (!source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    const glyphs = UNICODE_DIALOG_GLYPHS;
+    const groups = buildPhaseGroups(source.progress, source.meta?.phases);
+    const lines: WorkflowCardLine[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
+    lines.push(
+      ...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: Math.max(1, groups.length), width, glyphs }),
+    );
+    lines.push([]);
+    lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
+    const entries = flattenRunAgents(source);
+    const selection = this.clampRunAgentIndex();
+    const slice = windowRange(selection, entries.length, Math.max(1, rows - lines.length));
+    if (entries.length === 0) lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
+    for (let i = slice.start; i < slice.end; i++) {
+      lines.push(
+        agentRow({
+          entry: entries[i],
+          selected: i === selection,
+          compact: false,
+          width,
+          glyphs,
+          workflowActive: source.task.status === "running" || source.task.status === "paused",
+          spinnerFrame: 0,
+          now: Date.now(),
+        }),
+      );
+    }
+    return padLines(lines, rows);
+  }
+
+  /**
+   * The run's agent list, with the run's phases above it on **L** — the
+   * parent level a run page demotes into its left pane.
+   */
+  private runLeftLines(width: number, rows: number): WorkflowCardLine[] {
+    const source = this.runSource();
+    if (!source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    const glyphs = UNICODE_DIALOG_GLYPHS;
+    const groups = buildPhaseGroups(source.progress, source.meta?.phases);
+    const selection = this.clampRunAgentIndex();
+    const lines: WorkflowCardLine[] = [];
+    if (this.page === "L") {
+      lines.push(...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: rows, width, glyphs }));
+      if (lines.length < rows) lines.push([]);
+    }
+    const entries = flattenRunAgents(source);
+    if (entries.length === 0) {
+      lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
+      return lines;
+    }
+    const capacity = Math.max(1, rows - lines.length);
+    const slice = windowRange(selection, entries.length, capacity);
+    for (let i = slice.start; i < slice.end; i++) {
+      lines.push(
+        agentRow({
+          entry: entries[i],
+          selected: i === selection,
+          compact: this.page !== "L",
+          width,
+          glyphs,
+          workflowActive: source.task.status === "running" || source.task.status === "paused",
+          spinnerFrame: 0,
+          now: Date.now(),
+        }),
+      );
+    }
+    return lines;
+  }
+
+  /** The run log: the events the run's progress entries carry, timestamped. */
+  private runLogLines(width: number, rows: number): WorkflowCardLine[] {
+    const run = this.currentRun();
+    const source = run ? this.runSource(run.id) : undefined;
+    if (!run || !source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    const active = source.task.status === "running" || source.task.status === "paused";
+    const stamp = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
+    const lines: WorkflowCardLine[] = [
+      clampLine([{ text: `${stamp(run.startedAt)} run start: ${run.totalCount} agent${run.totalCount === 1 ? "" : "s"}`, color: "muted" }], width),
+    ];
+    for (const entry of flattenRunAgents(source)) {
+      const state = displayState(entry, active);
+      if (entry.startedAt != null) {
+        lines.push(clampLine([{ text: `${stamp(entry.startedAt)} ${entry.label} spawned${entry.phaseTitle ? ` (${entry.phaseTitle})` : ""}`, color: "dim" }], width));
+      }
+      if (state === "running") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} still running`, color: "dim" }], width));
+      if (state === "done") {
+        const at = entry.startedAt != null && entry.durationMs != null ? entry.startedAt + entry.durationMs : Date.now();
+        lines.push(clampLine([{ text: `${stamp(at)} ${entry.label} done${entry.resultPreview ? ` — ${entry.resultPreview}` : ""}`, color: "success" }], width));
+      }
+      if (state === "failed" || state === "blocked") {
+        lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} failed${entry.error ? ` — ${entry.error}` : ""}`, color: "error" }], width));
+      }
+      if (state === "skipped") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} skipped`, color: "dim" }], width));
+    }
+    if (!active) lines.push(clampLine([{ text: `${stamp(run.completedAt ?? Date.now())} run ${workflowStatusWord(run.status)}`, color: "muted" }], width));
+    lines.push(clampLine([{ text: "(filter: all)", color: "dim" }], width));
+    return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
+  }
+
+  /**
+   * An agent's event log — the compact timestamped companion to the
+   * transcript, from what the record and its live activity know: spawn, turns,
+   * tool calls, completion with tokens and cost.
+   */
+  private agentLogLines(width: number, rows: number): WorkflowCardLine[] {
+    const record = this.focusedRecord();
+    if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
+    const activity = this.deps.agentActivity.get(record.id);
+    const stamp = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
+    const lines: WorkflowCardLine[] = [
+      clampLine([{ text: `${stamp(record.startedAt)} spawn  ${record.alias ?? record.handle ?? record.type} · ${record.description}`, color: "muted" }], width),
+    ];
+    for (let turn = 1; turn <= (activity?.turnCount ?? 0); turn++) {
+      lines.push(clampLine([{ text: `${stamp(record.startedAt)} turn ${turn} start`, color: "dim" }], width));
+    }
+    if (record.toolUses > 0) {
+      lines.push(clampLine([{ text: `${stamp(record.startedAt)} tools  ${record.toolUses} call${record.toolUses === 1 ? "" : "s"}`, color: "dim" }], width));
+    }
+    if (activity?.responseText) {
+      lines.push(clampLine([{ text: `${stamp(Date.now())} note   ${activity.responseText.split("\n")[0] ?? ""}`, color: "dim" }], width));
+    }
+    if (record.status === "running" || record.status === "queued" || record.status === "paused") {
+      lines.push(clampLine([{ text: `${stamp(Date.now())} still ${record.status}`, color: "dim" }], width));
+    }
+    if (record.completedAt != null) {
+      const done = record.status === "completed" || record.status === "steered";
+      lines.push(clampLine([{ text: `${stamp(record.completedAt)} ${done ? "done" : record.status}${record.error ? ` — ${record.error}` : ""}`, color: done ? "success" : "error" }], width));
+      const tokens = getLifetimeTotal(record.lifetimeUsage);
+      const cost = this.deps.showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
+      lines.push(clampLine([{ text: `${stamp(record.completedAt)} usage  ${tokens} tokens${cost ? ` · ${cost}` : ""}`, color: "dim" }], width));
+    }
+    lines.push(clampLine([{ text: "(filter: all)", color: "dim" }], width));
+    return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
+  }
+
+  /**
+   * The stacked single-pane page (40–59 cols): the current page's own content
+   * at full width. `⏎` pushes the detail page, `esc` pops it — the pane model
+   * with one column.
+   */
+  private stackedLines(width: number, rows: number): WorkflowCardLine[] {
+    if (this.page === "R") return this.rosterLines(width, rows);
+    const lines = this.rightPaneLines(width, rows);
+    return lines.length > 0 ? lines : this.leftPaneLines(width, rows);
+  }
+
+  /** The viewer for `record`, rebuilt only when the target changes. */
+  private ensureViewer(record: AgentRecord): ConversationViewer | undefined {
+    if (this.chatViewer && this.chatRecordId === record.id && !this.popup) return this.chatViewer;
+    if (!record.session) return undefined;
+    this.chatViewer?.dispose();
+    this.chatRecordId = record.id;
+    this.chatViewer = new ConversationViewer(
+      this.tui,
+      record.session,
+      record,
+      this.deps.agentActivity.get(record.id),
+      this.theme,
+      result => this.done(result),
+      () => {
+        if (this.deps.manager.abort(record.id)) {
+          this.deps.notify?.(`Stopped "${record.description}".`, "info");
+        }
+      },
+      this.keybindings as ViewerKeybindings | undefined,
+      message => this.deps.manager.steer(record.id, message),
+      this.deps.showCost,
+      this.deps.viewerMarkdown,
+      this.deps.onViewerMarkdown,
+      this.deps.scrollbarMode?.() ?? "auto",
+      this.deps.backgroundAction?.(record, message => this.deps.notify?.(message, "info")),
+      {
+        maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
+        onBack: () => this.popPage(),
+        backHint: () => "↑↓ scroll · esc back · f full",
+        scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
+        frameless: () => true,
+        onUnhandledKey: data => this.pageUnhandledKey(data),
+      },
+    );
+    return this.chatViewer;
+  }
+
+  /** The viewer keys that belong to the PAGE, not to the viewer. */
+  private pageUnhandledKey(data: string): boolean {
+    if (matchesKey(data, "l")) { this.pushLogPage(); return true; }
+    if (matchesKey(data, "f")) { this.requestToggle(); return true; }
+    if (matchesKey(data, "c")) { this.copyFocusedResult(); return true; }
+    if (matchesKey(data, "p")) { this.pauseResumeFocused(); return true; }
+    if (matchesKey(data, "k") || matchesKey(data, "x")) { this.stopFocused(); return true; }
+    return false;
+  }
+
+  /** One step in the run's agent list — `WA`'s left pane, and `W`'s item cursor. */
+  private moveRunSelection(delta: 1 | -1): void {
+    if (this.runAgents().length === 0) return;
+    const next = Math.min(this.runAgents().length - 1, Math.max(0, this.clampRunAgentIndex() + delta));
+    if (next === this.runAgentSel) return;
+    this.runAgentSel = next;
+    // A new agent is a new page subject: the viewer rebuilds on the next render.
+    if (this.page === "WA") this.chatRecordId = undefined;
+    this.requestRender();
+  }
+
+  /** `s`: stop the run the cursor is on (workflow rows only — refusal rules). */
+  private stopRun(): void {
+    const run = this.page === "W" || this.page === "L" ? this.currentRun() : this.entries()[this.selected]?.kind === "workflow" ? (this.entries()[this.selected] as { workflow: FleetWorkflow }).workflow : undefined;
+    if (!run || (run.status !== "running" && run.status !== "paused")) return;
+    this.runId = run.id;
+    this.deps.stopWorkflow?.(run.id);
+    this.requestRender();
+  }
+
+  /** The log pages' keys: scroll, copy, pause, stop the run, expand, back. */
+  private handleLogKey(data: string): boolean {
+    const down = matchesKey(data, "down") || matchesKey(data, "j");
+    const up = matchesKey(data, "up") || matchesKey(data, "k");
+    if (down || up) { this.scrollLog(down ? 1 : -1); return true; }
+    if (matchesKey(data, "c")) { this.copyFocusedResult(); return true; }
+    if (matchesKey(data, "p")) { this.pauseResumeFocused(); return true; }
+    if (matchesKey(data, "s") && this.page === "L") { this.stopRun(); return true; }
+    if (matchesKey(data, "f")) { this.requestToggle(); return true; }
+    if (matchesKey(data, "escape") || matchesKey(data, "q")) { this.popPage(); return true; }
+    return false;
+  }
+
+  /** `⏎` at the page level: `R` descends into the selected item, `W` into its agent. */
+  private enterPage(items: HubEntry[]): void {
+    this.stopArmed = false;
+    if (this.page === "R") {
+      const entry = items[this.selected];
+      if (!entry) return;
+      if (entry.kind === "workflow") {
+        this.runId = entry.workflow.id;
+        this.runAgentSel = 0;
+        this.runPhaseSel = 0;
+        this.page = "W";
+        this.requestRender();
+        return;
+      }
+      const record = this.rosterRecordForCurrent();
+      if (!record?.session) {
+        this.deps.notify?.(`Agent is ${record?.status ?? "gone"} — no session available.`, "info");
+        return;
+      }
+      this.chatRecordId = record.id;
+      this.page = "T";
+      this.requestRender();
+      return;
+    }
+    if (this.page === "W") {
+      const record = this.selectedRunRecord();
+      if (!record?.session) {
+        this.deps.notify?.("That agent has no conversation to open.", "info");
+        return;
+      }
+      this.page = "WA";
+      this.requestRender();
+    }
+  }
+
+  /** `esc`: exactly one nesting level up. */
+  private popPage(): void {
+    if (this.page === "R") { this.close(); return; }
+    const from = this.page;
+    this.page = from === "SL" && this.logBack === "R" ? "R" : PAGE_PARENT[from]!;
+    this.logScroll = 0;
+    // Back on the roster the pointer is what the right pane follows; deeper, the
+    // pinned record stays the page's subject.
+    if (this.page === "R" || this.page === "T") {
+      const record = this.page === "R" ? this.rosterRecordForCurrent() : this.focusedRecord();
+      this.chatRecordId = record?.id;
+    }
+    this.requestRender();
+  }
+
+  /** The record a page is showing — the page's focus, whatever the roster cursor does. */
+  private focusedRecord(): AgentRecord | undefined {
+    const fresh = (id: string | undefined) => (id === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === id));
+    if (this.page === "R") return this.rosterRecordForCurrent();
+    if (this.page === "T" || this.page === "SL") return fresh(this.chatRecordId);
+    if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
+    // W / L: the run's most recently active agent — the status strip's subject.
+    const entries = flattenRunAgents(this.runSource() ?? EMPTY_RUN_SOURCE);
+    const live = entries.filter(e => displayState(e, true) === "running");
+    return fresh((live.at(-1) ?? entries.at(-1))?.recordId);
+  }
+
+  /** The roster row under the cursor, when it is an agent. */
+  private rosterRecordForCurrent(): AgentRecord | undefined {
+    const entry = this.entries()[this.selected];
+    if (entry?.kind !== "agent") return undefined;
+    return this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record;
+  }
+
+  /** The run the page is on, live. */
+  private currentRun(): FleetWorkflow | undefined {
+    return this.runId === undefined ? undefined : this.workflows().find(w => w.id === this.runId);
+  }
+
+  /** The run's detail source — the named run's, or the current page's. */
+  private runSource(id?: string): WorkflowDialogSource | undefined {
+    const runId = id ?? this.runId;
+    return runId === undefined ? undefined : this.deps.workflowRun?.(runId);
+  }
+
+  private clampRunAgentIndex(): number {
+    const max = Math.max(0, this.runAgents().length - 1);
+    this.runAgentSel = Math.min(Math.max(0, this.runAgentSel), max);
+    return this.runAgentSel;
+  }
+
+  /** The run's agents, flattened across phases, in run order. */
+  private runAgents(): readonly WorkflowAgentEntry[] {
+    return flattenRunAgents(this.runSource() ?? EMPTY_RUN_SOURCE);
+  }
+
+  /** The record behind the run's selected agent row. */
+  private selectedRunRecord(): AgentRecord | undefined {
+    const recordId = this.runAgents()[this.clampRunAgentIndex()]?.recordId;
+    return recordId === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === recordId);
+  }
+
+  private selectedRunAgentLabel(): string | undefined {
+    const entries = this.runAgents();
+    return entries[this.clampRunAgentIndex()]?.label;
+  }
+
+  private selectedAgentLabel(): string | undefined {
+    const record = this.focusedRecord();
+    return record ? (record.alias ?? record.handle ?? record.type) : undefined;
+  }
+
+  /** `l`: to the log page one level below the current one (R skips T). */
+  private pushLogPage(): void {
+    if (this.page === "R") {
+      const record = this.rosterRecordForCurrent();
+      if (!record) return;
+      this.chatRecordId = record.id;
+      this.logBack = "R";
+      this.page = "SL";
+    } else if (this.page === "T") {
+      this.logBack = "T";
+      this.page = "SL";
+    } else if (this.page === "WA") {
+      this.page = "SAL";
+    } else if (this.page === "W") {
+      this.page = "L";
+    } else {
+      return;
+    }
+    this.logScroll = 0;
+    this.requestRender();
+  }
+
+  private copyFocusedResult(): void {
+    const record = this.focusedRecord();
+    if (record) copyRecordResult(record, (message, type) => this.deps.notify?.(message, type));
+  }
+
+  private pauseResumeFocused(): void {
+    const record = this.focusedRecord();
+    if (record) this.pauseResumeAgent(record);
+  }
+
+  private stopFocused(): void {
+    const record = this.focusedRecord();
+    if (!record || (record.status !== "running" && record.status !== "queued")) return;
+    if (this.deps.manager.abort(record.id)) {
+      this.deps.notify?.(`Stopped "${record.description}".`, "info");
+    }
+    this.requestRender();
+  }
+
+  /** One scroll step inside a log page, clamped at the ends. */
+  private scrollLog(delta: number): void {
+    this.logScroll = Math.max(0, this.logScroll + delta);
+    this.requestRender();
+  }
+
+  /** The window of log lines the pane shows, from `offset` toward the tail. */
+  private scrollTail(lines: readonly WorkflowCardLine[], offset: number, rows: number): WorkflowCardLine[] {
+    const max = Math.max(0, lines.length - rows);
+    const start = Math.max(0, Math.min(offset, max));
+    return lines.slice(start, start + rows);
   }
 
   private renderEntry(entry: HubEntry, selected: boolean, nameCol: number, width: number): string {
@@ -1114,23 +1794,33 @@ export class AgentHub implements Component {
     return lines;
   }
 
-  private footer(width: number): string {
-    const th = this.theme;
-    // Popup mode never renders the roster footer (it shows the conversation
-    // only); "f popup" is therefore only offered where it applies.
-    const keys = this.view === "activity"
-      ? ["↑↓ select", "Enter open", "x stop", "p pause", "1 agents", "f popup", "q close"]
-      : ["↑↓ select", "Enter open", "x stop", "p pause", "/ filter", "Tab activity", "f popup", "q close"];
-    // Drop hints right-to-left until the line fits, so the essential ones survive.
-    let footer = hintLine(keys, width);
-    if (this.stopArmed) footer = `${th.fg("error", "x again to STOP")} ${footer}`;
-    return truncateToWidth(footer, width);
-  }
 }
 
 /** One full-width window row, from content this surface has already shaped. */
 function fullRow(text: string): WindowRow {
   return { kind: "full", cells: [{ text }] };
+}
+
+/** A run source with nothing in it, for pages whose run has been swept. */
+const EMPTY_RUN_SOURCE: WorkflowDialogSource = {
+  progress: [],
+  task: { status: "completed", startTime: 0 },
+  agentCount: 0,
+};
+
+/** The inspector's empty-agents copy, so both surfaces say it the same way. */
+const WORKFLOW_NO_AGENTS = "No agents";
+
+/** A run's agents in run order, flattened across its phase groups. */
+function flattenRunAgents(source: WorkflowDialogSource): WorkflowAgentEntry[] {
+  return buildPhaseGroups(source.progress, source.meta?.phases).flatMap(group => group.agents);
+}
+
+/** A pane's lines, cut or padded to the body height so both cells stay level. */
+function padLines(lines: readonly WorkflowCardLine[], rows: number): WorkflowCardLine[] {
+  const out = lines.slice(0, rows);
+  while (out.length < rows) out.push([]);
+  return out;
 }
 
 /**

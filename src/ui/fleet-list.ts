@@ -21,6 +21,7 @@ import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { openAgentHub } from "./agent-hub.js";
 import { type AgentActivity, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
 import { type ViewerBackgroundAction } from "./conversation-viewer.js";
+import type { WorkflowDialogSource } from "./workflow-dialog.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -122,6 +123,9 @@ export class FleetList {
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
   private openWorkflow: ((id: string) => Promise<void> | void) | undefined;
+  /** The hub's run-page detail and its `s`, injected by the extension. */
+  private workflowRunSource: ((id: string) => WorkflowDialogSource | undefined) | undefined;
+  private stopWorkflowRun: ((id: string) => void) | undefined;
   /** Injected pause/resume for the `p` key — see `setLifecycleActions`. */
   private lifecycleActions: { pause: (id: string) => string | undefined; resume: (id: string) => boolean } | undefined;
   /**
@@ -322,6 +326,19 @@ export class FleetList {
   }
 
   /**
+   * The hub's run pages (W/WA/L) need the run's detail, and its
+   * `s` key needs a way to stop one. Both live where the runs do; the hub gets
+   * them as callbacks rather than reaching into the workflow runtime.
+   */
+  setWorkflowRunSource(
+    run: (id: string) => WorkflowDialogSource | undefined,
+    stop: (id: string) => void,
+  ): void {
+    this.workflowRunSource = run;
+    this.stopWorkflowRun = stop;
+  }
+
+  /**
    * Wire the `p` key's pause/resume. Injected rather than taken in the
    * constructor because the funnel lives in the extension closure (it is what
    * emits `subagents:paused`) — the same reason `setWorkflowSource` exists.
@@ -518,6 +535,8 @@ export class FleetList {
         viewerMarkdown: this.viewerMarkdown,
         onViewerMarkdown: this.onViewerMarkdown,
         workflows: this.workflowSource,
+        workflowRun: id => this.workflowRunSource?.(id),
+        stopWorkflow: id => this.stopWorkflowRun?.(id),
         openWorkflow: id => this.openWorkflow?.(id),
         notify: (message, type) => ui.notify(message, type),
         pauseAgent: id => this.lifecycleActions?.pause(id),

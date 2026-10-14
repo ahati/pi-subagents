@@ -54,6 +54,7 @@ vi.mock("../src/ui/fleet-list.js", () => ({
     setWorkflowSource = vi.fn((_source: unknown, open: (id: string) => void) => {
       workflowOpen = open;
     });
+    setWorkflowRunSource = vi.fn();
     setEnabled = vi.fn();
     update = vi.fn();
     ensureTimer = vi.fn();

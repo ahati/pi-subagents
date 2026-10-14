@@ -535,6 +535,56 @@ export function agentPaneTitleFor(filter: WorkflowDialogFilter, phaseTitle: stri
 /** One full-width window row, from content this layout has already shaped. */
 const fullRow = (content: WorkflowCardLine): WindowRow => ({ kind: "full", cells: content });
 
+/**
+ * The phases pane's rows: one per group, windowed around the selection, with a
+ * finished phase showing its tick and an unfinished one its number.
+ *
+ * Extracted so the hub's run page (page **W**) draws the same rows the
+ * inspector's overview level does — one builder, two surfaces, no drift.
+ */
+export function phaseListRows(options: {
+  groups: readonly PhaseGroup[];
+  selectedPhase: number;
+  capacity: number;
+  width: number;
+  glyphs: WorkflowDialogGlyphs;
+}): WorkflowCardLine[] {
+  const { groups, selectedPhase, capacity, width, glyphs } = options;
+  const rows: WorkflowCardLine[] = [];
+  const digits = String(groups.length).length;
+  const visible = windowRange(selectedPhase, groups.length, capacity);
+  for (let i = visible.start; i < Math.min(visible.end, groups.length); i++) {
+    const group = groups[i];
+    const selected = i === selectedPhase;
+    const color: WorkflowCardColor =
+      selected ? "accent"
+      : group.status === "done" ? "success"
+      : group.status === "failed" ? "error"
+      : "dim";
+    // An unfinished phase shows its number where a finished one shows a glyph —
+    // so the list doubles as a numbered plan of the run.
+    const glyph =
+      group.status === "done" ? glyphs.tick
+      : group.status === "failed" ? glyphs.cross
+      : String(i + 1);
+    rows.push(
+      rightAlign(
+        [
+          { text: " " },
+          { text: selected ? glyphs.pointer : " ", color: "accent" },
+          { text: " " },
+          { text: glyph.padStart(digits), color },
+          { text: " " },
+          { text: group.title, color },
+        ],
+        group.totalCount === 0 ? [] : [{ text: `${group.doneCount}/${group.totalCount} `, color }],
+        width,
+      ),
+    );
+  }
+  return rows;
+}
+
 
 /* ------------------------------------------------------------------------- *
  * Detail sections
@@ -617,7 +667,7 @@ const detailBody = (text: string, width: number): WorkflowCardLine =>
   clampLine([{ text: `   ${text}`, color: "dim" }], width);
 
 /** The row for one agent, as it appears in whichever pane is listing agents. */
-function agentRow(options: {
+export function agentRow(options: {
   entry: WorkflowAgentEntry;
   selected: boolean;
   compact: boolean;
@@ -709,38 +759,13 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const entry = view.selectedEntry;
 
   // ---- The pane listing phases, shown only at the overview level.
-  const phaseRows: WorkflowCardLine[] = [];
-  const digits = String(view.groups.length).length;
-  const phases = windowRange(view.clampedPhase, view.groups.length, capacity);
-  for (let i = phases.start; i < Math.min(phases.end, view.groups.length); i++) {
-    const group = view.groups[i];
-    const selected = i === view.clampedPhase;
-    const color: WorkflowCardColor =
-      selected ? "accent"
-      : group.status === "done" ? "success"
-      : group.status === "failed" ? "error"
-      : "dim";
-    // An unfinished phase shows its number where a finished one shows a glyph —
-    // so the list doubles as a numbered plan of the run.
-    const glyph =
-      group.status === "done" ? glyphs.tick
-      : group.status === "failed" ? glyphs.cross
-      : String(i + 1);
-    phaseRows.push(
-      rightAlign(
-        [
-          { text: " " },
-          { text: selected ? glyphs.pointer : " ", color: "accent" },
-          { text: " " },
-          { text: glyph.padStart(digits), color },
-          { text: " " },
-          { text: group.title, color },
-        ],
-        group.totalCount === 0 ? [] : [{ text: `${group.doneCount}/${group.totalCount} `, color }],
-        leftWidth,
-      ),
-    );
-  }
+  const phaseRows = phaseListRows({
+    groups: view.groups,
+    selectedPhase: view.clampedPhase,
+    capacity,
+    width: leftWidth,
+    glyphs,
+  });
 
   // ---- The pane listing this phase's agents. It is the right pane at the
   // overview level and the left pane in the subview, so it is built once.

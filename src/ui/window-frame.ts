@@ -318,7 +318,26 @@ export interface PaneGeometry {
  * window tearing when its two cells cannot both be full width.
  */
 export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad = PANE_PADDING): PaneGeometry {
-  const list = leftPaneWidth(width, listWidth, pad);
+  return geometryForList(width, leftPaneWidth(width, listWidth, pad), pad);
+}
+
+/**
+ * The hub's split: the master cell takes half the cells, not a third.
+ *
+ * The hub's master is a roster with columns of its own — name, description,
+ * stats — not the inspector's short labels, so the third-of-the-width cap that
+ * keeps the inspector readable would starve it. Half the cells each way, with
+ * the detail pane keeping at least its last column, is the placement every hub
+ * page draws: the roster beside a preview, a run, or a transcript.
+ */
+export function hubPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {
+  const available = Math.max(2, width - FRAME_BARS - 4 * pad);
+  const list = Math.max(1, Math.min(Math.floor(available / 2), available - 1));
+  return geometryForList(width, list, pad);
+}
+
+/** Both splits' cells, from the master cell's content columns. */
+function geometryForList(width: number, list: number, pad: number): PaneGeometry {
   const leftCellWidth = list + 2 * pad;
   const rightCellWidth = paneRightWidth(width, list, pad) + 2 * pad;
   return { listWidth: list, detailWidth: rightCellWidth - 2 * pad, leftCellWidth, rightCellWidth, pad };

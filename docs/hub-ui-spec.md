@@ -12,12 +12,21 @@ in the same change). All frames are drawn at 120 columns; `f` maximized twins
 redraw the same pages at terminal size.
 
 **Implementation status.** Landed: the shared window component
-(`src/ui/window-frame.ts`) and the grouped-page **R** roster
-(`src/ui/agent-hub.ts` — `SUBAGENTS` by lifecycle, then `WORKFLOWS` with
-run-state glyphs and `done/total agents`, headers non-selectable). Handed off:
-right-pane routing for a workflow selection (**W**, **WA**, **SAL**, **L**),
-entry-point consolidation onto this window, per-row key dispatch, the status
-strip, the minimum-size ladder, and the transcript block grammar in T/WA.
+(`src/ui/window-frame.ts`, plus `hubPaneGeometry` for the hub's half-width
+master pane); the grouped-page **R** roster (`src/ui/agent-hub.ts` —
+`SUBAGENTS` by lifecycle, then `WORKFLOWS` with run-state glyphs and
+`done/total agents`, headers non-selectable); right-pane routing for every
+page (**T**, **SL**, **W**, **WA**, **SAL**, **L**) through a per-instance page
+enum, with `enterPage`/`popPage` implementing the transition map and the
+breadcrumb trail; the transcript pages through the shared `ConversationViewer`
+(the block grammar, with `o`/`ctrl+o` an in-place view state, never a page);
+the status strip; the 40×10 refusal, 40–59 stacked and 60–99 two-pane ladder;
+per-row key dispatch (`p`/`c`/`x`/`k` on subagent rows, `⏎`/`s`/`c` on
+workflow rows); and `AgentHubInitial.runId` for focusing a run on open.
+Handed off: rewiring `/agents → Workflows` and `openWorkflowFromFleet` onto
+`ctx.ui` + the hub deps (the legacy inspector remains the adapter those entry
+points use), and the per-tool-call expand state surviving a page round-trip
+(it survives resizes; rebuilding the viewer for a page resets it).
 
 ## Pane invariant (the one rule that decides every layout)
 
