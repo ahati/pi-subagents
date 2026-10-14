@@ -15,7 +15,12 @@
 
 import { cpus } from "node:os";
 import { Worker } from "node:worker_threads";
-import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
+import {
+  type JournalKeyInput,
+  journalKey,
+  type WorkflowJournalEntry,
+  type WorkflowJournalGate,
+} from "./journal.js";
 import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
 import { extractMeta, type WorkflowMeta } from "./meta.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "./progress.js";
@@ -35,6 +40,15 @@ export const WORKFLOW_NESTED_CAP = 256;
 
 /** How much of a prompt or result is kept for the UI. */
 const PREVIEW_LENGTH = 200;
+
+/**
+ * How much of a gate's output the journal keeps.
+ *
+ * A gate is routinely a whole test suite, so the raw capture is unbounded and
+ * a journal line is not the place for it. The tail is kept because that is
+ * where a run's summary is; the head is the part a reader can regenerate.
+ */
+const GATE_OUTPUT_TAIL = 2000;
 
 export class WorkflowRuntimeError extends Error {}
 
@@ -168,6 +182,15 @@ export interface WorkflowGateResult {
   ok: boolean;
   /** Combined stdout/stderr, or whatever the host wants surfaced as the failure. */
   output: string;
+  /**
+   * The directory the command actually ran in, when the host knows it.
+   *
+   * Resolved by the host, which is the only side that knows whether the gate
+   * ran in a worktree or fell back to the session's own tree. Carried back so
+   * the run's journal can record which tree was verified long after the
+   * worktree is gone.
+   */
+  cwd?: string;
 }
 
 /** The one seam between a workflow and the rest of the extension. */
@@ -527,7 +550,7 @@ async function applyGate(
   command: string,
   agentId: string,
   runGate: NonNullable<WorkflowHost["runGate"]>,
-): Promise<WorkflowSpawnResult> {
+): Promise<{ result: WorkflowSpawnResult; gate: WorkflowJournalGate }> {
   const outcome =
     result.gate ??
     (await runGate(command, {
@@ -537,10 +560,26 @@ async function applyGate(
       ...(result.cwd !== undefined ? { cwd: result.cwd } : {}),
     }));
   const { gate: _ran, ...kept } = result;
-  if (outcome.ok) return kept;
+  // Bounded here rather than at the journal write, so the one place that
+  // decides what a gate means also decides how much of it is kept. The tail,
+  // because a test run's summary is at the bottom.
+  const trimmed = outcome.output.trim();
+  const gate: WorkflowJournalGate = {
+    ok: outcome.ok,
+    output:
+      trimmed.length <= GATE_OUTPUT_TAIL ? trimmed : `…${trimmed.slice(trimmed.length - GATE_OUTPUT_TAIL)}`,
+    ...(outcome.cwd !== undefined ? { cwd: outcome.cwd } : {}),
+  };
+  if (outcome.ok) return { result: kept, gate };
   const { text: _discarded, ...rest } = kept;
-  const output = outcome.output.trim();
-  return { ...rest, ok: false, error: output === "" ? `Gate command failed: ${command}` : output };
+  return {
+    result: {
+      ...rest,
+      ok: false,
+      error: trimmed === "" ? `Gate command failed: ${command}` : trimmed,
+    },
+    gate,
+  };
 }
 
 /**
@@ -915,8 +954,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
         openLaunches.delete(callId);
         // Re-recorded so this run's journal is complete on its own terms: a
         // resume of a resume must not have to walk back through a chain of
-        // earlier files to find the prefix.
-        recordJournal?.({ index, key: replayed.key, ok: true, text: replayedText });
+        // earlier files to find the prefix. The gate outcome travels with it —
+        // the command is not re-run, but the verdict is still the audit trail
+        // for the answer being handed back.
+        recordJournal?.({
+          index,
+          key: replayed.key,
+          ok: true,
+          text: replayedText,
+          ...(replayed.gate !== undefined ? { gate: replayed.gate } : {}),
+        });
         respond(callId, true, replayedText);
         return;
       }
@@ -1013,6 +1060,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           inflight.add(agentId);
 
           let result: WorkflowSpawnResult;
+          /** This attempt's gate verdict, for the journal entry it settles into. */
+          let gateOutcome: WorkflowJournalGate | undefined;
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
@@ -1056,7 +1105,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 result = applySchema(result, compiledSchema);
               }
               if (result.ok && payload.gate !== undefined && runGate !== undefined) {
-                result = await applyGate(result, payload.gate, agentId, runGate);
+                const applied = await applyGate(result, payload.gate, agentId, runGate);
+                result = applied.result;
+                gateOutcome = applied.gate;
               }
             }
           } catch (error) {
@@ -1099,14 +1150,29 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           if (result.ok) {
             const text = result.text ?? "";
             emit([{ ...common, state: "done", resultPreview: preview(text) }]);
-            recordJournal?.({ index, key, ok: true, text, ...resumeMark });
+            recordJournal?.({
+              index,
+              key,
+              ok: true,
+              text,
+              ...resumeMark,
+              ...(gateOutcome !== undefined ? { gate: gateOutcome } : {}),
+            });
             respond(callId, true, text);
             return;
           }
           // Recorded as a failure rather than left out: a gap would be read as an
           // unchanged prefix on the next resume, silently skipping the retry this
-          // whole mechanism exists to make cheap.
-          recordJournal?.({ index, key, ok: false, ...resumeMark });
+          // whole mechanism exists to make cheap. A failed gate is recorded with
+          // its output and the directory it ran in, so an entry that reads `ok:
+          // false` can be told from a child that simply failed.
+          recordJournal?.({
+            index,
+            key,
+            ok: false,
+            ...resumeMark,
+            ...(gateOutcome !== undefined ? { gate: gateOutcome } : {}),
+          });
           // A dead agent is a null in the script, not a thrown error: Claude Code
           // scripts .filter(Boolean) rather than try/catch around every call.
           emit([

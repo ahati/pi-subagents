@@ -111,6 +111,113 @@ describe("journal files", () => {
     writeFileSync(path, '{"index":"one","key":"k","ok":true}\n[]\nnull\n', "utf-8");
     expect(readJournal(path)).toEqual([]);
   });
+
+  it("reads an entry written before gate outcomes were recorded", () => {
+    // Tolerance, not absence: the new fields are additive, so a reader that
+    // required them would make every journal already on disk unreadable.
+    const path = join(dir, "old.jsonl");
+    writeFileSync(path, '{"index":0,"key":"k0","ok":true,"text":"recorded by an older run"}\n', "utf-8");
+
+    expect(readJournal(path)).toEqual([
+      { index: 0, key: "k0", ok: true, text: "recorded by an older run" },
+    ]);
+  });
+});
+
+describe("gate outcomes in the journal", () => {
+  const gated = 'return await agent("fix it", { gate: "npm test" });';
+
+  /** A host that gates live, like one with no worktree of its own. */
+  function gatedHost(gate: { ok: boolean; output: string; cwd?: string }) {
+    const calls: WorkflowSpawnRequest[] = [];
+    return {
+      calls,
+      host: {
+        async spawnAgent(request: WorkflowSpawnRequest) {
+          calls.push(request);
+          return { ok: true, text: "fixed" };
+        },
+        abortAgent() {},
+        async runGate() {
+          return gate;
+        },
+      },
+    };
+  }
+
+  it("records a passing gate's output and the directory it ran in", async () => {
+    const stub = gatedHost({ ok: true, output: "3 passing", cwd: "/repo/.git/worktrees/wf-agent-0" });
+    const journal = recorder();
+
+    const result = await run(gated, { host: stub.host, journal });
+
+    expect(result.value).toBe("fixed");
+    expect(stub.calls).toHaveLength(1);
+    expect(journal.entries).toEqual([
+      {
+        index: 0,
+        key: journalKey({ prompt: "fix it", gate: "npm test" }),
+        ok: true,
+        text: "fixed",
+        gate: { ok: true, output: "3 passing", cwd: "/repo/.git/worktrees/wf-agent-0" },
+      },
+    ]);
+  });
+
+  it("records a failing gate's output and cwd, and still fails the agent", async () => {
+    const stub = gatedHost({ ok: false, output: "FAIL src/auth.test.ts\n1 failing", cwd: "/repo" });
+    const journal = recorder();
+
+    const result = await run(gated, { host: stub.host, journal });
+
+    expect(result.value).toBeNull();
+    expect(journal.entries).toEqual([
+      {
+        index: 0,
+        key: journalKey({ prompt: "fix it", gate: "npm test" }),
+        ok: false,
+        gate: { ok: false, output: "FAIL src/auth.test.ts\n1 failing", cwd: "/repo" },
+      },
+    ]);
+  });
+
+  it("keeps only the tail of a long gate output", async () => {
+    // A test run's summary is at the bottom, and an unbounded capture would
+    // bloat the journal with the whole log of a failing suite.
+    const noise = Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n");
+    const stub = gatedHost({ ok: true, output: `${noise}\n3 passing`, cwd: "/repo" });
+    const journal = recorder();
+
+    await run(gated, { host: stub.host, journal });
+
+    const output = journal.entries[0]?.gate?.output ?? "";
+    expect(output.endsWith("3 passing")).toBe(true);
+    expect(output.startsWith("…")).toBe(true);
+    expect(output).not.toContain("line 0\n");
+    expect(output.length).toBeLessThanOrEqual(2001);
+  });
+
+  it("keeps a replayed gate outcome when re-recording the entry", async () => {
+    // The gate is not re-run on a replay, but its verdict is still the audit
+    // trail for the answer being handed back — dropping it would make the
+    // resumed run's journal look like an ungated one.
+    const first: WorkflowJournalEntry = {
+      index: 0,
+      key: journalKey({ prompt: "fix it", gate: "npm test" }),
+      ok: true,
+      text: "from the journal",
+      gate: { ok: true, output: "3 passing", cwd: "/repo/.git/worktrees/wf-agent-0" },
+    };
+    const second = recorder();
+
+    const result = await run(gated, {
+      host: gatedHost({ ok: true, output: "x" }).host,
+      journal: { entries: [first], append: second.append },
+    });
+
+    expect(result.value).toBe("from the journal");
+    expect(second.entries).toEqual([first]);
+  });
 });
 
 describe("replay", () => {

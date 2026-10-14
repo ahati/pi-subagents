@@ -187,9 +187,13 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
     // `pi.exec` reports a timeout as `killed` with exit code 0, so the code
     // alone would read a killed gate as a passing one.
     if (result.killed) {
-      return { ok: false, output: output || `Gate command timed out: ${command}` };
+      return { ok: false, output: output || `Gate command timed out: ${command}`, cwd };
     }
-    return { ok: result.code === 0, output };
+    // `cwd` is returned rather than assumed downstream: this is the only place
+    // that knows which directory the command really ran in, and the run's
+    // journal needs to record it — a gate against the child's worktree and one
+    // against the session's tree are otherwise indistinguishable afterwards.
+    return { ok: result.code === 0, output, cwd };
   }
 
   return {
@@ -286,7 +290,14 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
               try {
                 gate = await executeGate(command, worktreePath);
               } catch (error) {
-                gate = { ok: false, output: error instanceof Error ? error.message : String(error) };
+                // `cwd` still travels: a gate that failed to run at all ran
+                // there as far as the record is concerned, and the journal must
+                // not report an empty directory for it.
+                gate = {
+                  ok: false,
+                  output: error instanceof Error ? error.message : String(error),
+                  cwd: worktreePath,
+                };
               }
             };
 

@@ -577,7 +577,7 @@ describe("createWorkflowHost — abort, resume and gate", () => {
 
     const gate = await host.runGate?.("npm test", { agentId: "wf-agent-0", cwd: "/worktree" });
 
-    expect(gate).toEqual({ ok: true, output: "3 passing" });
+    expect(gate).toEqual({ ok: true, output: "3 passing", cwd: "/worktree" });
     expect(exec.mock.calls[0][2]).toMatchObject({ cwd: "/worktree" });
   });
 
@@ -589,16 +589,23 @@ describe("createWorkflowHost — abort, resume and gate", () => {
       manager: stubManager().manager,
     });
 
-    await host.runGate?.("npm test", { agentId: "wf-agent-0" });
+    const gate = await host.runGate?.("npm test", { agentId: "wf-agent-0" });
 
+    // The resolved directory travels back with the verdict, so a journal can
+    // say this gate ran against the session's tree rather than a worktree.
     expect(exec.mock.calls[0][2]).toMatchObject({ cwd: "/session" });
+    expect(gate).toMatchObject({ cwd: "/session" });
   });
 
   it("fails a gate on a non-zero exit and surfaces its output", async () => {
     const exec = vi.fn(async () => execResult({ code: 1, stderr: "1 failing" }));
     const host = createWorkflowHost({ pi: { exec } as any, ctx: ctx(), manager: stubManager().manager });
 
-    expect(await host.runGate?.("npm test", { agentId: "wf-agent-0" })).toEqual({ ok: false, output: "1 failing" });
+    expect(await host.runGate?.("npm test", { agentId: "wf-agent-0" })).toEqual({
+      ok: false,
+      output: "1 failing",
+      cwd: process.cwd(),
+    });
   });
 
   it("fails a gate that was killed, which pi.exec reports with exit code 0", async () => {

@@ -32,6 +32,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
+import type { WorkflowJournalEntry } from "../src/workflow/journal.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "../src/workflow/progress.js";
 import { runWorkflow, type WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { ctx } from "./helpers/boot-extension.js";
@@ -169,10 +170,33 @@ describe("gate on an isolated child", () => {
     expect(gateRuns[0].existed).toBe(true);
     expect(gateRuns[0].sawChildWork).toBe(true);
     expect(result.ok).toBe(true);
-    expect(result.gate).toEqual({ ok: true, output: "3 passing" });
+    expect(result.gate).toEqual({ ok: true, output: "3 passing", cwd: worktreePath });
 
     // …and the copy is still torn down afterwards: verifying it must not keep it.
     expect(existsSync(worktreePath!)).toBe(false);
+  });
+
+  it("journals the worktree path the gate ran in, not the session's tree", async () => {
+    // The audit trail's whole point: after the worktree is gone, the journal is
+    // the only place that can say which tree the gate verified.
+    const { pi, gateRuns } = makePi();
+    const host = createWorkflowHost({ pi, ctx: ctx({ cwd: repo }), manager });
+    const entries: WorkflowJournalEntry[] = [];
+
+    const result = await runWorkflow({
+      script: `${HEAD}return await agent("fix it", { gate: "npm test", isolation: "worktree" });`,
+      host,
+      journal: { append: entry => entries.push(entry) },
+    });
+
+    // The child's answer carries the branch note the manager appends, so only
+    // the leading text is asserted here.
+    expect(String(result.value)).toContain("done");
+    expect(entries).toHaveLength(1);
+    const worktreePath = manager.listAgents()[0].worktree?.path;
+    expect(worktreePath).toBeDefined();
+    expect(gateRuns[0].cwd).toBe(worktreePath);
+    expect(entries[0].gate).toEqual({ ok: true, output: "3 passing", cwd: worktreePath });
   });
 
   it("fails the agent with the gate's output, and still cleans the worktree up", async () => {
