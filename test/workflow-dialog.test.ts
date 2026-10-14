@@ -842,9 +842,12 @@ describe("width", () => {
     }),
   ];
 
-  it("reserves six columns of chrome from the terminal width", () => {
-    expect(workflowDialogContentWidth(86)).toBe(80);
-    expect(Math.max(...dialog({ progress: wide, width: 86 }).map(visibleWidth))).toBe(80);
+  it("spans the whole width the host asks the component to render at", () => {
+    // The overlay hands the component its own box width (the popup's 90% or
+    // the full-screen 100%), and the frame's border and padding are drawn
+    // inside it — so the frame is exactly that wide, not six columns less.
+    expect(workflowDialogContentWidth(86)).toBe(86);
+    expect(Math.max(...dialog({ progress: wide, width: 86 }).map(visibleWidth))).toBe(86);
   });
 
   it("floors the content width at 12 rather than going negative", () => {
@@ -868,7 +871,7 @@ describe("width", () => {
       progress: [agentEntry({ index: 0, label: "日本語のラベルがとても長い場合の折り返し確認", toolCalls: 3 })],
       width: 30,
     });
-    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(30);
   });
 });
 

@@ -6,6 +6,11 @@
  * columns, whichever level is on screen. Otherwise pressing Enter (phases →
  * detail → log) makes the dividers and the right edge jump into a misaligned
  * state.
+ *
+ * That width is the whole of the width the overlay host hands the component:
+ * the frame's border and padding are drawn inside it, so anything the dialog
+ * reserved here would show up as an empty strip along the overlay's right
+ * edge — in the popup and in the full-screen window alike.
  */
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
@@ -88,7 +93,7 @@ describe("workflow dialog window alignment across levels", () => {
     for (const [level, lines] of Object.entries(frames)) {
       expect(lines.length, level).toBeGreaterThan(0);
       for (const line of lines) {
-        expect(visibleWidth(line), `${level}: ${JSON.stringify(line)}`).toBe(RENDER_WIDTH - 6);
+        expect(visibleWidth(line), `${level}: ${JSON.stringify(line)}`).toBe(RENDER_WIDTH);
       }
     }
   });
@@ -104,12 +109,33 @@ describe("workflow dialog window alignment across levels", () => {
 
   it("puts the pane's right bar on the window's right border", () => {
     for (const [level, lines] of Object.entries(frames)) {
-      const width = RENDER_WIDTH - 6;
       for (const line of lines) {
         expect(line.at(-1), `${level}: last glyph`).toBeDefined();
         expect("│┤╮╯".includes(line.at(-1)!), `${level}: ${JSON.stringify(line)}`).toBe(true);
       }
-      void width;
     }
+  });
+
+  it("fills the host's width at each level, leaving no strip on the right", () => {
+    // The frame is the overlay's whole box: its top and bottom rules run to
+    // the last column the host offered, and every row's right border is that
+    // column. A width basis that reserves the dialog's own chrome here would
+    // end every row short and pad the rest of the overlay with blanks.
+    const { instance } = boot();
+    const widths = [RENDER_WIDTH, 87];
+    for (const host of widths) {
+      const levels: string[][] = [instance.render(host)];
+      instance.handleInput("\r");
+      levels.push(instance.render(host));
+      for (const lines of levels) {
+        expect(lines.length, `w=${host}`).toBeGreaterThan(0);
+        expect(lines[0], `w=${host}`).toBe(`╭${"─".repeat(host - 2)}╮`);
+        for (const line of lines) {
+          expect(visibleWidth(line), `w=${host}: ${JSON.stringify(line)}`).toBe(host);
+        }
+      }
+      instance.handleInput("\x1b"); // back to the overview for the next width
+    }
+    instance.dispose();
   });
 });

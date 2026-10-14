@@ -12,6 +12,9 @@ check the entries below for behaviour changes.
 ### Added
 - **Paused agents with no persisted session survive a quit and are re-run by `/continue`.** The pause manifest previously listed only agents with a session file, so `persist_session: false` and queued spawns were lost on quit; each row now carries a respawn recipe (the original prompt plus the model, thinking level, turn cap and isolation the live record held), and `/continue` re-runs it fresh after a restart — reclaiming its handle and alias — while still resuming session-backed agents exactly. The `/pause` and `/continue` reports say so, and the "quitting loses it" warning is now reserved for a paused record with neither a session file nor a prompt. A re-run starts a new conversation: the earlier transcript and tool state are gone.
 
+### Fixed
+- **The workflow inspector's window spans the overlay's full width again.** The layout subtracted its own border and padding columns from the width the overlay host handed it, so the frame stopped six columns short of the right edge and the host padded the rest with blanks — an empty strip in the windowed inspector and in the `f` full-screen one alike. The frame now renders at the whole width it is given, as the agent hub's popup does.
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added

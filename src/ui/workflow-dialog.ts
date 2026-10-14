@@ -21,9 +21,9 @@
  * the agent hub's chat view shows. Esc walks back one level at a time.
  *
  * The window is the hub's popup chrome — title inside the frame, hints in a
- * bordered footer, `border`-coloured rules — sized like it too: the shell
- * fills the same 70%-of-terminal ceiling the hub's overlay caps at, rather
- * than shrink-wrapping the content.
+ * bordered footer, `border`-coloured rules — and sized like it too: the shell
+ * spans the overlay's whole width and fills the same 70%-of-terminal ceiling
+ * the hub's overlay caps at, rather than shrink-wrapping the content.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -354,7 +354,11 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
   /** Whether the dialog is showing full-screen — names the `f` hint accordingly. */
   fullscreen?: boolean;
   now?: number;
-  /** The *terminal* width; the content width is derived from it. */
+  /**
+   * The width the overlay host asks the component to render at — the overlay's
+   * box, not the terminal's. The frame spans all of it; the content width is
+   * derived from it by {@link workflowDialogContentWidth}.
+   */
   width?: number;
   ascii?: boolean;
   spinnerFrame?: number;
@@ -444,9 +448,19 @@ export interface ResolvedWorkflowDialog {
   paused: boolean;
 }
 
-/** Content width. The 6 columns are the dialog's border and padding. */
-export function workflowDialogContentWidth(terminalWidth: number): number {
-  return Math.max(12, terminalWidth - 6);
+/**
+ * The window's width, for the width the overlay host hands the component.
+ *
+ * All of it: the override is built at the hub's geometry — the popup's 90% of
+ * the terminal, or the full-screen 100% — and the frame's own border and
+ * padding are drawn *inside* that box (`windowRow` and `paneBodyRow` spend
+ * four of its columns), so none of it belongs to them. Reserving them here
+ * counts them twice: the frame stops six columns short of the overlay's right
+ * edge, in the popup and in the full-screen window alike, and the host pads
+ * the rest of the box with blanks. Only the narrow-terminal floor remains.
+ */
+export function workflowDialogContentWidth(overlayWidth: number): number {
+  return Math.max(12, overlayWidth);
 }
 
 const clampIndex = (index: number, length: number) =>
@@ -1553,9 +1567,9 @@ export class WorkflowDialog implements Component {
     const view = resolveWorkflowDialog(input);
     const entry = view.selectedEntry;
 
-    // The SAME width basis and pane arithmetic as the segment path — the raw
-    // render width minus the content padding, panes spanning the full window —
-    // so descending to this level moves nothing: the divider and the right bar
+    // The SAME width basis and pane arithmetic as the segment path — the
+    // host's render width itself, panes spanning the full window — so
+    // descending to this level moves nothing: the divider and the right bar
     // stay in the columns the other two levels drew them in.
     const contentWidth = workflowDialogContentWidth(width);
     const leftWidth = leftPaneWidth(contentWidth);
