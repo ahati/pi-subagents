@@ -2773,7 +2773,7 @@ Terse command-style prompts produce shallow, generic work.
         Type.String({
           pattern: "^wf_[a-z0-9-]{6,}$",
           description:
-            "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs.",
+            "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args is usually, but not always, a full cache hit — calls are numbered in the order they arrive, so a pipeline() that interleaves differently the second time misses from that point on.",
         }),
       ),
       // Accepted and ignored, as in Claude Code. Models reach for them because

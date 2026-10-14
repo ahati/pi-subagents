@@ -171,14 +171,22 @@ describe("the resume story it tells", () => {
   });
 
   it("says a miss runs live rather than returning a wrong answer", () => {
-    expect(description).toMatch(/runs live/);
+    // Anchor to the sentence the fix added, not the pre-existing "runs live"
+    // in the prefix sentence above it — that phrase was already there, so
+    // matching it alone would pass on the pre-fix text.
+    expect(description).toContain(
+      "A miss costs tokens, never correctness — a call that does not match its journal entry runs live instead of being handed another agent's answer.",
+    );
   });
+});
 
+describe("the phase matching it documents", () => {
   it("describes phase-title matching as fuzzy, like mergePhases", () => {
     // mergePhases matches on normalized titles where either side may be a
     // prefix of the other; if that ever becomes exact, this anchor fails and
     // the model-facing claim has to be revisited.
     expect(progressSource).toContain("actual.startsWith(wanted) || wanted.startsWith(actual)");
+    expect(progressSource).toContain("title.toLowerCase().trim()");
     expect(description).not.toContain("titles are matched exactly");
     expect(description).toContain("matching is fuzzy");
   });
