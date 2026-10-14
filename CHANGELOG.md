@@ -23,6 +23,8 @@ check the entries below for behaviour changes.
 - **The workflow inspector's window spans the overlay's full width again.** The layout subtracted its own border and padding columns from the width the overlay host handed it, so the frame stopped six columns short of the right edge and the host padded the rest with blanks — an empty strip in the windowed inspector and in the `f` full-screen one alike. The frame now renders at the whole width it is given, as the agent hub's popup does.
 ### Changed
 - **The pause manifest is version 3.** The on-disk format gains an optional `workflows` array — one row per parked workflow run, holding the run id, its journal path, the exact script source, its `args`, the tool call that started one and the park time, so an inline run can be replayed without a file on disk. Reads stay tolerant: the version field is informational, a v1/v2 manifest reads as no parked workflows, and a newer build rewrites the file as v3 on its next state change. Documented in [docs/pause-quit-resume-continue.md §5.2](docs/pause-quit-resume-continue.md).
+### Fixed
+- **`SubagentWorkflow`'s tool description no longer states three things the runtime contradicts.** It quotes the real concurrency floor (`max(1, min(16, cpus - 2))`), no longer promises a 100% cache hit on resume — calls are numbered as they arrive, so a differently interleaved `pipeline()` misses from that point, and a journal carrying an `agent({ resume })` call declines the whole cache; a miss runs the call live rather than returning the wrong answer — and describes `meta.phases` titles as fuzzily matched instead of exact. Model-facing text only; no behavior change.
 
 
 ## [2026.10.14-r1] - 2026-10-14

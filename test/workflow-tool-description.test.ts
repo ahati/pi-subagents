@@ -30,6 +30,15 @@ const workerSource = readFileSync(
   fileURLToPath(new URL("../src/workflow/worker-source.ts", import.meta.url)),
   "utf8",
 );
+/** The runtime sources the prose makes claims about; each new claim anchors back here. */
+const runtimeSource = readFileSync(
+  fileURLToPath(new URL("../src/workflow/runtime.ts", import.meta.url)),
+  "utf8",
+);
+const progressSource = readFileSync(
+  fileURLToPath(new URL("../src/workflow/progress.ts", import.meta.url)),
+  "utf8",
+);
 
 /** The literal string arrays the worker validates against, read from its source. */
 function stringArray(name: string): string[] {
@@ -137,9 +146,49 @@ describe("the limits it quotes", () => {
   });
 
   it("describes the concurrency formula the runtime actually applies", () => {
-    expect(description).toContain("min(16, available CPUs - 2)");
+    expect(description).toContain("max(1, min(16, available CPUs - 2))");
     expect(workflowConcurrency(8)).toBe(6);
     expect(workflowConcurrency(64)).toBe(16);
+    expect(workflowConcurrency(1)).toBe(1);
+    expect(workflowConcurrency(2)).toBe(1);
+  });
+});
+
+describe("the resume story it tells", () => {
+  it("does not promise an unconditional full cache hit", () => {
+    // Calls are numbered as they arrive, so a differently interleaved
+    // pipeline() on replay misses from that point on (journal.ts, "Ordering
+    // under concurrency"). The prose must not promise 100%.
+    expect(description).not.toContain("100% cache hit");
+    expect(description).toContain("cache miss");
+  });
+
+  it("warns that a journal using agent({ resume }) declines replay", () => {
+    // `runWorkflow`: journalResumes = entries.some(entry => entry.resumed)
+    // makes prefixIntact false for the whole journal, not one call.
+    expect(runtimeSource).toContain("journalEntries.some(entry => entry.resumed)");
+    expect(description).toContain("agent({ resume })");
+  });
+
+  it("says a miss runs live rather than returning a wrong answer", () => {
+    // Anchor to the sentence the fix added, not the pre-existing "runs live"
+    // in the prefix sentence above it — that phrase was already there, so
+    // matching it alone would pass on the pre-fix text.
+    expect(description).toContain(
+      "A miss costs tokens, never correctness — a call that does not match its journal entry runs live instead of being handed another agent's answer.",
+    );
+  });
+});
+
+describe("the phase matching it documents", () => {
+  it("describes phase-title matching as fuzzy, like mergePhases", () => {
+    // mergePhases matches on normalized titles where either side may be a
+    // prefix of the other; if that ever becomes exact, this anchor fails and
+    // the model-facing claim has to be revisited.
+    expect(progressSource).toContain("actual.startsWith(wanted) || wanted.startsWith(actual)");
+    expect(progressSource).toContain("title.toLowerCase().trim()");
+    expect(description).not.toContain("titles are matched exactly");
+    expect(description).toContain("matching is fuzzy");
   });
 });
 
