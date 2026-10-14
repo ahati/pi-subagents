@@ -26,7 +26,7 @@
  * itself has (`--resume` in two windows), not a corruption one.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentRecord, EffectiveThinkingLevel, SubagentType, ThinkingLevel } from "./types.js";
 
@@ -120,9 +120,70 @@ export interface PauseStoreData {
   workflows?: PausedWorkflowEntry[];
 }
 
+/** The canonical manifest directory for a cwd: `<cwd>/.pi/subagent-pauses`. */
+export function pauseStoreDir(cwd: string): string {
+  return join(cwd, ".pi", "subagent-pauses");
+}
+
 /** Resolve the canonical storage path for a session-scoped pause manifest. */
 export function resolvePauseStorePath(cwd: string, sessionId: string): string {
-  return join(cwd, ".pi", "subagent-pauses", `${sessionId}.json`);
+  return join(pauseStoreDir(cwd), `${sessionId}.json`);
+}
+
+/**
+ * Delete manifests in `dir` whose owning pi session no longer exists.
+ *
+ * A manifest is keyed by session id (`<sessionId>.json`); once that session
+ * is deleted the park can never be continued, and nothing else ever removes
+ * the file.
+ *
+ * LIMITATION — `sessionExists(id) === false` is taken as proof of death, so a
+ * false negative deletes a live park. The predicate must therefore be able to
+ * see every session an id could belong to; the wiring passes a closure over
+ * the current session id (checked directly, no lookup) plus
+ * `SessionManager.findById(cwd, id, sessionDir)` inside the resolved session
+ * directory, and it skips the sweep entirely when that directory is unknown.
+ * An id whose session lives elsewhere (a different session dir, another
+ * machine) cannot be proven alive here and would be swept, which is why the
+ * caller must gate on a resolvable session dir rather than pass `() => false`
+ * as a fallback. `sessionExists` must also be total (a throw would abort the
+ * sweep).
+ *
+ * Only whole manifest files are considered: `.json.tmp` snapshots and every
+ * other name are left alone, and a manifest's contents are never parsed — a
+ * corrupt file for a gone session is still garbage. Best effort throughout:
+ * an unreadable directory yields [], and a file that cannot be unlinked is
+ * simply left behind. Only the canonical `pauseStoreDir(cwd)` is swept;
+ * manifests that exist solely under a parent cwd (the
+ * `resolvePauseManifestPath` fallback) are out of scope.
+ *
+ * Returns the removed session ids.
+ */
+export function sweepOrphanPauseManifests(
+  dir: string,
+  sessionExists: (sessionId: string) => boolean,
+): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const id = name.slice(0, -5);
+    if (id === "") continue;
+    if (sessionExists(id)) continue;
+    try {
+      unlinkSync(join(dir, name));
+      removed.push(id);
+    } catch {
+      /* a directory named `<id>.json`, or an unwritable entry — leave it */
+    }
+  }
+  return removed;
 }
 
 /** How many parent directories the fallback lookup walks before giving up. */

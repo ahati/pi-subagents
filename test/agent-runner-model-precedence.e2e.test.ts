@@ -109,7 +109,9 @@ describe("frontmatter model precedence vs real pi 1.1.0", () => {
           sessionModel = s.model;
         },
         onToolActivity: (a: any) => {
-          if (a?.type === "end" && typeof a.toolName === "string") activities.push(a.toolName);
+          // Probe warnings are one-shot diagnostics, not tool events: the
+          // model-error assertions below only see them via "warning".
+          if (a?.type === "warning" && typeof a.toolName === "string") activities.push(a.toolName);
         },
       });
     } catch {

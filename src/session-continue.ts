@@ -218,6 +218,18 @@ function lastAssistantText(branch: readonly unknown[]): string | undefined {
   return undefined;
 }
 
+/** Options for `finalReportFromSessionFile`. */
+export interface FinalReportOptions {
+  /**
+   * Skip the drift warning when no report is found. Set by the shape probe
+   * that classifies a manifest row before `/continue` chooses delivery vs
+   * revival: a transcript parked at a tool boundary legitimately has no
+   * report, and warning there would log once per parked entry on every
+   * `/continue`.
+   */
+  quiet?: boolean;
+}
+
 /**
  * The final report a session file ends on, or undefined when it holds none.
  *
@@ -231,8 +243,17 @@ function lastAssistantText(branch: readonly unknown[]): string | undefined {
  * assistant's tool-call message or the batch's toolResult. Walking further
  * back would surface a stale answer from an earlier turn, or the preamble that
  * precedes unanswered calls — neither is this run's report.
+ *
+ * A file that is readable and parses but yields no deliverable report warns
+ * on the console (a manifest row still pointing at a stuck run is otherwise
+ * invisible); a file that cannot be read stays silent, because the revival
+ * path already reports a gone session. Pass `{ quiet: true }` for the shape
+ * probe described on `FinalReportOptions`.
  */
-export function finalReportFromSessionFile(file: string): string | undefined {
+export function finalReportFromSessionFile(
+  file: string,
+  options: FinalReportOptions = {},
+): string | undefined {
   let raw: string;
   try {
     raw = readFileSync(file, "utf-8");
@@ -253,10 +274,22 @@ export function finalReportFromSessionFile(file: string): string | undefined {
     if (message) last = message;
   }
 
-  if (last?.role !== "assistant") return undefined;
+  const reason = noReportReason(last);
+  if (reason) {
+    if (!options.quiet) console.warn(`[pi-subagents-hub] no deliverable final report in ${file}: ${reason}`);
+    return undefined;
+  }
+  return assistantText(last as AssistantMessage) || undefined;
+}
+
+/** Why the transcript's last message is not a deliverable report, if it is not. */
+function noReportReason(last: AgentMessage | undefined): string | undefined {
+  if (last === undefined) return "transcript holds no message entries";
+  if (last.role !== "assistant") return "transcript ends on a non-assistant message";
   const content = Array.isArray(last.content) ? last.content : [];
-  if (content.some(block => block.type === "toolCall")) return undefined;
-  return assistantText(last) || undefined;
+  if (content.some(block => block.type === "toolCall")) return "transcript ends on an unanswered tool call";
+  if (assistantText(last) === "") return "transcript ends on an assistant message with no text";
+  return undefined;
 }
 
 /**
