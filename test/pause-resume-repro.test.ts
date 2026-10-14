@@ -127,8 +127,12 @@ async function spawnRunningChild(b: BootedPi, childFile: string): Promise<string
   return /Agent ID: (\S+)/.exec(textOf(r))![1];
 }
 
-/** A runAgent that settles at once, leaving a completed record with a session file. */
-function finishedRunWithRealSession(childFile: string, report: string) {
+/** A runAgent that settles at once, leaving a settled record with a session file. */
+function finishedRunWithRealSession(
+  childFile: string,
+  report: string,
+  outcome: { steered?: boolean; failure?: string } = {},
+) {
   vi.mocked(runAgent).mockImplementationOnce((_ctx: any, _type: any, _prompt: any, opts: any) => {
     const session = {
       steer: vi.fn().mockResolvedValue(undefined),
@@ -143,8 +147,8 @@ function finishedRunWithRealSession(childFile: string, report: string) {
       responseText: report,
       session,
       aborted: false,
-      steered: false,
-      failure: undefined,
+      steered: outcome.steered ?? false,
+      failure: outcome.failure,
     }) as any;
   });
 }
@@ -164,9 +168,15 @@ function writeFinalReportSession(childFile: string, report: string) {
 }
 
 /** Spawn one background child that finishes at once, reporting `report`. */
-async function spawnFinishedChild(b: BootedPi, childFile: string, report: string, description: string): Promise<string> {
+async function spawnFinishedChild(
+  b: BootedPi,
+  childFile: string,
+  report: string,
+  description: string,
+  outcome: { steered?: boolean; failure?: string } = {},
+): Promise<string> {
   writeFinalReportSession(childFile, report);
-  finishedRunWithRealSession(childFile, report);
+  finishedRunWithRealSession(childFile, report, outcome);
   const r = await b.tools.get("Agent").execute(
     `tc-${description}`,
     { prompt: "go", description, subagent_type: "Explore", run_in_background: true },
@@ -443,7 +453,7 @@ describe("REPRO: completed-but-unconsumed results are captured by /pause and del
     // A settled result is delivered, never revived.
     expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
     expect(manifest().list()).toEqual([]);
-    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Delivered 2 completed agent results.", "info");
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Delivered 2 captured agent results.", "info");
     void idA;
     void idB;
   });
@@ -501,5 +511,73 @@ describe("REPRO: completed-but-unconsumed results are captured by /pause and del
     expect(new PauseStore(resolvePauseStorePath(hermetic!.dir, sid)).list()).toEqual([]);
     void idA;
     void idB;
+  });
+});
+
+describe("REPRO: captured rows carry the status their run settled with", () => {
+  const manifest = () => new PauseStore(resolvePauseStorePath(hermetic!.dir, parentSm!.getSessionId()));
+
+  it("captures each settled agent's real status onto its manifest row", async () => {
+    const b = boot(parentSm);
+    const idDone = await spawnFinishedChild(b, join(hermetic!.dir, "child-done.jsonl"), "report A", "task A");
+    const idSteered = await spawnFinishedChild(b, join(hermetic!.dir, "child-steered.jsonl"), "report B", "task B", {
+      steered: true,
+    });
+    const idError = await spawnFinishedChild(b, join(hermetic!.dir, "child-error.jsonl"), "report C", "task C", {
+      failure: "provider exploded",
+    });
+
+    await b.commands.get("pause").handler("", parentCtx());
+    await flush();
+
+    const byId = new Map(manifest().list().map(e => [e.id, e]));
+    expect(byId.get(idDone)!.status).toBe("completed");
+    expect(byId.get(idSteered)!.status).toBe("steered");
+    expect(byId.get(idError)!.status).toBe("error");
+    // Only the errored row carries a failure text — a resumed-then-completed
+    // record can still hold a stale `error`, and it must not leak into the row.
+    expect(byId.get(idError)!.error).toBe("provider exploded");
+    expect(byId.get(idDone)!.error).toBeUndefined();
+    expect(byId.get(idSteered)!.error).toBeUndefined();
+    expect(byId.get(idError)!.pausedAt).toBeTruthy();
+  });
+
+  it("delivers a captured errored result across quit and /resume with its real status", async () => {
+    // ---- run 1: the run errors, its report is captured, then quit --------
+    const b1 = boot(parentSm);
+    const childFile = join(hermetic!.dir, "child-err.jsonl");
+    await spawnFinishedChild(b1, childFile, "partial report", "task E", { failure: "provider exploded" });
+    await b1.commands.get("pause").handler("", parentCtx());
+    await flush();
+    const sid = parentSm!.getSessionId();
+    expect(manifest().list()[0].status).toBe("error");
+    expect(manifest().list()[0].error).toBe("provider exploded");
+
+    await booted?.get("session_shutdown")?.({ type: "session_shutdown" }, parentCtx());
+    booted = undefined;
+
+    // ---- run 2: pi /resume, then /continue ------------------------------
+    const b2 = bootOnlyResumed();
+    b2.lifecycle.get("session_before_switch")?.({ type: "session_before_switch" }, parentCtx());
+    await b2.lifecycle.get("session_shutdown")?.({ type: "session_shutdown" }, parentCtx());
+    const resumeCtx = parentCtx({ sessionManager: SessionManager.open(parentFile!) });
+    await b2.lifecycle.get("session_start")?.({ type: "session_start", reason: "resume" }, resumeCtx);
+    booted = b2.lifecycle;
+
+    vi.mocked(b2.pi.sendMessage).mockClear();
+    vi.mocked(runAgent).mockClear();
+    await b2.commands.get("continue").handler("", resumeCtx);
+    await flush();
+
+    const sends = vi.mocked(b2.pi.sendMessage).mock.calls
+      .filter(c => (c[0] as any)?.customType === "subagent-notification");
+    expect(sends).toHaveLength(1);
+    const sent = sends[0][0] as any;
+    expect(String(sent.content)).toContain("<status>Error: provider exploded</status>");
+    expect(String(sent.content)).toContain("<result>partial report</result>");
+    expect(sent.details.status).toBe("error");
+    // A settled result is delivered, never revived.
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(new PauseStore(resolvePauseStorePath(hermetic!.dir, sid)).list()).toEqual([]);
   });
 });
