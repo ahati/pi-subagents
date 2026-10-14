@@ -9,8 +9,9 @@
  * session files after a simulated restart (a fresh boot with the manifest
  * still on disk). The session_start hint is pinned here too.
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -340,6 +341,45 @@ describe("/continue", () => {
     expect(revived?.alias).toBe("auth-audit");
   });
 
+  it("classifies a tool-boundary transcript without a drift warning", async () => {
+    // The shape probe treats "no final report" as "needs a run". A parked
+    // transcript legitimately ends on an unanswered call, so the probe must
+    // stay quiet — warn-always would log once per parked entry on every
+    // /continue.
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    const sessionFile = join(hermetic.dir, "agent-session.jsonl");
+    writeFileSync(sessionFile, JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "t1", name: "grep", arguments: {} }],
+        timestamp: Date.now(),
+      },
+    }));
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-old1",
+        type: "Explore",
+        handle: "explore",
+        description: "parked at a tool boundary",
+        sessionFile,
+        pausedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const b = bootOnly();
+    heldRun(resumableSession);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { cmdCtx } = runCommand(b, "continue");
+      await flush();
+      expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Continued 1 agent.", "info");
+      expect(warn.mock.calls.filter(c => String(c[0]).includes("[pi-subagents-hub]"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("keeps entries it could not revive (session file gone) and reports the failure", async () => {
     hermetic = hermeticDir({ settings: { outputTranscript: false } });
     const sessionFile = join(hermetic.dir, "deleted-session.jsonl"); // never created
@@ -600,6 +640,54 @@ describe("pause manifest hint", () => {
       String(c[0]).includes("paused"),
     );
     expect(notifies).toEqual([]);
+  });
+});
+
+describe("orphan pause manifest sweep", () => {
+  /** Seed a manifest under the hermetic cwd and return its directory. */
+  function seedManifests(ids: string[]): string {
+    const dir = join(process.cwd(), ".pi", "subagent-pauses");
+    mkdirSync(dir, { recursive: true });
+    for (const id of ids) writeFileSync(join(dir, `${id}.json`), JSON.stringify({ version: 2, entries: [] }));
+    return dir;
+  }
+
+  it("session_start deletes manifests whose owning session is gone", async () => {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    const sessionDir = join(hermetic.dir, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    // A real session file with the header of the CURRENT session, so the sweep
+    // has to prove s1 alive through SessionManager.findById rather than by id.
+    const real = SessionManager.create(hermetic.dir, sessionDir, { id: "s1" });
+    real.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() } as any);
+
+    const dir = seedManifests(["s1", "gone"]);
+    const b = bootOnly();
+    await b.lifecycle.get("session_start")({ type: "session_start", reason: "resume" }, ctx({
+      sessionManager: {
+        getSessionId: () => "s1",
+        getBranch: () => [],
+        getSessionDir: () => sessionDir,
+      },
+    }));
+
+    expect(existsSync(join(dir, "s1.json"))).toBe(true);
+    expect(existsSync(join(dir, "gone.json"))).toBe(false);
+  });
+
+  it("does not sweep when the session directory is unknown", async () => {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    const dir = seedManifests(["s1", "gone"]);
+    const b = bootOnly();
+    // No getSessionDir on this session manager: an id that cannot be found is
+    // not proof the session is gone, so nothing may be deleted.
+    await b.lifecycle.get("session_start")(
+      { type: "session_start", reason: "resume" },
+      ctx({ sessionManager: { getSessionId: () => "s1", getBranch: () => [] } }),
+    );
+
+    expect(existsSync(join(dir, "s1.json"))).toBe(true);
+    expect(existsSync(join(dir, "gone.json"))).toBe(true);
   });
 });
 

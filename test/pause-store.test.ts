@@ -187,6 +187,83 @@ describe("PauseStore mainTurn (v2)", () => {
   });
 });
 
+/** The sweep helper: a missing export must fail the test, not the file. */
+function sweep(dir: string, sessionExists: (id: string) => boolean): string[] {
+  const fn = storeModule.sweepOrphanPauseManifests;
+  expect(
+    fn,
+    "sweepOrphanPauseManifests is not exported from pause-store.ts",
+  ).toBeTypeOf("function");
+  return fn(dir, sessionExists);
+}
+
+describe("sweepOrphanPauseManifests", () => {
+  /** A manifest dir under the temp dir, as `pauseStoreDir(cwd)` computes it. */
+  function pauseDir(root = tempDir()): string {
+    return join(root, ".pi", "subagent-pauses");
+  }
+
+  it("deletes manifests whose owning session is gone and keeps live ones", () => {
+    const dir = pauseDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "live.json"), JSON.stringify({ version: 2, entries: [] }));
+    writeFileSync(join(dir, "dead.json"), JSON.stringify({ version: 2, entries: [] }));
+
+    const removed = sweep(dir, id => id === "live");
+
+    expect(removed).toEqual(["dead"]);
+    expect(existsSync(join(dir, "live.json"))).toBe(true);
+    expect(existsSync(join(dir, "dead.json"))).toBe(false);
+  });
+
+  it("returns [] when the manifest directory does not exist", () => {
+    const dir = pauseDir();
+    expect(sweep(dir, () => false)).toEqual([]);
+  });
+
+  it("ignores .json.tmp snapshots, non-.json names and a bare .json", () => {
+    const dir = pauseDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "dead.json.tmp"), "{}");
+    writeFileSync(join(dir, "notes.txt"), "hi");
+    writeFileSync(join(dir, ".json"), "{}");
+    writeFileSync(join(dir, "dead.json"), "{}");
+
+    const removed = sweep(dir, () => false);
+
+    expect(removed).toEqual(["dead"]);
+    expect(existsSync(join(dir, "dead.json.tmp"))).toBe(true);
+    expect(existsSync(join(dir, "notes.txt"))).toBe(true);
+    expect(existsSync(join(dir, ".json"))).toBe(true);
+  });
+
+  it("does not throw when an entry named <id>.json is a directory", () => {
+    const dir = pauseDir();
+    mkdirSync(join(dir, "adir.json"), { recursive: true });
+    writeFileSync(join(dir, "dead.json"), "{}");
+
+    expect(sweep(dir, () => false)).toEqual(["dead"]);
+    expect(existsSync(join(dir, "adir.json"))).toBe(true);
+  });
+
+  it("deletes a corrupt manifest whose session is gone", () => {
+    const dir = pauseDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "dead.json"), "{ not json");
+
+    expect(sweep(dir, () => false)).toEqual(["dead"]);
+    expect(existsSync(join(dir, "dead.json"))).toBe(false);
+  });
+
+  it("pauseStoreDir names the canonical manifest directory", () => {
+    const root = tempDir();
+    expect(storeModule.pauseStoreDir(root)).toBe(join(root, ".pi", "subagent-pauses"));
+    expect(storeModule.resolvePauseStorePath(root, "s1")).toBe(
+      join(storeModule.pauseStoreDir(root), "s1.json"),
+    );
+  });
+});
+
 describe("resolvePauseManifestPath fallback", () => {
   it("returns the canonical path for a session with no manifest yet", () => {
     const dir = tempDir();

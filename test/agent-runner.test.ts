@@ -2379,11 +2379,15 @@ describe("agent-runner unknown built-in tools", () => {
 
     expect(result.responseText).toBe("OK");
     const errorMessages = onToolActivity.mock.calls
-      .map((c) => c[0]?.toolName)
-      .filter((n): n is string => typeof n === "string" && n.startsWith("tools-error:"));
+      .map((c) => c[0])
+      .filter((n): n is { type: string; toolName: string } => typeof n?.toolName === "string" && n.toolName.startsWith("tools-error:"));
     expect(errorMessages).toHaveLength(2);
-    expect(errorMessages.some((m) => m.includes('"reed"'))).toBe(true);
-    expect(errorMessages.some((m) => m.includes('"edt"'))).toBe(true);
+    // A probe is a one-shot warning, never a tool event — it must not be
+    // reported as an "end" that inflates toolUses.
+    expect(errorMessages.every((m) => m.type === "warning")).toBe(true);
+    const messages = errorMessages.map((m) => m.toolName);
+    expect(messages.some((m) => m.includes('"reed"'))).toBe(true);
+    expect(messages.some((m) => m.includes('"edt"'))).toBe(true);
   });
 
   it("stays quiet when all plain tool names are valid built-ins", async () => {

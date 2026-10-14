@@ -2308,6 +2308,42 @@ describe("AgentManager — background resume", () => {
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
   });
 
+  it("does not count probe warnings as tool uses", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
+      opts.onToolActivity?.({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
+      return { responseText: "ok", session: mockSession(), aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "task", {
+      description: "task",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.status).toBe("completed");
+    expect(manager.getRecord(id)!.toolUses).toBe(0);
+  });
+
+  it("counts a matched start/end pair once and still forwards warnings", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled(manager);
+
+    const onToolActivity = vi.fn();
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onToolActivity?.({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
+      opts.onToolActivity?.({ type: "start", toolName: "grep" });
+      opts.onToolActivity?.({ type: "end", toolName: "grep" });
+      return { text: "ok" };
+    });
+
+    const record = await manager.resume(id, "go", undefined, { isBackground: true, onToolActivity });
+    await record!.promise;
+
+    expect(onToolActivity).toHaveBeenCalledWith({ type: "warning", toolName: 'model-error:model "x" pinned by agent "general-purpose" is not a known model' });
+    expect(manager.getRecord(id)!.toolUses).toBe(1);
+  });
+
   it("queues a background resume when the concurrency pool is full", async () => {
     manager = new AgentManager(undefined, 1); // maxConcurrent = 1
     const id = await spawnSettled(manager);

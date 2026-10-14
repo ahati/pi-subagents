@@ -46,9 +46,10 @@ export interface SpawnCapable {
   pauseAgent(id: string): boolean;
   /**
    * Continue a settled agent's session in the background, with the same
-   * wiring a mention-resume gets. `prompt` defaults to a synthetic
-   * continuation. False when there is nothing to continue — unknown id,
-   * still running or queued, and no session to re-prompt.
+   * wiring a mention-resume gets. `prompt` is a continuation message for a
+   * settled record and is ignored for a paused one, which always runs bare
+   * from its transcript. False when there is nothing to continue — unknown
+   * id, still running or queued, and no session to re-prompt.
    */
   resumeAgent(id: string, prompt?: string): Promise<boolean>;
   /**

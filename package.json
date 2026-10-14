@@ -67,7 +67,7 @@
     "extensions": [
       "./dist/index.js"
     ],
-    "video": "https://github.com/tintinweb/pi-subagents/raw/master/media/demo.mp4",
-    "image": "https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png"
+    "video": "https://github.com/ahati/pi-subagents-hub/raw/master/media/demo.mp4",
+    "image": "https://github.com/ahati/pi-subagents-hub/raw/master/media/screenshot.png"
   }
 }

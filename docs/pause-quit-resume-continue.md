@@ -166,6 +166,14 @@ The pending tool calls themselves are never duplicated into the manifest:
 the transcript already holds them, and the transcript is the source of
 truth.
 
+A manifest is only useful to the session that wrote it, so when a session
+starts it sweeps the manifests in that directory whose owning session no
+longer exists — a deleted session can never continue its park, and nothing
+else would ever remove the file. The sweep needs a resolvable session
+directory: without one an id it cannot find is not proof the session is
+gone, and the file is left alone. Rows *inside* a live manifest whose agent
+could not be revived are untouched — they stay parked for a later attempt.
+
 ### 5.3 Shadow continuation (cross-restart main turn)
 
 After a restart, no run exists to un-gate, and pi offers no way to start a

@@ -9,6 +9,13 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Agent-file diagnostics no longer inflate an agent's tool count.** The `tools-error:`/`extension-error:`/`model-error:` probes were reported as tool events, so every `model-error:` on a spawn or resume counted as a tool use in the widget and in `get_subagent_result` stats. They now travel as a `warning` activity, which is forwarded to callers untouched and never counted.
+- **Pause manifests for sessions that no longer exist are deleted when a session starts.** A manifest is keyed by session id and nothing else ever removed it, so a deleted session left `<cwd>/.pi/subagent-pauses/<id>.json` behind forever. `session_start` now sweeps files whose owning session cannot be found, and only when the session directory is resolvable — an id it cannot verify is left alone.
+- **`/continue` logs when a manifest row owes a result it cannot deliver.** A readable session file that parses but ends on a tool call, a tool result or a text-less assistant message was silently skipped and the row parked for a later attempt with no visible reason. The delivery path now warns with the exact reason.
+- **Package media metadata points at this fork.** `pi.video` and `pi.image` still referenced `tintinweb/pi-subagents`; both now use `ahati/pi-subagents-hub`.
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added

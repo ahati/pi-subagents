@@ -35,7 +35,7 @@ import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
-import { type PausedAgentEntry, type PausedMainTurn, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
+import { type PausedAgentEntry, type PausedMainTurn, PauseStore, pauseStoreDir, resolvePauseManifestPath, resolvePauseStorePath, sweepOrphanPauseManifests } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { continueSessionBare, countUnansweredToolCalls, finalReportFromSessionFile } from "./session-continue.js";
@@ -125,15 +125,17 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   };
 
   const callbacks = {
-    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => {
+    onToolActivity: (activity: { type: "start" | "end" | "warning"; toolName: string }) => {
       if (activity.type === "start") {
         state.activeTools.set(activity.toolName + "_" + Date.now(), activity.toolName);
-      } else {
+      } else if (activity.type === "end") {
         for (const [key, name] of state.activeTools) {
           if (name === activity.toolName) { state.activeTools.delete(key); break; }
         }
         state.toolUses++;
       }
+      // A "warning" probe (model-error/tools-error/extension-error) is a
+      // one-shot diagnostic, not a tool use: nothing to paint, nothing to count.
       onStreamUpdate?.();
     },
     onTextDelta: (_delta: string, fullText: string) => {
@@ -955,6 +957,16 @@ export default function (pi: ExtensionAPI) {
     try {
       const sid = ctx.sessionManager?.getSessionId?.();
       if (sid) {
+        // Orphan sweep first: a manifest whose owning session is gone can
+        // never be continued, and this is the only boundary that notices. It
+        // needs a resolvable session directory — without one an id that
+        // cannot be found is not proof the session is gone, and deleting a
+        // live park would lose the user's work.
+        const sessionDir = ctx.sessionManager?.getSessionDir?.();
+        if (sessionDir) {
+          sweepOrphanPauseManifests(pauseStoreDir(ctx.cwd), id =>
+            id === sid || SessionManager.findById(ctx.cwd, id, sessionDir) !== undefined);
+        }
         const store = new PauseStore(resolvePauseManifestPath(ctx.cwd, sid));
         const parked = store.list();
         const mainTurn = store.getMainTurn();
@@ -3655,8 +3667,9 @@ Terse command-style prompts produce shallow, generic work.
       // marker. A conversation that already ended on its final report is that
       // run's result, not a parked run to revive (PRD §5.5; session
       // 01a12ae5); a transcript parked at a tool boundary has no final report
-      // and revives as before.
-      if (!manager.getRecord(entry.id) && finalReportFromSessionFile(entry.sessionFile) !== undefined) {
+      // and revives as before. Quiet: "no report" is the normal parked shape
+      // here, not drift — the delivery call below does the warning.
+      if (!manager.getRecord(entry.id) && finalReportFromSessionFile(entry.sessionFile, { quiet: true }) !== undefined) {
         deliverable.push(entry);
         continue;
       }
@@ -4088,8 +4101,10 @@ Terse command-style prompts produce shallow, generic work.
   /**
    * `/agents resume [handle]` — continue one paused (or any settled) agent by
    * name, or, with no argument, every paused agent. A paused agent that never
-   * started (paused from the queue) is re-queued; one with a session has that
-   * session continued with a synthetic continuation prompt.
+   * started (paused from the queue) is re-queued; one with a session is
+   * continued bare — its transcript is the prompt and any prompt passed here
+   * is ignored (`AgentManager.resume`: a paused record runs bare, docs §4.2
+   * FR-C2).
    */
   async function resumeAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
     if (target !== undefined) {

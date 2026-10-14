@@ -470,9 +470,15 @@ export function resolveDefaultModel(
   return parentModel;
 }
 
-/** Info about a tool event in the subagent. */
+/**
+ * A tool event in the subagent, or a one-shot agent-file diagnostic.
+ *
+ * `warning` is not a tool event: it carries a single misconfiguration message
+ * in `toolName` (a `model-error:`/`tools-error:`/`extension-error:` prefix)
+ * and must never be counted as a tool use.
+ */
 export interface ToolActivity {
-  type: "start" | "end";
+  type: "start" | "end" | "warning";
   toolName: string;
 }
 
@@ -966,7 +972,7 @@ export async function runAgent(
     for (const name of agentConfig.builtinToolNames) {
       if (!knownBuiltins.has(name)) {
         options.onToolActivity?.({
-          type: "end",
+          type: "warning",
           toolName: `tools-error:tool "${name}" requested by agent "${type}" is not a known built-in`,
         });
       }
@@ -985,7 +991,7 @@ export async function runAgent(
   // loads, so there is nothing to exclude.
   if (hasExcludes && noExtensions) {
     options.onToolActivity?.({
-      type: "end",
+      type: "warning",
       toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads nothing`,
     });
   }
@@ -996,7 +1002,7 @@ export async function runAgent(
     for (const name of excludeNames) {
       if (!discoveredNames.has(name)) {
         options.onToolActivity?.({
-          type: "end",
+          type: "warning",
           toolName: `extension-error:exclude_extensions: "${name}" for agent "${type}" did not match any discovered extension`,
         });
       }
@@ -1009,7 +1015,7 @@ export async function runAgent(
     for (const name of keepNames) {
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
-          type: "end",
+          type: "warning",
           toolName: excludeNames.has(name)
             ? `extension-error:extension "${name}" is in both extensions: and exclude_extensions: for agent "${type}" — exclude wins`
             : `extension-error:extension "${name}" requested by agent "${type}" was not loaded`,
@@ -1019,7 +1025,7 @@ export async function runAgent(
     for (const name of extNames) {
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
-          type: "end",
+          type: "warning",
           toolName: `extension-error:ext:${name} referenced by agent "${type}" but extension "${name}" is not loaded (check extensions:/exclude_extensions:)`,
         });
       }
@@ -1062,7 +1068,7 @@ export async function runAgent(
     const notFound = slashIdx === -1
       || !ctx.modelRegistry.find(agentConfig.model.slice(0, slashIdx), agentConfig.model.slice(slashIdx + 1));
     options.onToolActivity?.({
-      type: "end",
+      type: "warning",
       toolName: `model-error:model "${agentConfig.model}" pinned by agent "${type}" is ${notFound ? "not a known model" : "unavailable (provider not authenticated or model disabled)"} — running on the parent model instead`,
     });
   }
@@ -1254,7 +1260,7 @@ export async function runAgent(
   await session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({
-        type: "end",
+        type: "warning",
         toolName: `extension-error:${err.extensionPath}`,
       });
     },

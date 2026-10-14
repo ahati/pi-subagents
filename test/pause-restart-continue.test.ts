@@ -152,6 +152,113 @@ function argsContainTools(args: unknown[], tools: unknown): boolean {
   return args.some((arg) => arg === tools || (typeof arg === "object" && arg !== null && (arg as any).tools === tools));
 }
 
+/** A JSONL session file with the given entries, written to the current temp dir. */
+function writeTranscript(dir: string, entries: unknown[]): string {
+  const file = join(dir, "report-transcript.jsonl");
+  writeFileSync(file, entries.map(e => (typeof e === "string" ? e : JSON.stringify(e))).join("\n"));
+  return file;
+}
+
+/** An assistant entry carrying the given content blocks. */
+function assistantEntry(content: unknown[]): unknown {
+  return { type: "message", message: { role: "assistant", content, timestamp: Date.now() } };
+}
+
+/** A user entry. */
+function userEntry(text: string): unknown {
+  return { type: "message", message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } };
+}
+
+describe("finalReportFromSessionFile", () => {
+  let dir: string | undefined;
+  let warn: ReturnType<typeof vi.spyOn> | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pi-final-report-"));
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn?.mockRestore();
+    warn = undefined;
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  async function read(file: string, options?: unknown) {
+    const mod = await loadSeam();
+    expect(
+      mod.finalReportFromSessionFile,
+      "src/session-continue.ts must export finalReportFromSessionFile",
+    ).toBeTypeOf("function");
+    return options === undefined ? mod.finalReportFromSessionFile(file) : mod.finalReportFromSessionFile(file, options);
+  }
+
+  it("returns the last assistant text without warning", async () => {
+    const file = writeTranscript(dir!, [
+      userEntry("go"),
+      assistantEntry([{ type: "text", text: "the final report" }]),
+    ]);
+
+    expect(await read(file)).toBe("the final report");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns when the transcript ends on an unanswered tool call", async () => {
+    const file = writeTranscript(dir!, [
+      userEntry("go"),
+      assistantEntry([{ type: "toolCall", id: "t1", name: "grep", arguments: {} }]),
+    ]);
+
+    expect(await read(file)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(vi.mocked(warn!).mock.calls[0][0]);
+    expect(line).toContain("[pi-subagents-hub]");
+    expect(line).toContain("unanswered tool call");
+  });
+
+  it("warns when the transcript ends on a non-assistant message", async () => {
+    const file = writeTranscript(dir!, [
+      assistantEntry([{ type: "text", text: "preamble" }]),
+      { type: "message", message: { role: "toolResult", toolCallId: "t1", content: [], timestamp: Date.now() } },
+    ]);
+
+    expect(await read(file)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(warn!).mock.calls[0][0])).toContain("non-assistant");
+  });
+
+  it("warns when the transcript ends on an assistant message with no text", async () => {
+    const file = writeTranscript(dir!, [userEntry("go"), assistantEntry([])]);
+
+    expect(await read(file)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(warn!).mock.calls[0][0])).toContain("no text");
+  });
+
+  it("warns when the file holds no parseable message entries", async () => {
+    const file = writeTranscript(dir!, ["not json", "", "also not json"]);
+
+    expect(await read(file)).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(warn!).mock.calls[0][0])).toContain("no message entries");
+  });
+
+  it("stays silent when the file does not exist", async () => {
+    expect(await read(join(dir!, "missing.jsonl"))).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the caller opts out with quiet", async () => {
+    const file = writeTranscript(dir!, [
+      assistantEntry([{ type: "toolCall", id: "t1", name: "grep", arguments: {} }]),
+    ]);
+
+    expect(await read(file, { quiet: true })).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("M1 shadow continuation (continueSessionBare)", () => {
   let dir: string | undefined;
 
