@@ -101,7 +101,7 @@ Three things the table cannot show:
 
 ## Ownership
 
-`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts`). `subagents:rpc:stop`, `:pause`, `:resume` and `:steer` enforce it through one shared check (`assertOwned` in `src/cross-extension-rpc.ts`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting, pausing, resuming or redirecting it out from under that owner turns another extension's request into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own.
+`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts`). `subagents:rpc:stop`, `:pause`, `:resume` and `:steer` enforce it through one shared check (`assertOwned` in `src/cross-extension-rpc.ts`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting, pausing, resuming or redirecting it out from under that owner turns another extension's request into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own. The in-process pause funnel (`pauseAgentRecord` in `src/index.ts`) applies the same test, so a pause from a command, the fleet list or the hub is refused with the same reason whichever side names the id; the funnel is where a by-id `/agents pause` naming a workflow child stops.
 
 Two asymmetries to know about, stated as they are:
 

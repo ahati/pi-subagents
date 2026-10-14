@@ -3460,13 +3460,20 @@ Terse command-style prompts produce shallow, generic work.
    * event cannot drift from any surface's idea of what happened. Returns why
    * the pause was refused, or undefined when it landed. Silent on purpose:
    * each caller's feedback shape differs (toast, row glyph, reply envelope).
+   *
+   * The ownership refusal is enforced here too, not only at the surfaces: an
+   * agent another agent or a workflow owns is being waited on by that owner,
+   * so no caller may park it. Ownership is checked first — a workflow child is
+   * also `blocking`, and the ownership is the reason that does not change.
    */
   function pauseAgentRecord(record: AgentRecord): string | undefined {
-    const refusal = record.isBackground === false
-      ? "it is blocking its caller"
-      : record.worktree
-        ? "worktree-isolated runs cannot pause"
-        : undefined;
+    const refusal = !isTopLevelAgent(record)
+      ? "it is owned by another agent or workflow"
+      : record.isBackground === false
+        ? "it is blocking its caller"
+        : record.worktree
+          ? "worktree-isolated runs cannot pause"
+          : undefined;
     if (refusal || !manager.pause(record.id)) return refusal ?? "not pausable";
     pi.events.emit("subagents:paused", {
       id: record.id,
@@ -4032,7 +4039,8 @@ Terse command-style prompts produce shallow, generic work.
    * argument, every active top-level agent. Pausing interrupts the run but
    * keeps the record and session: `/agents resume` (or a `@handle` mention)
    * continues the same conversation later. Foreground agents (a caller is
-   * blocked on them) and worktree-isolated runs refuse, in both forms.
+   * blocked on them), worktree-isolated runs, and agents owned by another
+   * agent or a workflow refuse, in both forms.
    */
   async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
     if (target !== undefined) {
