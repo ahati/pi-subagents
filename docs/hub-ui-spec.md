@@ -11,6 +11,14 @@ behind (keep working) or a deliberate deviation was accepted (update this file
 in the same change). All frames are drawn at 120 columns; `f` maximized twins
 redraw the same pages at terminal size.
 
+**Implementation status.** Landed: the shared window component
+(`src/ui/window-frame.ts`) and the grouped-page **R** roster
+(`src/ui/agent-hub.ts` — `SUBAGENTS` by lifecycle, then `WORKFLOWS` with
+run-state glyphs and `done/total agents`, headers non-selectable). Handed off:
+right-pane routing for a workflow selection (**W**, **WA**, **SAL**, **L**),
+entry-point consolidation onto this window, per-row key dispatch, the status
+strip, the minimum-size ladder, and the transcript block grammar in T/WA.
+
 ## Pane invariant (the one rule that decides every layout)
 
 **The left pane is always the parent level; the right pane is always the
