@@ -76,6 +76,9 @@ function ctx(hasUI = false, setWidget = vi.fn()) {
 
 const readyEmits = (pi: any): unknown[] =>
   pi.events.emit.mock.calls.filter((c: any[]) => c[0] === "subagents:ready");
+/** Emits of `event` carrying `id` in the payload. */
+const idEmits = (pi: any, event: string, id: string): unknown[] =>
+  pi.events.emit.mock.calls.filter((c: any[]) => c[0] === event && c[1]?.id === id);
 const onCallsFor = (pi: any, channel: string): unknown[] =>
   pi.events.on.mock.calls.filter((c: any[]) => c[0] === channel);
 
@@ -185,6 +188,94 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
       );
       expect(steerReply![1]).toEqual({ success: true });
       expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", { id, message: "also fix the lint" });
+    } finally {
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
+  // The resume funnel is where `subagents:resumed` lives, so the bus path and
+  // every UI surface announce the same thing. A gate-parked resume continues
+  // the ORIGINAL run — no second start callback fires.
+  it("pause then resume over RPC emits subagents:resumed and does not re-emit subagents:started", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+
+    await lifecycle.get("session_start")({}, ctx());
+
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.({ messages: [], subscribe: () => vi.fn() });
+      return new Promise(() => {}) as any; // keep the run alive behind its gate
+    });
+    try {
+      await busHandlers.get("subagents:rpc:spawn")!({
+        requestId: "req-resume-spawn",
+        type: "general-purpose",
+        prompt: "go",
+        options: { description: "rpc resume test" },
+      });
+      const spawnReply = pi.events.emit.mock.calls.find(
+        (c: any[]) => c[0] === "subagents:rpc:spawn:reply:req-resume-spawn",
+      );
+      const id: string = spawnReply![1].data.id;
+      expect(idEmits(pi, "subagents:started", id), "one start for the spawn").toHaveLength(1);
+
+      await busHandlers.get("subagents:rpc:pause")!({ requestId: "req-resume-pause", agentId: id });
+      const pauseReply = pi.events.emit.mock.calls.find(
+        (c: any[]) => c[0] === "subagents:rpc:pause:reply:req-resume-pause",
+      );
+      expect(pauseReply![1]).toEqual({ success: true });
+      expect(pi.events.emit).toHaveBeenCalledWith("subagents:paused", {
+        id,
+        type: "general-purpose",
+        description: "rpc resume test",
+      });
+
+      await busHandlers.get("subagents:rpc:resume")!({ requestId: "req-resume-resume", agentId: id });
+      const resumeReply = pi.events.emit.mock.calls.find(
+        (c: any[]) => c[0] === "subagents:rpc:resume:reply:req-resume-resume",
+      );
+      expect(resumeReply![1]).toEqual({ success: true });
+      expect(pi.events.emit).toHaveBeenCalledWith("subagents:resumed", {
+        id,
+        type: "general-purpose",
+        description: "rpc resume test",
+      });
+      // The gate-parked resume continues the original run in place.
+      expect(idEmits(pi, "subagents:started", id), "no second start on resume").toHaveLength(1);
+    } finally {
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
+  it("a refused RPC resume emits no subagents:resumed", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+
+    await lifecycle.get("session_start")({}, ctx());
+
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.({ messages: [], subscribe: () => vi.fn() });
+      return new Promise(() => {}) as any; // still running: nothing to resume
+    });
+    try {
+      await busHandlers.get("subagents:rpc:spawn")!({
+        requestId: "req-refuse-spawn",
+        type: "general-purpose",
+        prompt: "go",
+        options: { description: "rpc refusal test" },
+      });
+      const spawnReply = pi.events.emit.mock.calls.find(
+        (c: any[]) => c[0] === "subagents:rpc:spawn:reply:req-refuse-spawn",
+      );
+      const id: string = spawnReply![1].data.id;
+
+      await busHandlers.get("subagents:rpc:resume")!({ requestId: "req-refuse-resume", agentId: id });
+
+      const resumeReply = pi.events.emit.mock.calls.find(
+        (c: any[]) => c[0] === "subagents:rpc:resume:reply:req-refuse-resume",
+      );
+      expect(resumeReply![1]).toEqual({ success: false, error: "Agent cannot be resumed" });
+      expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:resumed", expect.anything());
     } finally {
       await lifecycle.get("session_shutdown")();
     }
