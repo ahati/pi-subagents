@@ -1809,6 +1809,19 @@ export class AgentManager {
     );
   }
 
+  /**
+   * Stop an active agent: a running run has its abort signal fired, a queued
+   * one leaves the queue (with its slot never taken). A queued record can be a
+   * parked run whose resume was queued behind a full pool — the only parked run
+   * abort() reaches — so that branch also releases its gate and stops the run
+   * behind it.
+   *
+   * A record merely "paused" is neither running nor queued, so this returns
+   * false and leaves it parked. That asymmetry is deliberate: a parked run is
+   * alive behind its gate, resumable, and was parked on purpose — abort() does
+   * not kill it. A parked run with no queued reopen is stopped only by eviction
+   * (`removeRecord` releases the gate and aborts the run itself).
+   */
   abort(id: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
@@ -2034,14 +2047,16 @@ export class AgentManager {
     // Clear queued agents first
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
-      if (record) {
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        // Same as abort()'s queued branch: a reopen-queued parked run must have
-        // its gate released and its run stopped, not just its entry dropped.
-        this.stopGatedRun(record);
-        count++;
-      }
+      // A parked reopen that settled while queued is already terminal: the
+      // entry is stale (drainQueue drops it), and overwriting its outcome with
+      // "stopped" would report a stop that never happened.
+      if (!record || record.status !== "queued") continue;
+      record.status = "stopped";
+      record.completedAt = Date.now();
+      // Same as abort()'s queued branch: a reopen-queued parked run must have
+      // its gate released and its run stopped, not just its entry dropped.
+      this.stopGatedRun(record);
+      count++;
     }
     this.dequeue(() => true);
     // Abort running agents

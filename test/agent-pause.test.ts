@@ -344,34 +344,39 @@ describe("AgentManager — pause / unpause", () => {
     expect(manager.getRecord(d.id)).toBeUndefined();
   });
 
-  describe("a parked run hands its slot back", () => {
-    /**
-     * Runs released by hand, keyed by prompt, so a test can settle exactly one
-     * agent at a time (spawnHeld's single `release` is overwritten as soon as a
-     * drain starts the next agent). `sessionFor` hands one prompt's run the
-     * fake child session, the moment the runner installs the record's gate.
-     */
-    function heldRuns(sessionFor?: { prompt: string; session: any }) {
-      const releases = new Map<string, (value: any) => void>();
-      vi.mocked(runAgent).mockImplementation((_pi: any, _type: any, prompt: any, opts: any) =>
-        new Promise<any>(resolve => {
-          releases.set(prompt as string, resolve);
-          if (sessionFor?.prompt === prompt) opts.onSessionCreated?.(sessionFor.session);
-        }),
-      );
-      return releases;
-    }
+  // The two describes below cover the parked-run slot accounting end to end:
+  // the release at park time (and the settle that must not free twice), the
+  // re-take on resume, and the queue a reopen waits in when the pool has filled
+  // up in the meantime.
 
-    /** Spawn a held background run and wait out its startup. */
-    async function spawnControlled(prompt: string) {
-      const id = manager.spawn(mockPi, mockCtx, "X", prompt, { description: prompt, isBackground: true });
-      await manager.awaitStartup(id);
-      return id;
-    }
+  /**
+   * Runs released by hand, keyed by prompt, so a test can settle exactly one
+   * agent at a time (spawnHeld's single `release` is overwritten as soon as a
+   * drain starts the next agent). `sessionFor` hands one prompt's run the
+   * fake child session, the moment the runner installs the record's gate.
+   */
+  function heldRuns(sessionFor?: { prompt: string; session: any }) {
+    const releases = new Map<string, (value: any) => void>();
+    vi.mocked(runAgent).mockImplementation((_pi: any, _type: any, prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        releases.set(prompt as string, resolve);
+        if (sessionFor?.prompt === prompt) opts.onSessionCreated?.(sessionFor.session);
+      }),
+    );
+    return releases;
+  }
 
-    /** The ids in the manager's own queue, as the tests observe queue position. */
-    const queuedIds = () => (manager as any).queue.map((e: { id: string }) => e.id) as string[];
+  /** Spawn a held background run and wait out its startup. */
+  async function spawnControlled(prompt: string) {
+    const id = manager.spawn(mockPi, mockCtx, "X", prompt, { description: prompt, isBackground: true });
+    await manager.awaitStartup(id);
+    return id;
+  }
 
+  /** The ids in the manager's own queue, as the tests observe queue position. */
+  const queuedIds = () => (manager as any).queue.map((e: { id: string }) => e.id) as string[];
+
+  describe("pause() hands the slot back, resume() re-takes it", () => {
     it("pause() frees the slot a queued agent is waiting for", async () => {
       manager = new AgentManager(undefined, 1);
       const releases = heldRuns();
@@ -453,7 +458,9 @@ describe("AgentManager — pause / unpause", () => {
       expect(record).toBeDefined();
       expect(manager.getRecord(a)!.status).toBe("completed");
     });
+  });
 
+  describe("a full pool queues the reopen", () => {
     it("resume() queues the reopen when the pool is full", async () => {
       manager = new AgentManager(undefined, 1);
       const { session } = gateSession();
@@ -562,6 +569,34 @@ describe("AgentManager — pause / unpause", () => {
       expect(manager.getRecord(a)!.status).toBe("stopped");
     });
 
+    it("abortAll() leaves a reopen-queued parked run that settled alone", async () => {
+      manager = new AgentManager(undefined, 1);
+      const { session } = gateSession();
+      const releases = heldRuns({ prompt: "a", session });
+      const a = await spawnControlled("a");
+      manager.pause(a);
+      const b = await spawnControlled("b");
+      await manager.resume(a);
+      expect(manager.getRecord(a)!.status).toBe("queued");
+
+      // The held run dies while its reopen waits in the queue: the record is
+      // no longer "paused", so the settle records the outcome — and the stale
+      // entry stays queued until a drain reaches it.
+      releases.get("a")!(runResult({ aborted: true }));
+      await manager.getRecord(a)!.promise;
+      expect(manager.getRecord(a)!.status).toBe("aborted");
+      expect(queuedIds()).toContain(a);
+
+      // Only B was live: the stopped count and A's status both say the settled
+      // record was not restamped "stopped" by the abort sweep.
+      expect(manager.abortAll()).toBe(1);
+      expect(manager.getRecord(a)!.status).toBe("aborted");
+      expect(manager.getRecord(b)!.status).toBe("stopped");
+
+      releases.get("b")!(runResult({ aborted: true }));
+      await manager.getRecord(b)!.promise;
+    });
+
     it("pause() cancels a queued reopen", async () => {
       manager = new AgentManager(undefined, 1);
       const { session } = gateSession();
@@ -630,10 +665,20 @@ describe("AgentManager — pause / unpause", () => {
       const b = await spawnControlled("b");
       await manager.resume(a);
 
-      const done = manager.waitForAll();
+      let settled = false;
+      const done = manager.waitForAll().then(() => { settled = true; });
+      // B started the moment A parked (the slot went back), so this release
+      // exists — assert the start rather than relying on the incidental
+      // TypeError of a missing release when it does not.
+      expect(releases.has("b")).toBe(true);
+      expect(manager.getRecord(b)!.status).toBe("running");
       releases.get("b")!(runResult());
       await manager.getRecord(b)!.promise;
+      // The drain reopened A: waitForAll must keep waiting for the run the
+      // queue was holding, not resolve with B alone.
       expect(manager.getRecord(a)!.status).toBe("running");
+      await new Promise(r => setTimeout(r, 0));
+      expect(settled).toBe(false);
 
       releases.get("a")!(runResult({ responseText: "a done" }));
       await done;

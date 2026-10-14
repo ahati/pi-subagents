@@ -199,9 +199,12 @@ export interface AgentRecord {
    */
   blocking?: boolean;
   /**
-   * The concurrency pool this run's slot is charged to, set once when it
-   * starts. `settleRun` releases exactly this; `sendToBackground` is the only
-   * thing that moves it, together with the counters.
+   * The concurrency pool this run's slot is charged to, set when it starts.
+   * `settleRun` releases exactly this, and only while `slotHeld` says a slot is
+   * actually held. Two things move it, together with the counters:
+   * `sendToBackground` (a live foreground run handed to the background pool)
+   * and `startResume` (a resumed run always runs detached, in the background
+   * pool).
    */
   chargedPool?: Pool;
   /**

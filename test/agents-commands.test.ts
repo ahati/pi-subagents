@@ -76,8 +76,8 @@ function heldResume() {
   vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}) as any);
 }
 
-function boot() {
-  hermetic = hermeticDir({ settings: { outputTranscript: false } });
+function boot(settings: Record<string, unknown> = {}) {
+  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings } });
   const b = makePi();
   subagentsExtension(b.pi);
   booted = b.lifecycle;
@@ -85,11 +85,11 @@ function boot() {
 }
 
 /** Spawn one running background agent through the real Agent tool. */
-async function spawnRunning(b: BootedPi, description = "find flaky tests"): Promise<string> {
+async function spawnRunning(b: BootedPi, description = "find flaky tests", subagentType = "Explore"): Promise<string> {
   heldRun();
   const r = await b.tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description, subagent_type: "Explore", run_in_background: true },
+    { prompt: "go", description, subagent_type: subagentType, run_in_background: true },
     undefined,
     undefined,
     ctx(),
@@ -185,6 +185,24 @@ describe("/agents resume", () => {
     expect(vi.mocked(resumeAgent)).not.toHaveBeenCalled();
     expect(manager().getRecord(id).status).toBe("running");
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed @explore.", "info");
+  });
+
+  it("reports a resume the full pool queued, not one that started", async () => {
+    const b = boot({ maxConcurrent: 1 });
+    const id = await spawnRunning(b, "parked");
+    runCommand(b, "pause @explore");
+    await flush();
+    expect(manager().getRecord(id).status).toBe("paused");
+
+    // The park handed the slot back, so this sibling takes it before the resume.
+    const holder = await spawnRunning(b, "holder", "general-purpose");
+    expect(manager().getRecord(holder).status).toBe("running");
+
+    const { cmdCtx } = runCommand(b, "resume @explore");
+    await flush();
+
+    expect(manager().getRecord(id).status).toBe("queued");
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Resumed @explore — queued.", "info");
   });
 
   it("resumes every paused agent with no argument", async () => {
