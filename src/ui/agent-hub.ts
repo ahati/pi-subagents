@@ -34,14 +34,16 @@ import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
 import {
-  frameEdge,
-  frameRow,
   hintLine,
-  paneRightWidth,
-  splitEdge,
+  paneGeometry,
+  renderWindow,
   TWO_PANE_MIN_WIDTH,
   UNICODE_PANE_BOX,
+  type WindowRow,
+  windowInnerWidth,
+  windowRange,
 } from "./window-frame.js";
+import type { WorkflowCardLine } from "./workflow-card.js";
 
 /** How long a settled workflow run lingers in the roster (matches the fleet list). */
 const FINISHED_LINGER_MS = 4000;
@@ -53,10 +55,6 @@ const MIN_BODY_ROWS = 3;
 const MAX_NAME_COL = 24;
 /** A terminal shorter than this renders the empty state instead of a broken table. */
 const MIN_TERMINAL_ROWS = 8;
-/** Chat pane: the agent list column's width (matches the workflow inspector's). */
-const CHAT_LIST_WIDTH = 18;
-/** One padding column inside each chat cell, so the cells read clear of the bars. */
-const CHAT_PANE_PADDING = 1;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
 function chatGroupRank(status: AgentRecord["status"]): number {
@@ -767,32 +765,39 @@ export class AgentHub implements Component {
     if (rows < MIN_TERMINAL_ROWS) return [truncateToWidth(this.headerTitle(width), width)];
 
     const th = this.theme;
-    const innerW = width - 4; // border + padding
-    const lines: string[] = [];
+    const innerW = windowInnerWidth(width);
 
-    const border = (s: string) => th.fg("border", s);
-    const row = (content: string) => frameRow(width, content, UNICODE_PANE_BOX, border, "...");
-    const hrTop = border(frameEdge(width, UNICODE_PANE_BOX, "top"));
-    const hrBot = border(frameEdge(width, UNICODE_PANE_BOX, "bottom"));
-    const hrMid = row(th.fg("dim", "─".repeat(innerW)));
-
-    lines.push(hrTop);
-    lines.push(row(this.headerTitle(innerW)));
-    if (this.filterInput || this.filterText) lines.push(row(this.filterLine(innerW)));
-    lines.push(hrMid);
-
-    const bodyRows = Math.max(MIN_BODY_ROWS, rows - lines.length - 3); // hrMid + footer + hrBot
-
-    if (this.view === "activity") {
-      lines.push(...this.renderActivity(bodyRows, innerW, row));
-    } else {
-      lines.push(...this.renderTable(bodyRows, innerW, row));
+    // The window's non-body rows: the title (plus the live filter when one is
+    // open), the rule under it, and — below the body — the rule, the footer
+    // and the bottom edge. The shared window draws them; this decides what
+    // goes in them.
+    const header: WindowRow[] = [{ kind: "full", cells: [{ text: this.headerTitle(innerW) }] }];
+    if (this.filterInput || this.filterText) {
+      header.push({ kind: "full", cells: [{ text: this.filterLine(innerW) }] });
     }
+    const bodyRows = Math.max(MIN_BODY_ROWS, rows - header.length - 4); // rule + rule + footer + hrBot
+    const body = this.view === "activity"
+      ? this.renderActivity(bodyRows)
+      : this.renderTable(bodyRows, innerW);
+    // A full-width rule: the window clamps the run of dashes to its own inner
+    // width, so the surface only says it wants one.
+    const dimRule: WindowRow = { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] };
 
-    lines.push(hrMid);
-    lines.push(row(this.footer(innerW)));
-    lines.push(hrBot);
-    return lines;
+    return paintWindow(
+      renderWindow({
+        width,
+        box: UNICODE_PANE_BOX,
+        rows: [
+          ...header,
+          dimRule,
+          ...body,
+          dimRule,
+          { kind: "full", cells: [{ text: this.footer(innerW) }] },
+        ],
+        ellipsis: "...",
+      }),
+      th,
+    );
   }
 
   /**
@@ -824,9 +829,10 @@ export class AgentHub implements Component {
     }
     this.chatFrameless = true;
     const th = this.theme;
-    // Row shape: `│ ` + list(CHAT_LIST_WIDTH) + ` │ ` + chat + ` │`.
-    const chatW = paneRightWidth(width, CHAT_LIST_WIDTH, CHAT_PANE_PADDING);
-    const chat = this.chatViewer!.render(chatW);
+    // The split is the shared window's: the list cell, the conversation cell
+    // and the three bars partition the width exactly.
+    const panes = paneGeometry(width);
+    const chat = this.chatViewer!.render(panes.detailWidth);
     if (chat.length === 0) return chat; // viewer bailed on width; nothing to frame
 
     const agents = this.chatAgents();
@@ -848,29 +854,25 @@ export class AgentHub implements Component {
       items.push({ kind: "agent", record, selected: i === sel });
     }
 
-    // Window the rows to the conversation's height so the selection stays visible.
+    // Window the rows to the conversation's height, centered on the selection.
     const rows = chat.length;
-    let start = 0;
-    if (items.length > rows) {
-      const selAt = items.findIndex(it => it.kind === "agent" && it.selected);
-      start = Math.max(0, Math.min(selAt - Math.floor(rows / 2), items.length - rows));
-    }
+    const selAt = Math.max(0, items.findIndex(item => item.kind === "agent" && item.selected));
+    const slice = windowRange(selAt, items.length, rows);
 
-    const lines: string[] = [];
-    const listSeg = CHAT_LIST_WIDTH + 2 * CHAT_PANE_PADDING; // padding inside the cell
-    lines.push(th.fg("border", splitEdge(width, listSeg, UNICODE_PANE_BOX, "top", " Agents ")));
+    const body: WindowRow[] = [];
     for (let i = 0; i < rows; i++) {
-      const item = items[start + i];
-      const cell = item == null
-        ? ""
+      const item = items[slice.start + i];
+      const left: WorkflowCardLine = item == null
+        ? []
         : item.kind === "header"
-          ? th.fg("dim", item.label)
-          : truncateToWidth(this.renderChatRow(item.record, item.selected), CHAT_LIST_WIDTH);
-      const padded = cell + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(cell)));
-      lines.push(th.fg("border", "│") + ` ${padded} ` + th.fg("border", "│") + ` ${chat[i]} ` + th.fg("border", "│"));
+          ? [{ text: item.label, color: "dim" }]
+          : [{ text: this.renderChatRow(item.record, item.selected) }];
+      body.push({ kind: "split", left, right: [{ text: chat[i] ?? "" }] });
     }
-    lines.push(th.fg("border", splitEdge(width, listSeg, UNICODE_PANE_BOX, "bottom")));
-    return lines;
+    return paintWindow(
+      renderWindow({ width, box: UNICODE_PANE_BOX, panes, title: " Agents ", rows: body }),
+      th,
+    );
   }
 
   /** One row of the chat pane's list: `❯ ● name`, matching the inspector's. */
@@ -916,12 +918,12 @@ export class AgentHub implements Component {
     return truncateToWidth(th.fg("accent", `/ ${this.filterText}`) + th.fg("dim", `  — ${shown}/${total} match${shown === 1 ? "" : "es"}`), width);
   }
 
-  private renderTable(bodyRows: number, innerW: number, row: (content: string) => string): string[] {
+  private renderTable(bodyRows: number, innerW: number): WindowRow[] {
     const items = this.entries();
     this.clampSelection();
-    const lines: string[] = [];
+    const lines: WindowRow[] = [];
     if (items.length === 0) {
-      lines.push(row(this.theme.fg("dim", this.activeFilter() ? "no matches" : "(no agents yet — spawn one to see it here)")));
+      lines.push(fullRow(this.theme.fg("dim", this.activeFilter() ? "no matches" : "(no agents yet — spawn one to see it here)")));
       return lines;
     }
 
@@ -934,14 +936,13 @@ export class AgentHub implements Component {
     nameCol = Math.min(nameCol, MAX_NAME_COL);
 
     // Window the rows so the selection stays visible.
-    const start = Math.max(0, Math.min(this.selected - Math.floor(bodyRows / 2), items.length - bodyRows));
-    const visible = items.slice(start, start + bodyRows);
+    const slice = windowRange(this.selected, items.length, bodyRows);
 
     for (let i = 0; i < bodyRows; i++) {
-      const entry = visible[i];
-      if (!entry) { lines.push(row("")); continue; }
-      const index = start + i;
-      lines.push(row(this.renderEntry(entry, index === this.selected, nameCol, innerW)));
+      const entry = items[slice.start + i];
+      if (!entry) { lines.push(fullRow("")); continue; }
+      const index = slice.start + i;
+      lines.push(fullRow(this.renderEntry(entry, index === this.selected, nameCol, innerW)));
     }
     return lines;
   }
@@ -997,23 +998,22 @@ export class AgentHub implements Component {
     return finishRow(left, nameCol + 2, (selected ? th.fg("text", stats.join(" · ")) : th.fg("dim", stats.join(" · "))) + stopNote, width);
   }
 
-  private renderActivity(bodyRows: number, innerW: number, row: (content: string) => string): string[] {
+  private renderActivity(bodyRows: number): WindowRow[] {
     const th = this.theme;
-    const lines: string[] = [];
+    const lines: WindowRow[] = [];
     const items = this.entries();
     if (items.length === 0) {
-      lines.push(row(th.fg("dim", "(nothing running)")));
+      lines.push(fullRow(th.fg("dim", "(nothing running)")));
       return lines;
     }
     for (let i = 0; i < bodyRows; i++) {
       const entry = items[i];
-      if (!entry) { lines.push(row("")); continue; }
+      if (!entry) { lines.push(fullRow("")); continue; }
       if (entry.kind === "workflow") {
         const wf = entry.workflow;
-        lines.push(row(truncateToWidth(
+        lines.push(fullRow(
           `${th.fg("muted", "workflow")} ${wf.name}  ${th.fg("dim", `${wf.doneCount}/${wf.totalCount} agents · ${wf.status}`)}`,
-          innerW,
-        )));
+        ));
         continue;
       }
       const record = entry.record;
@@ -1023,7 +1023,7 @@ export class AgentHub implements Component {
         : record.status === "running" ? "thinking…" : record.status;
       const turns = act?.maxTurns ? ` · turn ${act.turnCount}/${act.maxTurns}` : act ? ` · turn ${act.turnCount}` : "";
       const line = `${statusGlyph(record.status, th)} ${renderAgentRecordName(record, th, {})}  ${th.fg(record.status === "running" ? "text" : "dim", doing)}${th.fg("dim", turns)}`;
-      lines.push(row(truncateToWidth(line, innerW)));
+      lines.push(fullRow(line));
     }
     return lines;
   }
@@ -1040,6 +1040,28 @@ export class AgentHub implements Component {
     if (this.stopArmed) footer = `${th.fg("error", "x again to STOP")} ${footer}`;
     return truncateToWidth(footer, width);
   }
+}
+
+/** One full-width window row, from content this surface has already shaped. */
+function fullRow(text: string): WindowRow {
+  return { kind: "full", cells: [{ text }] };
+}
+
+/**
+ * Paint the shared window's cells with this surface's theme. Content the
+ * surface styled itself arrives as a colourless cell and passes through
+ * untouched; the bars, rules and labels the window contributes arrive with a
+ * role colour and are painted here. Styling only — the layout is the window's.
+ */
+function paintWindow(lines: readonly WorkflowCardLine[], th: Theme): string[] {
+  return lines.map(line =>
+    line
+      .map(segment => {
+        const text = segment.bold ? th.bold(segment.text) : segment.text;
+        return segment.color ? th.fg(segment.color, text) : text;
+      })
+      .join(""),
+  );
 }
 
 /** `13.1k` — compact magnitude for table cells (no `tokens` suffix). */
