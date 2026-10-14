@@ -82,6 +82,18 @@ import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.j
 import { copyRecordResult } from "./copy-result.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import {
+  ASCII_PANE_BOX,
+  frameEdge,
+  frameRow,
+  hintLine,
+  leftPaneWidth,
+  type PaneBox,
+  paneBodyHeight,
+  paneRightWidth,
+  UNICODE_PANE_BOX,
+  WINDOW_CHROME_ROWS,
+} from "./window-frame.js";
+import {
   ASCII_GLYPHS,
   clampLine,
   formatCompactTokens,
@@ -127,7 +139,7 @@ export const MIN_PANE_BODY_ROWS = 6;
  * ceiling to get its body height, so the whole window lands under the same cap
  * the hub's overlay clips at.
  */
-export const WINDOW_CHROME_ROWS = 7;
+export { leftPaneWidth, WINDOW_CHROME_ROWS };
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
 /** Spinner cadence. Unlike the card's 1s header tick, this row really animates. */
@@ -149,19 +161,7 @@ export interface WorkflowDialogGlyphs {
   /** Running rows cycle these. */
   spinner: readonly string[];
   /** The pane frame: corners, edges and the tees where the two panes meet. */
-  box: {
-    topLeft: string;
-    topRight: string;
-    bottomLeft: string;
-    bottomRight: string;
-    horizontal: string;
-    vertical: string;
-    topTee: string;
-    bottomTee: string;
-    /** The window's rule ends: `├` / `┤`. */
-    leftTee: string;
-    rightTee: string;
-  };
+  box: PaneBox;
   /** Trailing marker on a title the pane was too narrow to hold. */
   ellipsis: string;
   /** How the footer names the arrow keys and Enter. */
@@ -176,18 +176,7 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   pointer: "❯",
   focus: UNICODE_GLYPHS.pointer,
   spinner: SPINNER,
-  box: {
-    topLeft: "╭",
-    topRight: "╮",
-    bottomLeft: "╰",
-    bottomRight: "╯",
-    horizontal: "─",
-    vertical: "│",
-    topTee: "┬",
-    bottomTee: "┴",
-    leftTee: "├",
-    rightTee: "┤",
-  },
+  box: UNICODE_PANE_BOX,
   ellipsis: "…",
   upDown: "↑↓",
   enter: "⏎",
@@ -201,18 +190,7 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   pointer: ">",
   focus: ASCII_GLYPHS.pointer,
   spinner: ["-", "\\", "|", "/"],
-  box: {
-    topLeft: "+",
-    topRight: "+",
-    bottomLeft: "+",
-    bottomRight: "+",
-    horizontal: "-",
-    vertical: "|",
-    topTee: "+",
-    bottomTee: "+",
-    leftTee: "+",
-    rightTee: "+",
-  },
+  box: ASCII_PANE_BOX,
   ellipsis: "~",
   upDown: "up/down",
   enter: "enter",
@@ -550,22 +528,6 @@ function windowRange(selected: number, total: number, max: number): { start: num
  * ------------------------------------------------------------------------- */
 
 /**
- * Inner width of the left pane.
- *
- * Fixed rather than proportional at usable terminal sizes: the left pane holds
- * short labels (a phase title, an agent label) and the right pane holds
- * everything that actually needs room, so giving the left a share of a wide
- * terminal would only pad it. It gives way on a narrow one.
- */
-export function leftPaneWidth(width: number): number {
-  // The two cells share everything except the three border columns, and the
-  // right one must keep at least a column — so the left is capped by what it
-  // can take without squeezing the right out and tearing the frame.
-  const available = Math.max(2, width - 3);
-  return Math.max(1, Math.min(LEFT_PANE_WIDTH, Math.floor(available / 3), available - 1));
-}
-
-/**
  * The agents pane's title: the phase it lists, and how many rows survive the
  * filter — with a filter on, the count is of what survived it, so the title
  * never reads as the whole phase.
@@ -844,8 +806,8 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // the window's right border and the divider stays in one column across the
   // levels: left + right + the three bars = width, exactly.
   const frameWidth = width;
-  const leftWidth = leftPaneWidth(frameWidth);
-  const rightWidth = Math.max(1, frameWidth - leftWidth - 3);
+  const leftWidth = leftPaneWidth(frameWidth, LEFT_PANE_WIDTH);
+  const rightWidth = paneRightWidth(frameWidth, leftWidth);
   const inPhases = state.level === "phases";
   const entry = view.selectedEntry;
 
@@ -1049,7 +1011,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   if (view.selectedEntry?.recordId !== undefined && can("onOpenAgent")) {
     hints.push("c convo");
   }
-  lines.push(windowRow([{ text: hints.join(" · "), color: "dim" }], width, glyphs));
+  lines.push(windowRow([{ text: hintLine(hints, width - 4, " · "), color: "dim" }], width, glyphs));
   lines.push([
     { text: glyphs.box.bottomLeft, color: "border" },
     { text: glyphs.box.horizontal.repeat(width - 2), color: "border" },
@@ -1358,9 +1320,13 @@ export class WorkflowDialog implements Component {
 
   /** Body height for the pane window, from the hub's popup arithmetic. */
   private paneHeight(): number {
-    const rows = this.tui.terminal?.rows;
-    if (rows === undefined) return DEFAULT_PANE_BODY_ROWS;
-    return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * this.viewportPct()) / 100) - WINDOW_CHROME_ROWS);
+    return paneBodyHeight({
+      terminalRows: this.tui.terminal?.rows,
+      viewportPct: this.viewportPct(),
+      chromeRows: WINDOW_CHROME_ROWS,
+      min: MIN_PANE_BODY_ROWS,
+      fallbackRows: DEFAULT_PANE_BODY_ROWS,
+    });
   }
 
   invalidate(): void {
@@ -1572,11 +1538,12 @@ export class WorkflowDialog implements Component {
     // descending to this level moves nothing: the divider and the right bar
     // stay in the columns the other two levels drew them in.
     const contentWidth = workflowDialogContentWidth(width);
-    const leftWidth = leftPaneWidth(contentWidth);
-    const rightWidth = Math.max(1, contentWidth - leftWidth - 3);
-    // The window's non-body rows: borders, headers, two rules, footer.
-    const chrome = WINDOW_CHROME_ROWS;
-    const bodyRows = Math.max(MIN_PANE_BODY_ROWS, Math.floor(((this.tui.terminal?.rows ?? 40) * this.viewportPct()) / 100) - chrome);
+    const leftWidth = leftPaneWidth(contentWidth, LEFT_PANE_WIDTH);
+    const rightWidth = paneRightWidth(contentWidth, leftWidth);
+    // The window's non-body rows: borders, headers, two rules, footer. The same
+    // height basis the segment levels use, so descending to this level moves
+    // nothing — including on a host that reports no terminal size.
+    const bodyRows = this.paneHeight();
 
     const chat = viewer.render(rightWidth);
     if (chat.length === 0) return [];
@@ -1610,15 +1577,12 @@ export class WorkflowDialog implements Component {
     const agentPaneTitle = agentPaneTitleFor(this.state.filter, phaseTitle, view.visibleAgents.length);
 
     // ---- Window helpers, in strings. The shapes mirror the segment path's
-    // windowRow/paneRule so both render paths draw the same window.
+    // windowRow/paneRule so both render paths draw the same window — the edges
+    // and the content row come from the shared frame module outright.
     const border = (s: string) => th.fg("border", s);
-    const windowTop = () => border(`${glyphs.box.topLeft}${glyphs.box.horizontal.repeat(contentWidth - 2)}${glyphs.box.topRight}`);
-    const windowBottom = () => border(`${glyphs.box.bottomLeft}${glyphs.box.horizontal.repeat(contentWidth - 2)}${glyphs.box.bottomRight}`);
-    const windowLine = (content: string) => {
-      const clamped = truncateToWidth(content, contentWidth - 4, glyphs.ellipsis, true);
-      const gap = Math.max(0, contentWidth - 4 - visibleWidth(clamped));
-      return `${border(glyphs.box.vertical)} ${clamped}${" ".repeat(gap + 1)}${border(glyphs.box.vertical)}`;
-    };
+    const windowTop = () => border(frameEdge(contentWidth, glyphs.box, "top"));
+    const windowBottom = () => border(frameEdge(contentWidth, glyphs.box, "bottom"));
+    const windowLine = (content: string) => frameRow(contentWidth, content, glyphs.box, border, glyphs.ellipsis);
     const ruleCell = (title: string | undefined, w: number) => {
       if (title === undefined) return border(glyphs.box.horizontal.repeat(w));
       // Stripped like `frameTitle` strips its ellipsis wrappers: pi's
@@ -1668,7 +1632,7 @@ export class WorkflowDialog implements Component {
     hints.push("esc back");
     hints.push("c copy");
     hints.push(this.popup ? "f expand" : "f popup");
-    lines.push(windowLine(th.fg("dim", hints.join(" · "))));
+    lines.push(windowLine(th.fg("dim", hintLine(hints, contentWidth - 4, " · "))));
     lines.push(windowBottom());
     return lines;
   }

@@ -12,6 +12,10 @@ check the entries below for behaviour changes.
 ### Added
 - **Paused agents with no persisted session survive a quit and are re-run by `/continue`.** The pause manifest previously listed only agents with a session file, so `persist_session: false` and queued spawns were lost on quit; each row now carries a respawn recipe (the original prompt plus the model, thinking level, turn cap and isolation the live record held), and `/continue` re-runs it fresh after a restart — reclaiming its handle and alias — while still resuming session-backed agents exactly. The `/pause` and `/continue` reports say so, and the "quitting loses it" warning is now reserved for a paused record with neither a session file nor a prompt. A re-run starts a new conversation: the earlier transcript and tool state are gone.
 
+### Changed
+
+- **The window chrome is one module, `src/ui/window-frame.ts`, shared by the agent hub and the workflow inspector.** Edges, padded content rows, the two-pane bar partition, the height basis and the footer fitter had four hand-rolled copies between them — the hub's roster strings, the hub's chat pane, the inspector's segment layout, and the inspector's log level — so every hub restyle had to be replayed by hand in the inspector. Both surfaces render through the primitives now. One visible change: a footer too narrow for every hint drops whole hints from the right instead of clamping the line mid-hint, so the `f` and `c` handoffs go before the escape hatch and no dangling separator is left behind.
+
 ### Fixed
 - **The workflow inspector's window spans the overlay's full width again.** The layout subtracted its own border and padding columns from the width the overlay host handed it, so the frame stopped six columns short of the right edge and the host padded the rest with blanks — an empty strip in the windowed inspector and in the `f` full-screen one alike. The frame now renders at the whole width it is given, as the agent hub's popup does.
 

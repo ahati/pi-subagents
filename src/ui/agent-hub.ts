@@ -33,6 +33,15 @@ import { copyRecordResult } from "./copy-result.js";
 import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
+import {
+  frameEdge,
+  frameRow,
+  hintLine,
+  paneRightWidth,
+  splitEdge,
+  TWO_PANE_MIN_WIDTH,
+  UNICODE_PANE_BOX,
+} from "./window-frame.js";
 
 /** How long a settled workflow run lingers in the roster (matches the fleet list). */
 const FINISHED_LINGER_MS = 4000;
@@ -46,8 +55,8 @@ const MAX_NAME_COL = 24;
 const MIN_TERMINAL_ROWS = 8;
 /** Chat pane: the agent list column's width (matches the workflow inspector's). */
 const CHAT_LIST_WIDTH = 18;
-/** Below this total width the chat drops the list pane and shows the conversation alone. */
-const CHAT_TWO_PANE_MIN_WIDTH = 60;
+/** One padding column inside each chat cell, so the cells read clear of the bars. */
+const CHAT_PANE_PADDING = 1;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
 function chatGroupRank(status: AgentRecord["status"]): number {
@@ -761,14 +770,10 @@ export class AgentHub implements Component {
     const innerW = width - 4; // border + padding
     const lines: string[] = [];
 
-    const pad = (s: string, len: number) => {
-      const vis = visibleWidth(s);
-      return s + " ".repeat(Math.max(0, len - vis));
-    };
-    const row = (content: string) =>
-      th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW, "...", true) + " " + th.fg("border", "│");
-    const hrTop = th.fg("border", `╭${"─".repeat(width - 2)}╮`);
-    const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
+    const border = (s: string) => th.fg("border", s);
+    const row = (content: string) => frameRow(width, content, UNICODE_PANE_BOX, border, "...");
+    const hrTop = border(frameEdge(width, UNICODE_PANE_BOX, "top"));
+    const hrBot = border(frameEdge(width, UNICODE_PANE_BOX, "bottom"));
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
     lines.push(hrTop);
@@ -807,19 +812,20 @@ export class AgentHub implements Component {
    *
    * The viewer renders frameless at the reduced width (it is
    * width-parameterized), the list pads to its pane width, and the two zip
-   * line-by-line between the shared borders. Below `CHAT_TWO_PANE_MIN_WIDTH`
-   * the list pane is dropped and the conversation stands alone in its own
-   * framed box rather than being squeezed to unreadable.
+   * line-by-line between the shared borders. Below
+   * {@link TWO_PANE_MIN_WIDTH} the list pane is dropped and the conversation
+   * stands alone in its own framed box rather than being squeezed to
+   * unreadable.
    */
   private renderChat(width: number): string[] {
-    if (width < CHAT_TWO_PANE_MIN_WIDTH) {
+    if (width < TWO_PANE_MIN_WIDTH) {
       this.chatFrameless = false; // conversation alone → its own frame
       return this.chatViewer!.render(width);
     }
     this.chatFrameless = true;
     const th = this.theme;
     // Row shape: `│ ` + list(CHAT_LIST_WIDTH) + ` │ ` + chat + ` │`.
-    const chatW = width - CHAT_LIST_WIDTH - 7;
+    const chatW = paneRightWidth(width, CHAT_LIST_WIDTH, CHAT_PANE_PADDING);
     const chat = this.chatViewer!.render(chatW);
     if (chat.length === 0) return chat; // viewer bailed on width; nothing to frame
 
@@ -851,9 +857,8 @@ export class AgentHub implements Component {
     }
 
     const lines: string[] = [];
-    const title = " Agents ";
-    const listSeg = CHAT_LIST_WIDTH + 2; // one padding column each side of the pane
-    lines.push(th.fg("border", `╭${title}${"─".repeat(listSeg - title.length)}┬${"─".repeat(chatW + 2)}╮`));
+    const listSeg = CHAT_LIST_WIDTH + 2 * CHAT_PANE_PADDING; // padding inside the cell
+    lines.push(th.fg("border", splitEdge(width, listSeg, UNICODE_PANE_BOX, "top", " Agents ")));
     for (let i = 0; i < rows; i++) {
       const item = items[start + i];
       const cell = item == null
@@ -864,7 +869,7 @@ export class AgentHub implements Component {
       const padded = cell + " ".repeat(Math.max(0, CHAT_LIST_WIDTH - visibleWidth(cell)));
       lines.push(th.fg("border", "│") + ` ${padded} ` + th.fg("border", "│") + ` ${chat[i]} ` + th.fg("border", "│"));
     }
-    lines.push(th.fg("border", `╰${"─".repeat(listSeg)}┴${"─".repeat(chatW + 2)}╯`));
+    lines.push(th.fg("border", splitEdge(width, listSeg, UNICODE_PANE_BOX, "bottom")));
     return lines;
   }
 
@@ -1030,12 +1035,8 @@ export class AgentHub implements Component {
     const keys = this.view === "activity"
       ? ["↑↓ select", "Enter open", "x stop", "p pause", "1 agents", "f popup", "q close"]
       : ["↑↓ select", "Enter open", "x stop", "p pause", "/ filter", "Tab activity", "f popup", "q close"];
-    let footer = keys.join("·");
     // Drop hints right-to-left until the line fits, so the essential ones survive.
-    while (keys.length > 1 && visibleWidth(footer) > width) {
-      keys.pop();
-      footer = keys.join("·");
-    }
+    let footer = hintLine(keys, width);
     if (this.stopArmed) footer = `${th.fg("error", "x again to STOP")} ${footer}`;
     return truncateToWidth(footer, width);
   }
