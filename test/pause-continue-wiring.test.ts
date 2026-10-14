@@ -52,6 +52,17 @@ function resumableSession() {
   } as any;
 }
 
+/** A fake session with no session file, so its record can only become a respawn row. */
+function ephemeralSession() {
+  return {
+    steer: vi.fn().mockResolvedValue(undefined),
+    dispose: vi.fn(),
+    subscribe: vi.fn(() => () => {}),
+    messages: [],
+    getActiveToolNames: vi.fn(() => []),
+  } as any;
+}
+
 /** A runAgent that never settles, so the agent stays "running". */
 function heldRun(session: () => any) {
   vi.mocked(runAgent).mockImplementation(
@@ -165,13 +176,7 @@ describe("/pause", () => {
   it("manifests an agent without a persisted session as a respawn recipe", async () => {
     const b = boot();
     // A plain fake session: no sessionManager, so the record gets no sessionFile.
-    const id = await spawnRunning(b, () => ({
-      steer: vi.fn().mockResolvedValue(undefined),
-      dispose: vi.fn(),
-      subscribe: vi.fn(() => () => {}),
-      messages: [],
-      getActiveToolNames: vi.fn(() => []),
-    }));
+    const id = await spawnRunning(b, ephemeralSession);
     // The invocation the live record holds at pause time is the best-effort
     // part of the recipe; pin that it travels.
     manager().getRecord(id).invocation = { modelId: "fake/model", requestedThinking: "low", maxTurns: 7, isolated: true };
@@ -196,6 +201,37 @@ describe("/pause", () => {
     expect(entries[0].type).toBe("Explore");
     expect(entries[0].handle).toBe("explore");
     expect(entries[0].description).toBe("find flaky tests");
+  });
+
+  it("keeps an explicit thinking: off in the respawn recipe", async () => {
+    const b = boot();
+    const id = await spawnRunning(b, ephemeralSession);
+    // "off" is a level the run was started at, not an absent field: dropping
+    // it here would re-run the agent at pi's default instead.
+    manager().getRecord(id).invocation = { requestedThinking: "off" };
+
+    await runCommand(b, "pause").result;
+    await flush();
+
+    expect(manifest().list()[0].respawn).toEqual({ prompt: "go", thinking: "off" });
+  });
+
+  it("reports an agent with neither a session nor a prompt as lost on quit, and manifests none of it", async () => {
+    const b = boot();
+    const id = await spawnRunning(b, ephemeralSession);
+    // Nothing a respawn could replay. No live spawn produces this today, but
+    // the fallback must still name what quitting loses instead of writing a
+    // row that could never be re-run.
+    delete manager().getRecord(id).spawnPrompt;
+
+    const { cmdCtx } = runCommand(b, "pause");
+    await flush();
+
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
+      "Paused 1 agent; 1 without a persisted session — quitting loses it.",
+      "info",
+    );
+    expect(manifest().list()).toEqual([]);
   });
 
   it("arms while the main model is streaming instead of refusing", async () => {
@@ -322,13 +358,7 @@ describe("/continue", () => {
 
   it("resumes an ephemeral live record in place, without re-running it", async () => {
     const b = boot();
-    const id = await spawnRunning(b, () => ({
-      steer: vi.fn().mockResolvedValue(undefined),
-      dispose: vi.fn(),
-      subscribe: vi.fn(() => () => {}),
-      messages: [],
-      getActiveToolNames: vi.fn(() => []),
-    }));
+    const id = await spawnRunning(b, ephemeralSession);
     await runCommand(b, "pause").result;
     await flush();
 
@@ -351,7 +381,7 @@ describe("/continue", () => {
         handle: "explore",
         alias: "auth-audit",
         description: "find flaky tests",
-        respawn: { prompt: "go" },
+        respawn: { prompt: "go", thinking: "off" },
         pausedAt: "2026-01-01T00:00:00.000Z",
       },
     ]);
@@ -363,6 +393,7 @@ describe("/continue", () => {
 
     const spawnOpts = vi.mocked(runAgent).mock.calls.at(-1)![3] as any;
     expect(vi.mocked(runAgent).mock.calls.at(-1)![2]).toBe("go");
+    expect(spawnOpts.thinkingLevel).toBe("off");
     expect(spawnOpts.resumeSessionFile).toBeUndefined();
     expect(cmdCtx.ui.notify).toHaveBeenCalledWith(
       "Re-running @auth-audit from scratch — the earlier transcript and tool state are gone.",

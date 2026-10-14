@@ -3289,10 +3289,11 @@ Terse command-style prompts produce shallow, generic work.
 
   /**
    * The recipe for re-running a paused record that has no session file. Only
-   * what the live record holds: the prompt the last run was started with, plus
-   * the invocation fields a session reported. A queued/mention-spawned record
-   * has no `invocation` yet, so model and thinking fall back to the agent's
-   * config and pi's defaults — the same resolution the original spawn used.
+   * what the live record holds: the prompt the original run was started with,
+   * plus the invocation fields a session reported. A queued/mention-spawned
+   * record has no `invocation` yet, so model and thinking fall back to the
+   * agent's config and pi's defaults — the same resolution the original spawn
+   * used.
    */
   function respawnSpecFor(record: AgentRecord): PausedRespawnSpec | undefined {
     if (record.spawnPrompt === undefined) return undefined;
@@ -3301,7 +3302,9 @@ Terse command-style prompts produce shallow, generic work.
     return {
       prompt: record.spawnPrompt,
       ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
-      ...(thinking !== undefined && thinking !== "off" ? { thinking } : {}),
+      // "off" is a level the run was started at, not an absence of one: dropping
+      // it would re-run at pi's default instead of with thinking disabled.
+      ...(thinking !== undefined ? { thinking } : {}),
       ...(invocation?.maxTurns !== undefined ? { maxTurns: invocation.maxTurns } : {}),
       ...(invocation?.isolated !== undefined ? { isolated: invocation.isolated } : {}),
       ...(invocation?.inheritContext !== undefined ? { inheritContext: invocation.inheritContext } : {}),
@@ -3315,8 +3318,9 @@ Terse command-style prompts produce shallow, generic work.
    * as lost, because nothing can bring it back.
    */
   function pausedAgentRow(record: AgentRecord): PausedAgentEntry | undefined {
-    const sessionFile = record.sessionFile;
-    if (typeof sessionFile === "string") return pauseEntryFor({ ...record, sessionFile });
+    // Truthiness, matching the `/pause` counters: an empty path names no
+    // session to reopen, so it takes the respawn branch like any other miss.
+    if (record.sessionFile) return pauseEntryFor({ ...record, sessionFile: record.sessionFile });
     const respawn = respawnSpecFor(record);
     if (!respawn) return undefined;
     return {
@@ -3533,8 +3537,9 @@ Terse command-style prompts produce shallow, generic work.
 
   /**
    * Rewrite the session's pause manifest from the live records: exactly the
-   * top-level agents currently paused WITH a persisted session file, plus the
-   * settled-unconsumed results `capturedSettled` holds. The settle callback
+   * top-level agents currently paused — each under its persisted session file,
+   * or under the respawn recipe when it has none — plus the settled-unconsumed
+   * results `capturedSettled` holds. The settle callback
    * calls this on every transition so the manifest never lists an agent that
    * is no longer parked; `/pause` and `/continue` also call it directly around
    * their batch work. Best-effort — an unwritable `.pi/` must never break
