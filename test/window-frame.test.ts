@@ -21,6 +21,7 @@ import {
   hintLine,
   leftPaneWidth,
   paneBodyHeight,
+  paneGeometry,
   paneRightWidth,
   paneRule,
   type RuleCell,
@@ -325,8 +326,11 @@ describe("the inspector draws through the shared frame", () => {
   it("uses the shared edges and row shape at the overview level", () => {
     const instance = boot(40);
     const lines = instance.render(100);
-    expect(lines[0]).toBe(frameEdge(100, UNICODE_PANE_BOX, "top"));
-    expect(lines.at(-1)).toBe(frameEdge(100, UNICODE_PANE_BOX, "bottom"));
+    // The window is the hub's: a split, titled top edge — the master pane named
+    // in it — and the matching split bottom edge, from the shared geometry.
+    const panes = paneGeometry(100);
+    expect(lines[0]).toBe(splitEdge(100, panes.leftCellWidth, UNICODE_PANE_BOX, "top", " Phases "));
+    expect(lines.at(-1)).toBe(splitEdge(100, panes.leftCellWidth, UNICODE_PANE_BOX, "bottom"));
     for (const line of lines) expect(visibleLength(line)).toBe(100);
     instance.dispose();
   });

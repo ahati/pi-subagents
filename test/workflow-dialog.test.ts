@@ -112,13 +112,17 @@ const trimTrailing = (rows: string[]): string[] => {
 const leftRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.left));
 const rightRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.right));
 
-/** The two pane titles from the window's titled rule, under the header. */
+/**
+ * The two pane titles: the master pane's from the window's top edge — the hub's
+ * ` Agents ` placement — and the detail pane's from the titled rule under it.
+ */
 function paneTitles(lines: string[]): { left: string; right: string } {
+  const master = bare(lines[0] ?? "").match(/^[╭+](.*?)[┬+]/)?.[1] ?? "";
   for (const line of lines) {
     const match = bare(line).match(/^[├+](.*?)[┬+](.*)[┤+]$/);
     if (match) {
       const strip = (part: string) => part.replace(/[─-]+\s*$/, "").trim();
-      return { left: strip(match[1]), right: strip(match[2]) };
+      return { left: strip(master), right: strip(match[2]) };
     }
   }
   throw new Error(`no frame in:\n${lines.join("\n")}`);
@@ -131,9 +135,9 @@ function section(lines: string[], heading: string): string[] {
   if (start < 0) throw new Error(`no ${heading} section in:\n${lines.join("\n")}`);
   const rest = rows.slice(start + 1);
   const end = rest.findIndex(row => row.trim() === "");
-  // Body rows are indented three columns under their heading; the recovered
-  // copy carries its own two, so one is dropped to compare against it.
-  return (end < 0 ? rest : rest.slice(0, end)).map(row => row.replace(/^ {3}/, "  "));
+  // Body rows carry the pane cell's padding column and are indented three
+  // columns under their heading; the recovered copy carries its own two.
+  return (end < 0 ? rest : rest.slice(0, end)).map(row => row.replace(/^ {4}/, "  "));
 }
 
 /** The dialog in its agent subview, which is where the detail sections live. */
@@ -567,9 +571,9 @@ describe("keys", () => {
     expect(paneTitles(overview).right).toBe("Review · 2 agents");
 
     const opened = dialog({ progress, state: { level: "agent" } });
-    // The agents move left and the selected one's detail takes the right. The
-    // left title is truncated to the narrow pane, marker and all.
-    expect(paneTitles(opened).left).toBe("Review · 2 agen…");
+    // The agents move left and the selected one's detail takes the right; the
+    // master pane's name moves into the top edge with the list it names.
+    expect(paneTitles(opened).left).toBe("Review · 2 agents");
     expect(paneTitles(opened).right).toBe("a");
   });
 
@@ -893,38 +897,46 @@ describe("pane rules", () => {
   const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
 
   it("draws the titled rule under the header and the plain one above the footer", () => {
+    // The master pane is named in the top edge (asserted below), so the rule
+    // titles the detail pane alone and the seam closes with a `┴`.
     expect(rules(dialog({ progress, width: 86 }))).toEqual([
-      "├ Phases ──────────┬ Verify · 2 agents ──────────────────────────────────────────────┤",
-      "├──────────────────│─────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ Verify · 2 agents ────────────────────────────────────────────┤",
+      "├────────────────────┴───────────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(dialog({ progress, width: 60 }))).toEqual([
-      "├ Phases ──────────┬ Verify · 2 agents ────────────────────┤",
-      "├──────────────────│───────────────────────────────────────┤",
+      "├───────────────────┬ Verify · 2 agents ───────────────────┤",
+      "├───────────────────┴──────────────────────────────────────┤",
     ]);
     expect(rules(dialog({ progress, width: 40 }))).toEqual([
-      "├ Phases ────┬ Verify · 2 agents ──────┤",
-      "├────────────│─────────────────────────┤",
+      "├─────────────┬ Verify · 2 agents ─────┤",
+      "├─────────────┴────────────────────────┤",
     ]);
     // A cell narrower than the title cuts it rather than tearing the frame.
     expect(rules(dialog({ progress, width: 30 }))).toEqual([
-      "├ Phases ─┬ Verify · 2 agen… ┤",
-      "├─────────│──────────────────┤",
+      "├─────────┬ Verify · 2 agen… ┤",
+      "├─────────┴──────────────────┤",
     ]);
   });
 
   it("themes the rule's three regions: dim lead, bold title, border rule", () => {
+    // The three regions are the detail cell's: dim lead, bold title, border
+    // rule; the master cell is untitled here and all border.
     expect(styled({ progress, width: 86 }).filter(line => line.includes("\u251c"))).toEqual([
-      "<border>├</border><dim> </dim><muted>*Phases*</muted><border> ──────────</border><border>┬</border><dim> </dim><muted>*Verify · 2 agents*</muted><border> ──────────────────────────────────────────────</border><border>┤</border>",
-      "<border>├</border><border>──────────────────</border><border>│</border><border>─────────────────────────────────────────────────────────────────</border><border>┤</border>",
+      "<border>├</border><border>────────────────────</border><border>┬</border><dim> </dim><muted>*Verify · 2 agents*</muted><border> ────────────────────────────────────────────</border><border>┤</border>",
+      "<border>├</border><border>────────────────────</border><border>┴</border><border>───────────────────────────────────────────────────────────────</border><border>┤</border>",
     ]);
   });
 
   it("swaps the rule for the ASCII tier with the rest of the frame", () => {
-    const ascii = dialog({ progress, width: 86, ascii: true })
-      .filter(line => line.startsWith("+ ") || (line.startsWith("+") && line.includes("|")));
-    expect(ascii).toEqual([
-      "+ Phases ----------+ Verify · 2 agents ----------------------------------------------+",
-      "+------------------|-----------------------------------------------------------------+",
+    const ascii = dialog({ progress, width: 86, ascii: true });
+    expect(ascii[0]).toBe("+ Phases ------------+---------------------------------------------------------------+");
+    expect(ascii.at(-1)).toBe("+--------------------+---------------------------------------------------------------+");
+    const rules = ascii.filter(line => line.startsWith("+--"));
+    expect(rules).toEqual([
+      "+--------------------+ Verify · 2 agents --------------------------------------------+",
+      "+--------------------+---------------------------------------------------------------+",
+      // The bottom edge, split like the top one.
+      "+--------------------+---------------------------------------------------------------+",
     ]);
   });
 });
@@ -961,7 +973,9 @@ describe("header", () => {
     // The window's top edge, then the run's name with the counters flush
     // right on the header row and the description under it — the tool's name
     // is the card's job, not the dialog's.
-    expect(lines[0]).toMatch(/^\u256d\u2500+\u256e$/);
+    // The window's top edge names the master pane and splits at the pane bar;
+    // the run's identity rides the header row under it.
+    expect(lines[0]).toMatch(/^\u256d Phases \u2500+\u252c\u2500+\u256e$/);
     expect(lines[1]).toContain("review-changes");
     expect(lines[1]).toContain("1/2 agents \u00b7 1m12s");
     expect(lines[2]).toContain("Review changed files");
