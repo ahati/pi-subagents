@@ -86,6 +86,12 @@ export async function createWorktree(
   pi: ExtensionAPI,
   cwd: string,
   agentId: string,
+  /**
+   * Directory the worktree is created under. Defaults to the OS temp dir;
+   * tests pass their own so a worktree that is deliberately made
+   * unremovable can still be disposed of as a unit.
+   */
+  baseDir: string = tmpdir(),
 ): Promise<WorktreeInfo | undefined> {
   // Verify we're in a git repo with at least one commit (HEAD must exist)
   let baseSha: string;
@@ -105,7 +111,7 @@ export async function createWorktree(
 
   const branch = `pi-agent-${agentId}`;
   const suffix = randomUUID().slice(0, 8);
-  const worktreePath = join(tmpdir(), `pi-agent-${agentId}-${suffix}`);
+  const worktreePath = join(baseDir, `pi-agent-${agentId}-${suffix}`);
 
   try {
     // Create detached worktree at HEAD
