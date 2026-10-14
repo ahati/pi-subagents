@@ -934,7 +934,7 @@ pi.events.emit("subagents:rpc:resume", {
 });
 ```
 
-Pause is refused (`success: false`) for an agent that is worktree-isolated (the settle path would commit and delete its tree), foreground (a caller is blocked on it), still starting, or already settled; resume is refused for an agent still running or queued, and for one with neither a session nor a parked queue position. Refusals are safe to retry after the agent's state changes — nothing is consumed by a failed attempt.
+Pause is refused (`success: false`) for an agent that is worktree-isolated (the settle path would commit and delete its tree), owned by another agent or a workflow (that owner is waiting on it), foreground (a caller is blocked on it), still starting, or already settled; resume is refused for an agent still running or queued, and for one with neither a session nor a parked queue position. Refusals are safe to retry after the agent's state changes — nothing is consumed by a failed attempt.
 
 ### Consume
 

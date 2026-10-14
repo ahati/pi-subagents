@@ -11,7 +11,7 @@ check the entries below for behaviour changes.
 
 ### Fixed
 
-- **The pause funnel now refuses agents another agent or a workflow owns.** `pauseAgentRecord` checked only foreground and worktree-isolated runs, so a nested child started with `run_in_background` could be parked from the fleet list, the agent hub or a by-id `/agents pause` while its owner waited on `get_nested_subagent_result`, and a workflow's child was refused only as "blocking its caller". The funnel applies the same `isTopLevelAgent` test the RPC layer's `assertOwned` always did — the reason now reads "it is owned by another agent or workflow" — with the callers' own filters and the RPC guard unchanged.
+- **The pause funnel now refuses agents another agent or a workflow owns, and names that as the reason.** `pauseAgentRecord` checked foreground and worktree-isolated runs only, so a workflow's child was refused as "it is blocking its caller" — the symptom rather than the reason the park is forbidden — and a nested background record handed to the funnel would have parked. The funnel now applies the same `isTopLevelAgent` test the RPC layer's `assertOwned` always did, first, so the reason reads "it is owned by another agent or workflow". This is defence in depth rather than a fix for a reachable path: the fleet list and hub roster list only top-level agents, a by-id `/agents pause` never resolves a record with a `parentAgentId`, and the RPC refuses earlier. The callers' own filters and the RPC guard are unchanged.
 
 ## [2026.10.14-r1] - 2026-10-14
 

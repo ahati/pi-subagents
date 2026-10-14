@@ -48,9 +48,9 @@ the first subagent-related call.
 
 - **FR-P1 (idle)** With the main agent idle, `/pause` parks every active
   top-level subagent and every completed-but-unconsumed agent (see 4.4), and
-  writes the park manifest. Agents a caller is blocked on, worktree-isolated
-  runs, and agents owned by another agent or a workflow are refused with a
-  visible reason.
+  writes the park manifest. Agents a caller is blocked on and
+  worktree-isolated runs are refused with a visible reason; owned agents are
+  outside the park's selection, which addresses top-level agents.
 - **FR-P2 (streaming → armed)** With the main model producing output,
   `/pause` arms the park instead of acting. Nothing is parked yet; a second
   `/pause` cancels the arming.
@@ -63,9 +63,10 @@ the first subagent-related call.
   lands runs to completion and its output is persisted normally. It is
   never re-executed. Only calls that had not started are held.
 - **FR-P5 (scope)** The park includes every active top-level subagent and
-  the main turn. Refusals (foreground, worktree-isolated, owned by another
-  agent or a workflow) are named in the
+  the main turn. Refusals (foreground, worktree-isolated) are named in the
   landing summary and excluded from the manifest; everything else parks.
+  Owned agents are not selected in the first place, so they are neither
+  parked nor named (FR-P1).
 - **FR-P6 (cancel)** `/pause` while armed disarms. A later boundary then
   lands nothing.
 - **FR-P7 (Esc)** Pressing Esc while armed still lands the park (the user

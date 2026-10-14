@@ -4039,8 +4039,9 @@ Terse command-style prompts produce shallow, generic work.
    * argument, every active top-level agent. Pausing interrupts the run but
    * keeps the record and session: `/agents resume` (or a `@handle` mention)
    * continues the same conversation later. Foreground agents (a caller is
-   * blocked on them), worktree-isolated runs, and agents owned by another
-   * agent or a workflow refuse, in both forms.
+   * blocked on them) and worktree-isolated runs refuse in both forms; the
+   * bulk form filters to top-level agents before the loop, so the ownership
+   * refusal can only fire in the by-name form.
    */
   async function pauseAgentsCommand(ctx: ExtensionCommandContext, target: string | undefined) {
     if (target !== undefined) {

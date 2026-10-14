@@ -1,7 +1,9 @@
 /**
  * pause-ownership-guard.test.ts — the ownership refusal inside the pause
- * funnel (`pauseAgentRecord` in src/index.ts), driven through every surface
- * that reaches it.
+ * funnel (`pauseAgentRecord` in src/index.ts), driven through the callbacks
+ * and commands each surface reaches it by. The surfaces' own key handling is
+ * not exercised: the fleet-list and workflow-menu callbacks are captured as
+ * the extension registers them and invoked directly.
  *
  * The rule: an agent another agent or a workflow owns is not the session's to
  * park. The RPC layer always said so (`assertOwned`, "Agent is owned by
@@ -194,7 +196,7 @@ const notifies = (cmdCtx: any): string[] =>
   vi.mocked(cmdCtx.ui.notify).mock.calls.map(c => String(c[0]));
 
 describe("pause funnel — ownership refusal", () => {
-  it("fleet/hub `p` refuses a workflow-owned record with the ownership reason", async () => {
+  it("the fleet/hub lifecycle pause callback refuses a workflow-owned record with the ownership reason", async () => {
     const { b } = boot();
     const record = await spawnRunning(b, "workflow child");
     // The registry filters owned records out — capture the reference first.
@@ -209,7 +211,7 @@ describe("pause funnel — ownership refusal", () => {
     expect(pausedEmits(b)).toEqual([]);
   });
 
-  it("fleet/hub `p` refuses a nested-child record (the pre-existing hole)", async () => {
+  it("the fleet/hub lifecycle pause callback refuses a nested-child background record", async () => {
     const { b } = boot();
     const record = await spawnRunning(b, "nested child");
     own(record, "nested");
@@ -224,7 +226,7 @@ describe("pause funnel — ownership refusal", () => {
     expect(pausedEmits(b)).toEqual([]);
   });
 
-  it("the workflow inspector's log `p` refuses a workflow-owned record", async () => {
+  it("the workflow inspector's log pause callback refuses a workflow-owned record", async () => {
     const { b } = boot();
     const record = await spawnRunning(b, "workflow child");
     own(record, "workflow");
