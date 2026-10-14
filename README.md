@@ -50,7 +50,7 @@ UI-layer enhancements over upstream:
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `paused`, `resumed`, `compacted`) and a per-message spend ledger (`subagents:usage`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
-- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, pause/resume, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:pause`, `subagents:rpc:resume`, `subagents:rpc:consume`, `subagents:rpc:steer`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
+- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, pause/resume, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:pause`, `subagents:rpc:resume`, `subagents:rpc:consume`, `subagents:rpc:steer`). Standardized reply envelopes with protocol versioning; the `ping` reply advertises a `capabilities` array naming the request channels this build answers. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` path as manual background completions; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
@@ -853,7 +853,7 @@ Other pi extensions can spawn and stop subagents programmatically via the `pi.ev
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
-**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface (including the fields that are silently stripped), every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and what protocol version `2` does and does not promise. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
+**Full reference:** [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md) — the complete spawn-option surface (including the fields that are silently stripped), every error string, the completion-notification race, the `Symbol.for("pi-subagents:manager")` registry, and what the `ping` reply's `capabilities` does and does not promise. [`tintinweb/pi-tasks`](https://github.com/tintinweb/pi-tasks) is the reference implementation.
 
 ### Discovery
 
@@ -869,16 +869,25 @@ pi.events.on("subagents:ready", () => {
 
 ### Ping
 
-Check if the subagents extension is loaded and get the protocol version:
+Check if the subagents extension is loaded, get the protocol version, and see which request channels it answers:
 
 ```typescript
 const requestId = crypto.randomUUID();
 const unsub = pi.events.on(`subagents:rpc:ping:reply:${requestId}`, (reply) => {
   unsub();
-  if (reply.success) console.log("Protocol version:", reply.data.version);
+  if (!reply.success) return;
+  console.log("Protocol version:", reply.data.version);
+  // The request channels this build answers — "spawn", "stop", "pause",
+  // "resume", "consume", "steer". Older builds omit the field.
+  const capabilities: string[] = reply.data.capabilities ?? [];
+  if (capabilities.includes("consume")) {
+    // safe to consume results on this build
+  }
 });
 pi.events.emit("subagents:rpc:ping", { requestId });
 ```
+
+`capabilities` is derived from the handlers this build installs, so it cannot drift from what the extension actually answers. It lists channels, not behaviour: it does not say whether `scopeModels` is enforced or worktree isolation is enabled, so error envelopes stay authoritative. A reply with no `capabilities` field comes from a build that predates it — read it as version 2 alone (`ping`, `spawn`, `stop`) and keep the send-and-timeout fallback for the rest.
 
 ### Spawn
 
@@ -947,7 +956,7 @@ Say that an agent's result has been shown to the model, so its completion notifi
 pi.events.emit("subagents:rpc:consume", { requestId: crypto.randomUUID(), agentId: "agent-id-here" });
 ```
 
-This is the bus-side half of what `get_subagent_result` does when it returns a result. A caller that joins an agent on `subagents:completed` and reports the result itself should consume it — otherwise the notification still reaches a parent that has already seen the result, costing a model call to dismiss. Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel is outside the `subagents:rpc:ping` version handshake, so a caller can send it unconditionally and an older extension that has no handler simply keeps notifying. Consuming a running or unknown agent is refused (`success: false`) and changes nothing — a running agent has no result to have been read, and its notification is still the caller's only signal that it finished.
+This is the bus-side half of what `get_subagent_result` does when it returns a result. A caller that joins an agent on `subagents:completed` and reports the result itself should consume it — otherwise the notification still reaches a parent that has already seen the result, costing a model call to dismiss. Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel is outside the `subagents:rpc:ping` *version* handshake, so a caller can send it unconditionally and an older extension that has no handler simply keeps notifying. A build that answers the ping with a `capabilities` array says there whether the channel exists, so a caller that wants to know first can gate on `capabilities.includes("consume")` instead. Consuming a running or unknown agent is refused (`success: false`) and changes nothing — a running agent has no result to have been read, and its notification is still the caller's only signal that it finished.
 
 ### Steer
 
@@ -957,7 +966,7 @@ Deliver a message to a running agent you spawned, when something it needs arrive
 pi.events.emit("subagents:rpc:steer", { requestId: crypto.randomUUID(), agentId: "agent-id-here", message: "A second check failed on the same head; include it before you push." });
 ```
 
-Same ownership guard as stop; `Agent is not running` once the agent has settled. A successful steer emits `subagents:steered`.
+Same ownership guard as stop; `Agent is not running` once the agent has settled. A successful steer emits `subagents:steered`. Check `capabilities.includes("steer")` on a `ping` reply as a preflight; a build that does not advertise `capabilities` is predating the field, so fall back to a timeout on the reply channel.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

@@ -4,7 +4,7 @@ Another pi extension can spawn a subagent, listen for subagent completion, read 
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
-For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what protocol version `2` does and does not promise.
+For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what the `ping` reply's `capabilities` does and does not promise.
 
 ## Spawn options
 
@@ -128,7 +128,7 @@ When a background agent finishes, pi-subagents-hub sends the user a completion n
 | After an `await`, before the notification is sent | Still suppressed. The notification waits in the outbox (`src/completion-outbox.ts`), and consuming the result cancels it there. It is sent about 200 ms after the completion when the parent is idle (`NOTIFICATION_HOLD_MS`), and at the end of the parent's current tool batch when it is busy |
 | After it was sent | Too late. pi has queued it with `triggerTurn: true`, and it costs the parent a model call |
 
-Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel sits outside the `subagents:rpc:ping` version handshake on purpose (the comment on the consume handler, `src/cross-extension-rpc.ts`), so you can send it unconditionally and an older pi-subagents-hub with no handler simply keeps notifying.
+Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel sits outside the *version* handshake on purpose (the comment on the consume handler, `src/cross-extension-rpc.ts`), so you can send it unconditionally and an older pi-subagents-hub with no handler simply keeps notifying. It is advertised as a capability, though, so a caller that wants to know before sending can gate on `capabilities.includes("consume")`.
 
 Consumption is not terminal. An `@handle` steer un-consumes the record (the mention handler, `src/index.ts`) because the agent's reply to that message still needs relaying. A background resume (`AgentManager.resume`) does too, because the record is starting a new run, and so does handing a foreground agent to the background (`AgentManager.sendToBackground`), because its result now has to reach the parent as a notification.
 
@@ -138,7 +138,7 @@ One related thing that lives nowhere else: on every top-level settle, pi-subagen
 
 `subagents:rpc:steer` `{ requestId, agentId, message }` delivers `message` into a running or queued agent's conversation, the bus-side half of the `steer_subagent` tool. It exists for the caller that spawned an agent over the bus and then learns something that agent needs mid-run — a second CI failure on the head it is already fixing, a review that landed while it works — and would otherwise have to choose between spawning a duplicate agent for the same work and dropping the fact.
 
-It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` `{ id, message }`, as every steer path does. Like `consume`, it is outside the `ping` version handshake: an older build has no handler and the request times out on your side, so give it a timeout and treat expiry as "not available here".
+It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` `{ id, message }`, as every steer path does. Like `consume`, it is outside the *version* handshake — but it is advertised in the `ping` reply's `capabilities`, so a caller can check `capabilities.includes("steer")` before sending. One that cannot (a build predating the field) should still give the request a timeout and treat expiry as "not available here".
 
 ## The manager registry
 
@@ -158,13 +158,17 @@ Prefer the bus. The registry has no reply envelope, no version, and no availabil
 
 ## Protocol versions
 
-`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `2` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
+`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION, capabilities: RpcCapability[] }`, with `version` currently `2` (`src/cross-extension-rpc.ts`). `capabilities` is the inventory of request channels this build answers — every `subagents:rpc:<name>` except `ping` itself, unordered. Today that is `spawn`, `stop`, `pause`, `resume`, `consume` and `steer`. It is derived from the handlers `registerRpcHandlers` installs (the `wire` helper), so it cannot fall behind them the way the version did; `RpcCapability` in `src/cross-extension-rpc.ts` is the union of names.
 
-Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` and `steer` channels.
+The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors. Version `2` was not bumped for the `capabilities` field, because the change is additive: an existing caller ignores a field it does not know, and every reply shape is otherwise unchanged.
 
-> A `ping` that answers `2` does not tell you whether `consume` or `steer` exists, whether model scope is enforced, or whether stop checks ownership.
+Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), the whole `consume` and `steer` channels, and the `pause`/`resume` pair.
 
-So: send `consume` unconditionally and ignore the outcome — an older build has no handler and simply keeps notifying, which is exactly why it was left outside the handshake. And treat every error envelope as authoritative rather than trying to predict which checks are in force.
+> A `ping` that answers `2` does not tell you whether `consume`, `steer`, `pause` or `resume` exists. Read `capabilities` for that. A reply with no `capabilities` field comes from a build that predates it: assume version-2 channels only (`ping`, `spawn`, `stop`) and fall back to send-and-timeout for the rest.
+
+What `capabilities` is *not* is a policy statement. It lists channels, not behaviours, so it still does not tell you whether `scopeModels` is enforced, whether worktree isolation is enabled in this project, or whether stop will check ownership. Treat every error envelope as authoritative rather than trying to predict which checks are in force.
+
+So: for `consume`, `steer`, `pause` and `resume` either send unconditionally and ignore the outcome, or gate each on its own name — `capabilities.includes("steer")` before a steer — when the reply carries the field. An older build with no handler simply never answers, which is exactly why they were left outside the *version* handshake and are advertised as capabilities instead.
 
 ## Availability
 
@@ -180,8 +184,8 @@ This document has no test of its own, so it is worth knowing which claims are ac
 
 | Test | Level | Pins |
 |---|---|---|
-| `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings (including steer's), model resolution and scope enforcement |
-| `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)), and an RPC pause/resume emitting `subagents:paused`/`:resumed` with no second `started` |
+| `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings (including steer's), model resolution and scope enforcement, and the `ping` reply's `version` + `capabilities` — every advertised name has a live handler, and nothing is wired that is not advertised |
+| `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, `ping`'s `capabilities` naming exactly the `subagents:rpc:*` channels the real factory put on the bus, live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)), and an RPC pause/resume emitting `subagents:paused`/`:resumed` with no second `started` |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
 
 Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings, `subagents:ready`'s `{}` payload, consume's handle resolution, and its missing `workflowId` check.

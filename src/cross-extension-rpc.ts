@@ -10,7 +10,8 @@
  *
  * @see docs/rpc.md — the caller-facing integration reference: spawn options
  * (including the fields spawnTopLevel strips), every error string, the
- * completion-notification race, and what protocol version 2 does not promise.
+ * completion-notification race, and what the ping reply's `capabilities` does
+ * not promise.
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
@@ -29,7 +30,19 @@ export type RpcReply<T = void> =
   | { success: true; data?: T }
   | { success: false; error: string };
 
-/** RPC protocol version — bumped when the envelope or method contracts change. */
+/**
+ * Request channel advertised in the `ping` reply. Each name `n` is exactly the
+ * `<n>` of `subagents:rpc:<n>`; `ping` is excluded because that is the reply
+ * you are reading. Deliberately no runtime list beside it — the set is derived
+ * from the handlers `registerRpcHandlers` wires, not declared.
+ */
+export type RpcCapability = "spawn" | "stop" | "pause" | "resume" | "consume" | "steer";
+
+/**
+ * RPC protocol version — bumped only when an existing envelope or method
+ * contract breaks. Additive fields and new channels are advertised through the
+ * ping reply's `capabilities` instead.
+ */
 export const PROTOCOL_VERSION = 2;
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume/pause/resume RPCs. */
@@ -112,18 +125,38 @@ function handleRpc<P extends { requestId: string }>(
 }
 
 /**
- * Register ping, spawn, stop, consume, and steer RPC handlers on the event bus.
- * Returns unsub functions for cleanup.
+ * Register ping, spawn, stop, pause, resume, consume, and steer RPC handlers on
+ * the event bus. Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   const { events, pi, getCtx, manager } = deps;
 
+  const capabilities: RpcCapability[] = [];
+
+  // Every channel except ping goes through here, so a channel cannot be wired
+  // without naming its capability and the ping reply cannot fall behind the
+  // handlers again. The name is the channel suffix (`subagents:rpc:<name>`).
+  const wire = <P extends { requestId: string }>(
+    capability: RpcCapability,
+    fn: (params: P) => unknown | Promise<unknown>,
+  ): (() => void) => {
+    capabilities.push(capability);
+    return handleRpc<P>(events, `subagents:rpc:${capability}`, fn);
+  };
+
   const unsubPing = handleRpc(events, "subagents:rpc:ping", () => {
-    return { version: PROTOCOL_VERSION };
+    return {
+      version: PROTOCOL_VERSION,
+      // Copied: the bus is in-process, so a caller could otherwise mutate the
+      // module-local list and change every later reply. All `wire` calls below
+      // have run by the time a request can arrive — registration is synchronous
+      // and nothing emits ping from inside it.
+      capabilities: [...capabilities],
+    };
   });
 
-  const unsubSpawn = handleRpc<{ requestId: string; type: string; prompt: string; options?: any }>(
-    events, "subagents:rpc:spawn", async ({ type, prompt, options }) => {
+  const unsubSpawn = wire<{ requestId: string; type: string; prompt: string; options?: any }>(
+    "spawn", async ({ type, prompt, options }) => {
       const ctx = getCtx();
       if (!ctx) throw new Error("No active session");
 
@@ -198,8 +231,8 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
   };
 
-  const unsubStop = handleRpc<{ requestId: string; agentId: string }>(
-    events, "subagents:rpc:stop", ({ agentId }) => {
+  const unsubStop = wire<{ requestId: string; agentId: string }>(
+    "stop", ({ agentId }) => {
       assertOwned(agentId);
       // Not "not found" — the lookup above already proved it exists. `abort`
       // returns false only for a record that is neither running nor queued,
@@ -211,15 +244,15 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // Pause and resume mirror stop's shape: the ownership guard first, then the
   // capability, with the refusal surfaced as an error string rather than a
   // silent false — a bus caller has no UI to read a no-op from.
-  const unsubPause = handleRpc<{ requestId: string; agentId: string }>(
-    events, "subagents:rpc:pause", ({ agentId }) => {
+  const unsubPause = wire<{ requestId: string; agentId: string }>(
+    "pause", ({ agentId }) => {
       assertOwned(agentId);
       if (!manager.pauseAgent(agentId)) throw new Error("Agent is not pausable");
     },
   );
 
-  const unsubResume = handleRpc<{ requestId: string; agentId: string; prompt?: string }>(
-    events, "subagents:rpc:resume", async ({ agentId, prompt }) => {
+  const unsubResume = wire<{ requestId: string; agentId: string; prompt?: string }>(
+    "resume", async ({ agentId, prompt }) => {
       assertOwned(agentId);
       if (!await manager.resumeAgent(agentId, prompt)) throw new Error("Agent cannot be resumed");
     },
@@ -228,10 +261,12 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // A caller that has already shown the model an agent's result — pi-tasks'
   // TaskOutput is the one in practice — says so here, so the completion
   // notification for that same result is not delivered on top of it and does
-  // not cost the parent a turn. Deliberately outside the ping version
-  // handshake: an extension built against protocol v2 simply never calls it.
-  const unsubConsume = handleRpc<{ requestId: string; agentId: string }>(
-    events, "subagents:rpc:consume", ({ agentId }) => {
+  // not cost the parent a turn. Outside the *version* handshake — an extension
+  // built against protocol v2 simply never calls it — but advertised in the
+  // ping reply's `capabilities`, so a caller can gate on it instead of waiting
+  // out a timeout.
+  const unsubConsume = wire<{ requestId: string; agentId: string }>(
+    "consume", ({ agentId }) => {
       if (!manager.consumeResult(agentId)) throw new Error("Agent not found or still running");
     },
   );
@@ -239,10 +274,11 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // An extension that spawned an agent over the bus and then learns something
   // that agent needs — a second CI failure on the head it is already fixing, a
   // review that landed mid-run — can hand it over instead of spawning a second
-  // agent for the same work or dropping the fact. Outside the ping version
-  // handshake, like consume: additive and best-effort.
-  const unsubSteer = handleRpc<{ requestId: string; agentId: string; message: unknown }>(
-    events, "subagents:rpc:steer", ({ agentId, message }) => {
+  // agent for the same work or dropping the fact. Outside the *version*
+  // handshake, like consume: additive and best-effort — but advertised in
+  // `capabilities`, so a caller can tell whether it exists at all.
+  const unsubSteer = wire<{ requestId: string; agentId: string; message: unknown }>(
+    "steer", ({ agentId, message }) => {
       if (typeof message !== "string" || message.trim().length === 0) throw new Error("Steer message must be a non-empty string");
       assertOwned(agentId);
       if (!manager.steer(agentId, message)) throw new Error("Agent is not running");
