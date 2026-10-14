@@ -34,6 +34,7 @@ function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>(); // pi.on(...) — session_start, session_shutdown, …
   const busHandlers = new Map<string, (raw: any) => unknown>(); // pi.events.on(...) — rpc channels
+  const busUnsubs = new Map<string, ReturnType<typeof vi.fn>>(); // the unsubscribe each pi.events.on(...) returned
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
@@ -46,13 +47,15 @@ function makePi() {
       emit: vi.fn(),
       on: vi.fn((event: string, handler: any) => {
         busHandlers.set(event, handler);
-        return vi.fn();
+        const unsub = vi.fn();
+        busUnsubs.set(event, unsub);
+        return unsub;
       }),
     },
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle, busHandlers };
+  return { pi, tools, lifecycle, busHandlers, busUnsubs };
 }
 
 function ctx(hasUI = false, setWidget = vi.fn()) {
@@ -154,6 +157,52 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     expect(reply, "spawn emitted a reply").toBeTruthy();
     expect(reply![1].success, `spawn succeeded, got: ${JSON.stringify(reply![1])}`).toBe(true);
     expect(reply![1].data.id).toBeTruthy();
+  });
+
+  // The ping reply must name exactly the channels this activation subscribed,
+  // read off the bus rather than from RPC_CHANNELS: a `subagents:rpc:*` handler
+  // wired directly in src/index.ts shows up here too, and a channel that is
+  // subscribed but not advertised (or the reverse) fails either way.
+  it("ping advertises exactly the RPC channels the real factory subscribes", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+
+    await lifecycle.get("session_start")({}, ctx());
+    const subscribed = pi.events.on.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .filter((channel) => channel.startsWith("subagents:rpc:"))
+      .map((channel) => channel.slice("subagents:rpc:".length))
+      .filter((name) => name !== "ping")
+      .sort();
+
+    await busHandlers.get("subagents:rpc:ping")!({ requestId: "req-ping" });
+
+    const reply = pi.events.emit.mock.calls.find(
+      (c: any[]) => c[0] === "subagents:rpc:ping:reply:req-ping",
+    );
+    expect(reply, "ping emitted a reply").toBeTruthy();
+    const advertised = [...reply![1].data.capabilities].sort();
+    expect(advertised).toEqual(subscribed);
+  });
+
+  // Every channel session_start wires has to be released by session_shutdown:
+  // on reload or session replacement the process survives, and a handler left
+  // subscribed by the old activation would answer the next session's RPC (and
+  // be joined by a second registration) — ping included, so a caller is not
+  // told the extension is live by a session that is gone.
+  it("unsubscribes every RPC handler on session_shutdown", async () => {
+    const { pi, lifecycle, busUnsubs } = makePi();
+    subagentsExtension(pi);
+
+    await lifecycle.get("session_start")({}, ctx());
+    const rpcUnsubs = [...busUnsubs.entries()].filter(([channel]) => channel.startsWith("subagents:rpc:"));
+    expect(rpcUnsubs).toHaveLength(RPC_CHANNELS.length);
+
+    await lifecycle.get("session_shutdown")();
+
+    for (const [channel, unsub] of rpcUnsubs) {
+      expect(unsub, `${channel} must be unsubscribed on shutdown`).toHaveBeenCalled();
+    }
   });
 
   // The RPC handler emits nothing itself: the event comes from the manager's

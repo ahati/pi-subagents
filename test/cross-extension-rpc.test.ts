@@ -5,6 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 
+/**
+ * Hard-coded on purpose: the advertised capabilities are a contract, so this
+ * must not be derived from the implementation's own list.
+ */
+const EXPECTED_CAPABILITIES = ["consume", "pause", "resume", "spawn", "steer", "stop"]; // sorted
+
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {
   const listeners = new Map<string, Set<(data: unknown) => void>>();
@@ -17,6 +23,22 @@ function createEventBus(): EventBus {
     emit(event, data) {
       for (const handler of listeners.get(event) ?? []) handler(data);
     },
+  };
+}
+
+/** Bus wrapper recording every channel something subscribed to. */
+function createRecordingEventBus() {
+  const bus = createEventBus();
+  const channels = new Set<string>();
+  return {
+    bus: {
+      on(event: string, handler: (data: unknown) => void) {
+        channels.add(event);
+        return bus.on(event, handler);
+      },
+      emit: bus.emit,
+    },
+    channels,
   };
 }
 
@@ -45,14 +67,87 @@ describe("cross-extension RPC", () => {
   // --- ping ---
 
   describe("ping RPC", () => {
-    it("replies with protocol version", async () => {
+    it("replies with the protocol version and the wired capabilities", async () => {
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:ping:reply:req-1", reply);
       events.emit("subagents:rpc:ping", { requestId: "req-1" });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
-      expect(reply).toHaveBeenCalledWith({ success: true, data: { version: PROTOCOL_VERSION } });
+      const { data } = reply.mock.calls[0][0];
+      expect(data.version).toBe(PROTOCOL_VERSION);
+      // Sorted: the wire order is incidental, the set is the contract.
+      expect([...data.capabilities].sort()).toEqual(EXPECTED_CAPABILITIES);
+    });
+
+    it("advertises nothing it cannot answer — every capability has a live handler", async () => {
+      registerRpcHandlers(deps);
+      const pingReply = vi.fn();
+      events.on("subagents:rpc:ping:reply:req-cap", pingReply);
+      events.emit("subagents:rpc:ping", { requestId: "req-cap" });
+      await vi.waitFor(() => expect(pingReply).toHaveBeenCalled());
+
+      const capabilities: string[] = pingReply.mock.calls[0][0].data.capabilities;
+      expect(Array.isArray(capabilities)).toBe(true);
+      expect(capabilities.length).toBeGreaterThan(0);
+      // Named payloads: a capability with no entry here is one this test does
+      // not know how to exercise, and an advertised-but-unwired name times out.
+      const payloads: Record<string, object> = {
+        spawn: { type: "general-purpose", prompt: "x" },
+        stop: { agentId: "agent-42" },
+        pause: { agentId: "agent-42" },
+        resume: { agentId: "agent-42" },
+        consume: { agentId: "agent-42" },
+        steer: { agentId: "agent-42", message: "x" },
+      };
+
+      for (const capability of capabilities) {
+        const channel = `subagents:rpc:${capability}`;
+        const requestId = `req-cap-${capability}`;
+        const reply = vi.fn();
+        events.on(`${channel}:reply:${requestId}`, reply);
+        events.emit(channel, { requestId, ...payloads[capability] });
+
+        await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+        // Success envelope only: most handlers return nothing, so `data` is
+        // omitted by design (`handleRpc`).
+        expect(reply.mock.calls[0][0].success).toBe(true);
+      }
+    });
+
+    it("wires nothing the capabilities do not advertise", async () => {
+      const { bus, channels } = createRecordingEventBus();
+      registerRpcHandlers({ ...deps, events: bus });
+
+      // Snapshot before any test-side listener: subscribing to a reply channel
+      // would land in the recorded set too, and it is not a wired handler.
+      const registered = [...channels].filter(c => c.startsWith("subagents:rpc:"));
+
+      const reply = vi.fn();
+      bus.on("subagents:rpc:ping:reply:req-wired", reply);
+      bus.emit("subagents:rpc:ping", { requestId: "req-wired" });
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const advertised = (reply.mock.calls[0][0].data.capabilities as string[])
+        .map(c => `subagents:rpc:${c}`);
+
+      expect(registered.sort()).toEqual(["subagents:rpc:ping", ...advertised].sort());
+    });
+
+    it("returns a fresh capabilities array per reply", async () => {
+      registerRpcHandlers(deps);
+      const first = vi.fn();
+      const second = vi.fn();
+      events.on("subagents:rpc:ping:reply:req-caps-1", first);
+      events.on("subagents:rpc:ping:reply:req-caps-2", second);
+
+      events.emit("subagents:rpc:ping", { requestId: "req-caps-1" });
+      await vi.waitFor(() => expect(first).toHaveBeenCalled());
+      // A caller that mutates what it got must not change every later reply.
+      first.mock.calls[0][0].data.capabilities.length = 0;
+
+      events.emit("subagents:rpc:ping", { requestId: "req-caps-2" });
+      await vi.waitFor(() => expect(second).toHaveBeenCalled());
+      expect([...second.mock.calls[0][0].data.capabilities].sort()).toEqual(EXPECTED_CAPABILITIES);
     });
 
     it("scopes replies — other requestIds do not receive it", async () => {

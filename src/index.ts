@@ -1205,6 +1205,8 @@ export default function (pi: ExtensionAPI) {
     }
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
+    rpcHandle?.unsubPause();
+    rpcHandle?.unsubResume();
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle?.unsubSteer();

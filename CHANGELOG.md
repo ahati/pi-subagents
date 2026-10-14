@@ -11,6 +11,10 @@ check the entries below for behaviour changes.
 
 ### Added
 - **Paused agents with no persisted session survive a quit and are re-run by `/continue`.** The pause manifest previously listed only agents with a session file, so `persist_session: false` and queued spawns were lost on quit; each row now carries a respawn recipe (the original prompt plus the model, thinking level, turn cap and isolation the live record held), and `/continue` re-runs it fresh after a restart — reclaiming its handle and alias — while still resuming session-backed agents exactly. The `/pause` and `/continue` reports say so, and the "quitting loses it" warning is now reserved for a paused record with neither a session file nor a prompt. A re-run starts a new conversation: the earlier transcript and tool state are gone.
+- **The `subagents:rpc:ping` reply advertises a `capabilities` array** naming the request channels this build answers (`spawn`, `stop`, `pause`, `resume`, `consume`, `steer`; `ping` itself is omitted). It is derived from the handlers `registerRpcHandlers` wires, so it cannot fall behind the way the protocol version did — the version stays `2`, because the field is additive. A build predating the field answers without `capabilities`; read that as "version 2 alone" and keep the send-and-timeout fallback for anything newer than `stop`.
+
+### Fixed
+- **The `pause` and `resume` RPC handlers are released on `session_shutdown`.** The teardown unsubscribed `ping`, `spawn`, `stop`, `consume` and `steer` but never the two pause/resume members of `RpcHandle`, so on reload or session replacement — where the process survives — they stayed subscribed, answered the next session's requests, and were joined by a second registration.
 
 ## [2026.10.14-r1] - 2026-10-14
 
