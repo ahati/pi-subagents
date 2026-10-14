@@ -107,6 +107,25 @@ describe("workflow dialog window alignment across levels", () => {
     }
   });
 
+  it("draws the same rule line at every level, byte for byte", () => {
+    // Captured from the render before the rule moved into the shared frame
+    // module, so this is the no-rendered-change proof: the segment levels and
+    // the log level's string path draw one rule, and their bytes cannot drift.
+    const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
+    expect(rules(frames.phases!)).toEqual([
+      "├ Phases ──────────┬ Verify · 1 agent ─────────────────────────────────────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(frames.detail!)).toEqual([
+      "├ Verify · 1 agent ┬ row-one ──────────────────────────────────────────────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(frames.log!)).toEqual([
+      "├  Verify · 1 age…─┬  row-one ─────────────────────────────────────────────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+    ]);
+  });
+
   it("puts the pane's right bar on the window's right border", () => {
     for (const [level, lines] of Object.entries(frames)) {
       for (const line of lines) {

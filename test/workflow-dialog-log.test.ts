@@ -157,3 +157,31 @@ describe("the workflow dialog's log level", () => {
     instance.dispose();
   });
 });
+
+describe("the log level's pane rule", () => {
+  // This level draws the frame in strings rather than segments, and its rule is
+  // the shared one in that form: ` title ` is what it measures and cuts, which
+  // is how it has always read a rule cell. Pinned byte-for-byte from the render
+  // before the rule moved into the shared module.
+  it("is the shared rule, in strings, at every width", () => {
+    const { instance } = harness([makeRecord({ id: "rec-1", description: "verify:auth.ts" })]);
+    const rules = (width: number) => instance.render(width).filter(line => line.startsWith("\u251c"));
+    expect(rules(120)).toEqual([
+      "├ * Verify · 2 age…*─┬ * row-one *─────────────────────────────────────────────────────────────────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────────────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(80)).toEqual([
+      "├ * Verify · 2 age…*─┬ * row-one *─────────────────────────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(60)).toEqual([
+      "├ * Verify · 2 age…*─┬ * row-one *─────────────────────────────┤",
+      "├──────────────────│───────────────────────────────────────┤",
+    ]);
+    expect(rules(40)).toEqual([
+      "├ * Verify ·…*─┬ * row-one *───────────────┤",
+      "├────────────│─────────────────────────┤",
+    ]);
+    instance.dispose();
+  });
+});

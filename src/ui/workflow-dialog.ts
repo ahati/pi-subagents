@@ -90,6 +90,8 @@ import {
   type PaneBox,
   paneBodyHeight,
   paneRightWidth,
+  paneRule,
+  type RuleCell,
   UNICODE_PANE_BOX,
   WINDOW_CHROME_ROWS,
 } from "./window-frame.js";
@@ -538,12 +540,6 @@ export function agentPaneTitleFor(filter: WorkflowDialogFilter, phaseTitle: stri
     : `${phaseTitle} · ${shown} ${filter}`;
 }
 
-/** Fill a title out to the cell width with rule, so the corners stay put. */
-function padTitle(line: WorkflowCardLine, width: number, horizontal: string): WorkflowCardLine {
-  const gap = Math.max(0, width - lineWidth(line));
-  return gap > 0 ? [...line, { text: horizontal.repeat(gap), color: "dim" }] : line;
-}
-
 /** One pane row, padded to exactly `width` so the frame stays vertical. */
 function padCell(line: WorkflowCardLine, width: number): WorkflowCardLine {
   const clamped = clampLine(line, width);
@@ -567,29 +563,6 @@ function windowRow(content: WorkflowCardLine, width: number, glyphs: WorkflowDia
   ];
 }
 
-/** A title as it sits in a rule: ` Title ` then rule to `width`. */
-function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardSegment[] {
-  const room = Math.max(0, width - 2);
-  // Truncated with the marker rather than simply cut: `Discover · 1 ag…` has to
-  // read as "there was more", not as a title that happens to end oddly. Pi's
-  // own truncation does the width arithmetic, including wide characters; its
-  // ellipsis arrives wrapped in resets, which are stripped for the same reason
-  // `clampLine` strips them — the layout stays plain text until it is themed.
-  const shown = stripTerminalSequences(truncateToWidth(title, room, glyphs.ellipsis));
-  const rule = Math.max(0, width - visibleWidth(shown) - 2);
-  // Clamped as well as computed: at a terminal narrow enough that `room` hits
-  // zero the marker alone is already wider than the cell, and a title that
-  // overflows tears the frame open on every row below it.
-  return clampLine(
-    [
-      { text: " ", color: "dim" },
-      { text: shown, color: "muted", bold: true },
-      { text: ` ${glyphs.box.horizontal.repeat(rule)}`, color: "border" },
-    ],
-    width,
-  );
-}
-
 /** One body row: the two cells zipped between the shared vertical borders. */
 function paneBodyRow(
   left: WorkflowCardLine | undefined,
@@ -608,32 +581,43 @@ function paneBodyRow(
 }
 
 /**
- * The rule under the header (or under the panes): `├` + cells + `┤`, with the
- * pane titles carried in the upper one and a `┬` where the panes meet.
+ * The shared rule, as segments: `├ ─ Phases ─┬─ Verify · 1 agent ─┤`, with a
+ * `┬` where the panes meet. The titles' padding stays outside the ellipsis —
+ * the segment levels' reading of a rule cell; the log level, which draws the
+ * same rule in strings, measures ` title ` instead.
  */
-function paneRule(options: {
+function paneRuleLine(options: {
   leftTitle?: string;
   rightTitle?: string;
   leftWidth: number;
   rightWidth: number;
   glyphs: WorkflowDialogGlyphs;
-}): WorkflowCardLine[] {
+}): WorkflowCardLine {
   const { glyphs } = options;
-  const rule = (width: number): WorkflowCardSegment => ({ text: glyphs.box.horizontal.repeat(width), color: "border" });
-  const line: WorkflowCardLine = [{ text: glyphs.box.leftTee, color: "border" }];
-  if (options.leftTitle !== undefined) {
-    line.push(...padTitle(frameTitle(options.leftTitle, options.leftWidth, glyphs), options.leftWidth, glyphs.box.horizontal));
-    line.push({ text: glyphs.box.topTee, color: "border" });
-    line.push(
-      ...padTitle(frameTitle(options.rightTitle ?? "", options.rightWidth, glyphs), options.rightWidth, glyphs.box.horizontal),
-    );
-  } else {
-    line.push(rule(options.leftWidth));
-    line.push({ text: glyphs.box.vertical, color: "border" });
-    line.push(rule(options.rightWidth));
-  }
-  line.push({ text: glyphs.box.rightTee, color: "border" });
-  return [line];
+  const rule = paneRule({
+    leftWidth: options.leftWidth,
+    rightWidth: options.rightWidth,
+    box: glyphs.box,
+    leftTitle: options.leftTitle,
+    rightTitle: options.rightTitle,
+    ellipsis: glyphs.ellipsis,
+    titlePadding: "outside",
+  });
+  const cell = (c: RuleCell): WorkflowCardLine =>
+    c.title === undefined
+      ? [{ text: c.rule, color: "border" }]
+      : [
+          { text: c.lead, color: "dim" },
+          { text: c.title, color: "muted", bold: true },
+          { text: c.rule, color: "border" },
+        ];
+  return [
+    { text: rule.leftTee, color: "border" },
+    ...cell(rule.left),
+    { text: rule.tee, color: "border" },
+    ...cell(rule.right),
+    { text: rule.rightTee, color: "border" },
+  ];
 }
 
 /* ------------------------------------------------------------------------- *
@@ -956,7 +940,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // The titled rule under the header; the panes' cells between shared borders;
   // the plain rule; the hints; the bottom edge.
   lines.push(
-    ...paneRule({
+    paneRuleLine({
       leftTitle: inPhases ? "Phases" : agentPaneTitle,
       rightTitle: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
       leftWidth,
@@ -967,7 +951,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   for (let row = 0; row < bodyRows; row++) {
     lines.push(paneBodyRow(leftRows[row], rightRows[row], leftWidth, rightWidth, glyphs));
   }
-  lines.push(...paneRule({ leftWidth, rightWidth, glyphs }));
+  lines.push(paneRuleLine({ leftWidth, rightWidth, glyphs }));
 
   // ---- Key hints ----
   // Only the actions the run can currently take, so the footer never advertises
@@ -1577,26 +1561,32 @@ export class WorkflowDialog implements Component {
     const agentPaneTitle = agentPaneTitleFor(this.state.filter, phaseTitle, view.visibleAgents.length);
 
     // ---- Window helpers, in strings. The shapes mirror the segment path's
-    // windowRow/paneRule so both render paths draw the same window — the edges
-    // and the content row come from the shared frame module outright.
+    // windowRow/paneRuleLine so both render paths draw the same window — the
+    // edges, the content row and the rule all come from the shared frame
+    // module outright.
     const border = (s: string) => th.fg("border", s);
     const windowTop = () => border(frameEdge(contentWidth, glyphs.box, "top"));
     const windowBottom = () => border(frameEdge(contentWidth, glyphs.box, "bottom"));
     const windowLine = (content: string) => frameRow(contentWidth, content, glyphs.box, border, glyphs.ellipsis);
-    const ruleCell = (title: string | undefined, w: number) => {
-      if (title === undefined) return border(glyphs.box.horizontal.repeat(w));
-      // Stripped like `frameTitle` strips its ellipsis wrappers: pi's
-      // truncation wraps the marker in resets, and resets inside a rule cell
-      // skew every raw-column offset to the right of them.
-      const shown = stripTerminalSequences(truncateToWidth(` ${title} `, w - 2, glyphs.ellipsis));
-      return `${border(" ")}${th.fg("muted", th.bold(shown))}${border(glyphs.box.horizontal.repeat(Math.max(0, w - visibleWidth(shown) - 1)))}`;
+    // The shared rule, in strings. ` title ` is what this level has always
+    // measured and cut — its padding inside the ellipsis, unlike the segment
+    // levels — and the resets pi's truncation wraps the marker in are stripped
+    // for the same reason the segment path strips them: resets inside a rule
+    // cell skew every raw-column offset to the right of them.
+    const ruleRow = (leftTitle: string | undefined, rightTitle: string | undefined) => {
+      const rule = paneRule({
+        leftWidth,
+        rightWidth,
+        box: glyphs.box,
+        leftTitle,
+        rightTitle,
+        ellipsis: glyphs.ellipsis,
+        titlePadding: "inside",
+      });
+      const cell = (c: RuleCell) =>
+        c.title === undefined ? border(c.rule) : `${border(c.lead)}${th.fg("muted", th.bold(c.title))}${border(c.rule)}`;
+      return border(rule.leftTee) + cell(rule.left) + border(rule.tee) + cell(rule.right) + border(rule.rightTee);
     };
-    const ruleRow = (leftTitle: string | undefined, rightTitle: string | undefined) =>
-      border(glyphs.box.leftTee) +
-      ruleCell(leftTitle, leftWidth) +
-      border(leftTitle === undefined ? glyphs.box.vertical : glyphs.box.topTee) +
-      ruleCell(rightTitle, rightWidth) +
-      border(glyphs.box.rightTee);
 
     const lines: string[] = [];
     lines.push(windowTop());

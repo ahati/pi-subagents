@@ -1143,7 +1143,7 @@ src/
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
     workflow-dialog.ts    # /agents → Workflows inspector — hub-style window, three levels
-    window-frame.ts       # Window chrome shared by the hub and the inspector: edges, rows, pane split, footer, height
+    window-frame.ts       # Window chrome shared by the hub and the inspector: edges, rows, pane split, rules, footer, height
 ```
 
 ## License

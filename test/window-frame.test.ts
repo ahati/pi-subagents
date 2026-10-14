@@ -9,6 +9,7 @@
  * components actually render through them, so a third hand-rolled copy cannot
  * grow back unnoticed.
  */
+import { readdirSync, readFileSync } from "node:fs";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
@@ -21,6 +22,8 @@ import {
   leftPaneWidth,
   paneBodyHeight,
   paneRightWidth,
+  paneRule,
+  type RuleCell,
   splitEdge,
   UNICODE_PANE_BOX,
   WINDOW_CHROME_ROWS,
@@ -85,6 +88,84 @@ describe("window chrome", () => {
     const bottom = splitEdge(24, 8, UNICODE_PANE_BOX, "bottom");
     expect(bottom).toBe(`╰${"─".repeat(8)}┴${"─".repeat(13)}╯`);
     expect(bottom.length).toBe(24);
+  });
+});
+
+describe("pane rules", () => {
+  const cellText = (cell: RuleCell) => cell.lead + (cell.title ?? "") + cell.rule;
+  const line = (rule: { leftTee: string; left: RuleCell; tee: string; right: RuleCell; rightTee: string }) =>
+    rule.leftTee + cellText(rule.left) + rule.tee + cellText(rule.right) + rule.rightTee;
+
+  it("draws the two cells between their bars, one tee where the panes meet", () => {
+    const titled = paneRule({
+      leftWidth: 18,
+      rightWidth: 79,
+      box: UNICODE_PANE_BOX,
+      leftTitle: "Phases",
+      rightTitle: "Verify \u00b7 1 agent",
+    });
+    expect(line(titled)).toBe(`\u251c Phases ${"\u2500".repeat(10)}\u252c Verify \u00b7 1 agent ${"\u2500".repeat(61)}\u2524`);
+    expect(visibleWidth(line(titled))).toBe(100);
+    // Untitled: the whole line is rule, and the pane bar is the plain vertical.
+    const plain = paneRule({ leftWidth: 18, rightWidth: 79, box: UNICODE_PANE_BOX });
+    expect(line(plain)).toBe(`\u251c${"\u2500".repeat(18)}\u2502${"\u2500".repeat(79)}\u2524`);
+    expect(plain.left.title).toBeUndefined();
+    expect(plain.tee).toBe("\u2502");
+  });
+
+  it("swaps the whole rule for the ASCII tier, one column per glyph", () => {
+    const titled = paneRule({
+      leftWidth: 18,
+      rightWidth: 79,
+      box: ASCII_PANE_BOX,
+      leftTitle: "Phases",
+      rightTitle: "Verify \u00b7 1 agent",
+    });
+    expect(line(titled)).toBe(`+ Phases ${"-".repeat(10)}+ Verify \u00b7 1 agent ${"-".repeat(61)}+`);
+    expect(visibleWidth(line(titled))).toBe(100);
+    expect(line(paneRule({ leftWidth: 18, rightWidth: 79, box: ASCII_PANE_BOX })))
+      .toBe(`+${"-".repeat(18)}|${"-".repeat(79)}+`);
+  });
+
+  it("fills each cell to its own width, odd and even, titled or not", () => {
+    for (const width of [2, 3, 5, 16, 17, 18, 19, 80, 81]) {
+      for (const title of [undefined, "Phases", "a title far too long for any cell"]) {
+        for (const titlePadding of ["outside", "inside"] as const) {
+          const cell = paneRule({ leftWidth: width, rightWidth: 79, box: UNICODE_PANE_BOX, leftTitle: title, titlePadding }).left;
+          expect(visibleWidth(cellText(cell)), `w=${width} title=${title} ${titlePadding}`).toBe(width);
+        }
+      }
+    }
+  });
+
+  it("reads a title's padding one of two ways when it has to cut it", () => {
+    // The one column the inspector's two render paths have always differed by:
+    // `outside` cuts the title and keeps the space either side of it, `inside`
+    // cuts ` title ` as one string, so the leading pad gives way first.
+    const outside = paneRule({
+      leftWidth: 18, rightWidth: 79, box: UNICODE_PANE_BOX, leftTitle: "Verify \u00b7 2 agents", titlePadding: "outside",
+    });
+    expect(cellText(outside.left)).toBe(" Verify \u00b7 2 agen\u2026 ");
+    const inside = paneRule({
+      leftWidth: 18, rightWidth: 79, box: UNICODE_PANE_BOX, leftTitle: "Verify \u00b7 2 agents", titlePadding: "inside",
+    });
+    expect(cellText(inside.left)).toBe("  Verify \u00b7 2 age\u2026\u2500");
+    // Both readings are exact: only the bytes differ, never the column count.
+    for (const cell of [outside.left, inside.left]) expect(visibleWidth(cellText(cell))).toBe(18);
+  });
+
+  it("keeps the rule's bars in this module alone", () => {
+    // A surface that grew a second rule would have to reach for the box's tee
+    // fields to pick its bars; the byte-pinned rule lines in the dialog suites
+    // catch a copy that hardcodes the glyphs instead.
+    const dir = new URL("../src/ui/", import.meta.url);
+    const files = readdirSync(dir).filter(name => name.endsWith(".ts") && name !== "window-frame.ts");
+    expect(files.length).toBeGreaterThan(5);
+    // Reading a bar off a box, or defining one: what a second rule needs.
+    const ownRule = /(\bbox\.(?:leftTee|topTee|rightTee|bottomTee)|\b(?:leftTee|topTee|rightTee|bottomTee):)/;
+    for (const file of files) {
+      expect(readFileSync(new URL(file, dir), "utf-8"), `${file} draws its own rule`).not.toMatch(ownRule);
+    }
   });
 });
 
