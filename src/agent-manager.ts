@@ -1390,12 +1390,9 @@ export class AgentManager {
     // Bare continuation: the session's transcript is the message. A prompt is
     // only ever sent for a non-parked record resumed with one (mentions).
     // prompt ignored — resume is bare (docs/pause-quit-resume-continue.md §4.2 FR-C2)
+    // `spawnPrompt` deliberately stays the original: a follow-up prompt is not
+    // the task a later respawn replays.
     const effectivePrompt = bare ? undefined : prompt;
-    // A resume that carries a prompt (an `@handle <text>` continuation) is the
-    // latest intent for this agent; a bare park resume leaves the original one
-    // in place, which is what a later respawn replays. Set here, not in
-    // startResume: the foreground branch below runs resumeAgent inline.
-    if (effectivePrompt !== undefined) record.spawnPrompt = effectivePrompt;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still

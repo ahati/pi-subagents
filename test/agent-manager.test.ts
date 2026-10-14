@@ -2774,7 +2774,7 @@ describe("AgentManager — spawnPrompt (ephemeral respawn recipe)", () => {
     manager?.dispose();
   });
 
-  it("records the spawn prompt and lets a prompt-carrying resume replace it", async () => {
+  it("keeps the original spawn prompt through a prompt-carrying resume", async () => {
     manager = new AgentManager();
     resolvedRun();
     vi.mocked(resumeAgent).mockResolvedValue({
@@ -2799,9 +2799,10 @@ describe("AgentManager — spawnPrompt (ephemeral respawn recipe)", () => {
     await record.promise;
     expect(record.spawnPrompt).toBe("original task");
 
-    // An `@handle <text>` resume is the latest intent; a respawn replays that.
+    // An `@handle <text>` resume is a follow-up on the same task, not a new
+    // one: a respawn still replays what the agent was started with.
     await manager.resume(id, "new intent");
     await record.promise;
-    expect(record.spawnPrompt).toBe("new intent");
+    expect(record.spawnPrompt).toBe("original task");
   });
 });

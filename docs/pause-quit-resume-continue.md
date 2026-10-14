@@ -285,7 +285,8 @@ real sessions and the real resume flow.
   only as far as the live record held them — a queued or mention-spawned
   agent has no invocation snapshot, so the agent config and pi defaults
   decide. The stored prompt is kept verbatim, which grows the manifest.
-- An agent that settled while parked keeps `paused` status and has no
-  session file, so after a restart `/continue` re-runs it: the work is
-  repeated, not lost.
+- An agent that settled while parked keeps `paused` status: after a restart
+  `/continue` restores it from the manifest, from its session file when it has
+  one (a transcript that ends on the final answer is delivered as the result),
+  otherwise by re-running its respawn recipe — the task is run again, not lost.
 - Prompt-cache misses after long pauses are expected and accepted.

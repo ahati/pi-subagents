@@ -23,7 +23,23 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { SubagentType } from "./types.js";
+import type { EffectiveThinkingLevel, SubagentType } from "./types.js";
+
+/**
+ * Minimal recipe for re-running an agent parked without a persisted session.
+ * Best-effort by construction: only what the live record held at pause time.
+ */
+export interface PausedRespawnSpec {
+  /** The prompt the original run was started with, verbatim. */
+  prompt: string;
+  /** Canonical `provider/modelId` as the run's session reported it. */
+  model?: string;
+  /** The level in effect, `"off"` included — it is a level, not an absence. */
+  thinking?: EffectiveThinkingLevel;
+  maxTurns?: number;
+  isolated?: boolean;
+  inheritContext?: boolean;
+}
 
 /** One manifest row: enough to reopen the conversation and reclaim its names. */
 export interface PausedAgentEntry {
