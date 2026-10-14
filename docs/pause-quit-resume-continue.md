@@ -150,6 +150,16 @@ FR-P3/P4 exactly: pi reports each boundary only after the prior work is
 persisted, so a tool that was running finishes and its output lands in the
 session before the gate closes.
 
+A park also hands the run's concurrency slot back: a parked run is not
+running, and since paused records are exempt from the record GC nothing else
+would ever reclaim the slot — a wall of parked agents would otherwise starve
+the queue behind them. A resume re-takes the slot *before* opening the gate,
+and queues the reopen when the pool is full, so `/continue` on a large park
+resumes in pool-sized waves rather than all at once: the reply for a parked
+agent may report it as `queued` (still `success: true`). Records charged to
+neither pool — nested children, workflow agents — reopen immediately, since
+they never held a slot.
+
 ### 5.2 Park manifest
 
 The park state that must survive a process lives in a per-session manifest

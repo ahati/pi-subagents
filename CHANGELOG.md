@@ -9,6 +9,9 @@ check the entries below for behaviour changes.
 
 ## [Unreleased]
 
+### Fixed
+- **A paused agent hands its concurrency slot back until it is resumed.** `pause()` parked the run behind its gate but left it counted against `maxConcurrent`/`maxConcurrentForeground`, and since paused records are exempt from the 10-minute cleanup nothing ever reclaimed the slot — a wall of parked agents starved the queue behind them permanently. The slot is now released at park time (which is what lets the queue drain) and re-taken by `resume()` before the gate reopens. A resume whose pool is full is no longer run over the limit: the agent comes back as `queued` and the drain reopens it in FIFO order, so `/continue` on a large park resumes in pool-sized waves. Nested children and workflow agents take no slot and still reopen immediately, and the GC exemption for paused records is unchanged.
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added
