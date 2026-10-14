@@ -35,7 +35,7 @@ import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
-import { type PausedAgentEntry, type PausedMainTurn, type PausedRespawnSpec, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
+import { type CapturedResultStatus, type PausedAgentEntry, type PausedMainTurn, type PausedRespawnSpec, PauseStore, resolvePauseManifestPath, resolvePauseStorePath } from "./pause-store.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { continueSessionBare, countUnansweredToolCalls, finalReportFromSessionFile } from "./session-continue.js";
@@ -3274,8 +3274,18 @@ Terse command-style prompts produce shallow, generic work.
    */
   const capturedSettled = new Map<string, PausedAgentEntry>();
 
-  /** The manifest row a captured settled record is listed under. */
+  /** The outcome a record settled with, when it is one `/pause` captures. */
+  function capturedStatus(record: AgentRecord): CapturedResultStatus | undefined {
+    return record.status === "completed" || record.status === "steered" || record.status === "error" ? record.status : undefined;
+  }
+
+  /**
+   * The manifest row a captured settled record is listed under. Parked rows go
+   * through here too (see `pausedAgentRow`), so a run that has not settled
+   * carries no `status` and a reader falls back to `completed`.
+   */
   function pauseEntryFor(record: AgentRecord & { sessionFile: string }): PausedAgentEntry {
+    const status = capturedStatus(record);
     return {
       id: record.id,
       type: record.type,
@@ -3284,6 +3294,15 @@ Terse command-style prompts produce shallow, generic work.
       description: record.description,
       sessionFile: record.sessionFile,
       pausedAt: new Date().toISOString(),
+      ...(status
+        ? {
+            status,
+            // Only for an errored run: `settleOutcome` never clears
+            // `record.error`, so a resumed-then-completed record can still
+            // carry a stale failure.
+            ...(status === "error" && record.error ? { error: record.error } : {}),
+          }
+        : {}),
     };
   }
 
@@ -3336,9 +3355,11 @@ Terse command-style prompts produce shallow, generic work.
    * deliver the result the completion nudge may never get to. Not gated or
    * paused — the run is already over.
    */
-  function isCapturableResult(record: AgentRecord): record is AgentRecord & { sessionFile: string } {
+  function isCapturableResult(
+    record: AgentRecord,
+  ): record is AgentRecord & { sessionFile: string; status: CapturedResultStatus } {
     return isTopLevelAgent(record)
-      && (record.status === "completed" || record.status === "steered" || record.status === "error")
+      && capturedStatus(record) !== undefined
       && record.resultConsumed !== true
       && typeof record.sessionFile === "string";
   }
@@ -3564,7 +3585,15 @@ Terse command-style prompts produce shallow, generic work.
           capturedSettled.delete(id);
           continue;
         }
-        if (!present.has(id)) entries.push(entry);
+        // The row was written when the run settled; a resumed run that settles
+        // again must refresh it, or `/continue` would deliver the stale
+        // outcome (e.g. an old failure after a successful resume).
+        const record = manager.getRecord(id);
+        const current = record && isCapturableResult(record)
+          ? { ...pauseEntryFor(record), pausedAt: entry.pausedAt }
+          : entry;
+        if (current !== entry) capturedSettled.set(id, current);
+        if (!present.has(id)) entries.push(current);
       }
       store.replace(entries);
     } catch {
@@ -3870,7 +3899,7 @@ Terse command-style prompts produce shallow, generic work.
     if (resumed > 0) parts.push(`Continued ${resumed} agent${resumed === 1 ? "" : "s"}`);
     if (respawned > 0) parts.push(`${respawned} re-ran from scratch (transcript not restored)`);
     if (stale > 0) parts.push(`${stale} already handled`);
-    if (delivered > 0) parts.push(`Delivered ${delivered} completed agent result${delivered === 1 ? "" : "s"}`);
+    if (delivered > 0) parts.push(`Delivered ${delivered} captured agent result${delivered === 1 ? "" : "s"}`);
     if (failedRevive > 0) parts.push(`${failedRevive} could not be revived (kept in the manifest)`);
     if (failedRespawn > 0) parts.push(`${failedRespawn} could not be re-run (kept in the manifest)`);
     if (undelivered.length > 0) parts.push(`${undelivered.length} result${undelivered.length === 1 ? "" : "s"} could not be delivered (kept in the manifest)`);
@@ -3897,11 +3926,18 @@ Terse command-style prompts produce shallow, generic work.
       }, { deliverAs: "followUp", triggerTurn: true }));
       return;
     }
+    const status: CapturedResultStatus =
+      entry.status === "steered" || entry.status === "error" ? entry.status : "completed";
+    const label = getStatusLabel(status, entry.error);
+    // Mirrors the live notification exactly: the status element, the summary
+    // wording and details.status all come from the captured outcome. A row
+    // without one (pre-change manifest, parked run) reads `completed`, which
+    // is what this path used to assert unconditionally.
     const content = [
       "<task-notification>",
       `<task-id>${entry.id}</task-id>`,
-      `<status>completed</status>`,
-      `<summary>Agent "${escapeXml(entry.description)}" completed</summary>`,
+      `<status>${escapeXml(label)}</status>`,
+      `<summary>Agent "${escapeXml(entry.description)}" ${status}${getStatusNote(status)}</summary>`,
       `<result>${escapeXml(report)}</result>`,
       "</task-notification>",
     ].join("\n") + footer;
@@ -3912,12 +3948,15 @@ Terse command-style prompts produce shallow, generic work.
       details: {
         id: entry.id,
         description: entry.description,
-        status: "completed",
+        status,
+        // The manifest carries no usage figures; the renderer hides every
+        // zero, so a captured delivery simply shows no stats line.
         toolUses: 0,
         turnCount: 0,
         totalTokens: 0,
         totalCost: 0,
         durationMs: 0,
+        error: entry.error,
         resultPreview: report.length > 500 ? `${report.slice(0, 500)}…` : report,
       },
     }, { deliverAs: "followUp", triggerTurn: true }));

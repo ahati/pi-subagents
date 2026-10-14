@@ -12,6 +12,9 @@ check the entries below for behaviour changes.
 ### Added
 - **Paused agents with no persisted session survive a quit and are re-run by `/continue`.** The pause manifest previously listed only agents with a session file, so `persist_session: false` and queued spawns were lost on quit; each row now carries a respawn recipe (the original prompt plus the model, thinking level, turn cap and isolation the live record held), and `/continue` re-runs it fresh after a restart — reclaiming its handle and alias — while still resuming session-backed agents exactly. The `/pause` and `/continue` reports say so, and the "quitting loses it" warning is now reserved for a paused record with neither a session file nor a prompt. A re-run starts a new conversation: the earlier transcript and tool state are gone.
 
+### Fixed
+- **Captured results now carry and render the status they settled with.** `/pause` records the outcome on each manifest row (`completed`, `steered` or `error`, with the failure text), and `/continue` after a restart renders it exactly as the live completion notification would — an agent that errored before the quit is delivered as `Error: <msg>` instead of a fabricated completion. A row without a status (written before this change, or parked rather than settled) is still treated as a completion and rendered like one, so it reads `<status>Done</status>`; the fields are additive, so the manifest stays version 3.
+
 ## [2026.10.14-r1] - 2026-10-14
 
 ### Added

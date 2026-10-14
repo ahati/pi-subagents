@@ -15,6 +15,11 @@
  * a fresh run of the original task: the earlier transcript, tool state and
  * usage history are gone. `/pause` reports that split.
  *
+ * A row may also list a settled-but-unconsumed result `/pause` captured. Such
+ * a row carries the outcome its run settled with (`status`, plus `error` for
+ * an errored run) so a delivery after a restart reports the real status; both
+ * fields are additive within manifest version 3 — absent means `completed`.
+ *
  * Concurrency: writes are whole-file snapshots via temp+rename (POSIX
  * atomic), and every access re-reads from disk, so there is no cache to go
  * stale. There is deliberately no PID lock (unlike ScheduleStore): the store
@@ -25,7 +30,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentRecord, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
  * Minimal recipe for re-running an agent parked without a persisted session.
@@ -42,6 +47,13 @@ export interface PausedRespawnSpec {
   inheritContext?: boolean;
 }
 
+/**
+ * The outcomes a captured settled result can be listed under — the settled,
+ * unconsumed statuses `/pause` captures (`isCapturableResult`). `Extract` keeps
+ * a rename in `AgentRecord["status"]` a type error instead of silent drift.
+ */
+export type CapturedResultStatus = Extract<AgentRecord["status"], "completed" | "steered" | "error">;
+
 /** One manifest row: enough to reopen the conversation and reclaim its names. */
 export interface PausedAgentEntry {
   /** The original record id — lets `/continue` prefer a still-live record. */
@@ -56,6 +68,18 @@ export interface PausedAgentEntry {
   respawn?: PausedRespawnSpec;
   /** ISO timestamp of when the pause landed (kept across re-syncs). */
   pausedAt: string;
+  /**
+   * The outcome the captured run settled with. Additive within manifest
+   * version 3 — absent on rows written before this field existed and on rows
+   * for parked (not settled) runs, where a reader must fall back to
+   * `completed`. `version` is written but never branched on, so no bump.
+   */
+  status?: CapturedResultStatus;
+  /**
+   * The failure text of an errored run, so delivery renders `Error: <msg>`
+   * instead of `Error: unknown`. Only set when `status === "error"`.
+   */
+  error?: string;
 }
 
 /**

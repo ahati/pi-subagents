@@ -245,6 +245,55 @@ describe("PauseStore respawn rows (v3)", () => {
   });
 });
 
+describe("captured result status (additive v3)", () => {
+  it("round-trips a captured row's status and error", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+    const row = entry({ status: "error", error: "provider exploded" });
+
+    store.replace([row]);
+
+    expect(store.list()).toEqual([row]);
+    // Additive within v3: no version bump for the new fields.
+    const onDisk = JSON.parse(readFileSync(file, "utf8"));
+    expect(onDisk.version).toBe(3);
+    expect(onDisk.entries[0].status).toBe("error");
+    expect(onDisk.entries[0].error).toBe("provider exploded");
+  });
+
+  it("reads a pre-status manifest row without inventing a status", () => {
+    const file = join(tempDir(), "manifest.json");
+    const legacy = {
+      id: "agent-legacy",
+      type: "Explore",
+      description: "old row",
+      sessionFile: "/tmp/legacy.jsonl",
+      pausedAt: "2026-01-01T00:00:00.000Z",
+    };
+    writeFileSync(file, JSON.stringify({ version: 2, entries: [legacy] }));
+    const store = new PauseStore(file);
+
+    expect(store.list()[0].status).toBeUndefined();
+
+    store.replace(store.list());
+    const onDisk = JSON.parse(readFileSync(file, "utf8"));
+    expect(onDisk.version).toBe(3);
+    expect("status" in onDisk.entries[0]).toBe(false);
+    expect("error" in onDisk.entries[0]).toBe(false);
+  });
+
+  it("keeps status and error out of a parked run's row", () => {
+    const file = join(tempDir(), "manifest.json");
+    const store = new PauseStore(file);
+
+    store.replace([entry()]);
+
+    const onDisk = JSON.parse(readFileSync(file, "utf8"));
+    expect("status" in onDisk.entries[0]).toBe(false);
+    expect("error" in onDisk.entries[0]).toBe(false);
+  });
+});
+
 describe("resolvePauseManifestPath fallback", () => {
   it("returns the canonical path for a session with no manifest yet", () => {
     const dir = tempDir();

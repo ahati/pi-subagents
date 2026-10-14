@@ -9,7 +9,7 @@
  * session files after a simulated restart (a fresh boot with the manifest
  * still on disk). The session_start hint is pinned here too.
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -769,5 +769,177 @@ describe("pause manifest hygiene", () => {
     const path = resolvePauseStorePath(process.cwd(), "s1");
     expect(existsSync(path)).toBe(true);
     expect(existsSync(path + ".tmp")).toBe(false);
+  });
+});
+
+/**
+ * A captured manifest row carries the outcome its run settled with; delivery
+ * after a restart must render that outcome, not a fabricated completion.
+ */
+describe("captured result status", () => {
+  /** A child session file whose last message is the assistant's final report. */
+  function writeFinalReportSession(childFile: string, report: string) {
+    mkdirSync(join(childFile, ".."), { recursive: true });
+    const lines = [
+      { type: "session" },
+      { type: "message", message: { role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 } },
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: report }], stopReason: "stop", timestamp: 2 },
+      },
+    ];
+    writeFileSync(childFile, lines.map(line => JSON.stringify(line)).join("\n") + "\n");
+  }
+
+  /** Seed a manifest row for "s1" and boot a fresh process over it. */
+  function seedRow(overrides: Record<string, unknown>, report = "partial report") {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    const sessionFile = join(hermetic.dir, "agent-session.jsonl");
+    writeFinalReportSession(sessionFile, report);
+    new PauseStore(resolvePauseStorePath(process.cwd(), "s1")).replace([
+      {
+        id: "agent-cap1",
+        type: "Explore",
+        handle: "explore",
+        description: "task A",
+        sessionFile,
+        pausedAt: "2026-01-01T00:00:00.000Z",
+        ...overrides,
+      } as any,
+    ]);
+    return bootOnly();
+  }
+
+  function onlyNotification(b: BootedPi) {
+    const sends = vi.mocked(b.pi.sendMessage).mock.calls.filter(c => (c[0] as any)?.customType === "subagent-notification");
+    expect(sends).toHaveLength(1);
+    return sends[0][0] as any;
+  }
+
+  it("delivers a captured errored result as an error, not a completion", async () => {
+    const b = seedRow({ status: "error", error: "provider exploded" });
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    const sent = onlyNotification(b);
+    expect(sent.content).toContain("<status>Error: provider exploded</status>");
+    expect(sent.content).toContain('<summary>Agent "task A" error</summary>');
+    expect(sent.content).toContain("<result>partial report</result>");
+    // No usage block at all: the manifest carries no figures, and the renderer
+    // hides every zero.
+    expect(sent.content).not.toContain("<usage>");
+    expect(sent.content).not.toContain("estimated_cost_usd");
+    expect(sent.details).toMatchObject({
+      status: "error",
+      error: "provider exploded",
+      toolUses: 0,
+      turnCount: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      durationMs: 0,
+    });
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(manifest().list()).toEqual([]);
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("Delivered 1 captured agent result.", "info");
+  });
+
+  it("escapes a failure text that contains XML", async () => {
+    const b = seedRow({ status: "error", error: "boom & <bang>" });
+    await runCommand(b, "continue").result;
+    await flush();
+
+    expect(onlyNotification(b).content).toContain("<status>Error: boom &amp; &lt;bang&gt;</status>");
+  });
+
+  it("delivers a captured steered result with the turn-limit wording", async () => {
+    const b = seedRow({ status: "steered" });
+    await runCommand(b, "continue").result;
+    await flush();
+
+    const sent = onlyNotification(b);
+    expect(sent.content).toContain("<status>Wrapped up (turn limit)</status>");
+    expect(sent.content).toContain('" steered (wrapped up at the turn limit — output may be partial)</summary>');
+    expect(sent.details.status).toBe("steered");
+  });
+
+  it("delivers a captured completed result as the live notification would", async () => {
+    const b = seedRow({ status: "completed" });
+    await runCommand(b, "continue").result;
+    await flush();
+
+    const sent = onlyNotification(b);
+    expect(sent.content).toContain("<status>Done</status>");
+    expect(sent.content).toContain('<summary>Agent "task A" completed</summary>');
+    expect(sent.details.status).toBe("completed");
+  });
+
+  it("treats a status-less manifest row as completed", async () => {
+    const b = seedRow({});
+    await runCommand(b, "continue").result;
+    await flush();
+
+    expect(onlyNotification(b).content).toContain("<status>Done</status>");
+  });
+
+  it("refreshes a captured row when the record settles again after a resume", async () => {
+    const b = boot();
+    // Bind a live context: the settle callback syncs the manifest through it.
+    await b.lifecycle.get("session_start")({ type: "session_start", reason: "startup" }, idleCtx());
+    vi.mocked(runAgent).mockImplementationOnce((_ctx: any, _type: any, _prompt: any, opts: any) => {
+      const session = resumableSession();
+      opts.onSessionCreated?.(session);
+      return Promise.resolve({
+        responseText: "partial report",
+        session,
+        aborted: false,
+        steered: false,
+        failure: "provider exploded",
+      }) as any;
+    });
+    const r = await b.tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "task R", subagent_type: "Explore", run_in_background: true },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    await flush();
+    const id = /Agent ID: (\S+)/.exec(textOf(r))![1];
+    await runCommand(b, "pause").result;
+    await flush();
+    expect(manifest().list()[0].status).toBe("error");
+    const pausedAt = manifest().list()[0].pausedAt;
+
+    // The user resumes it and it settles clean this time.
+    const settle = controllableResume(resumableSession);
+    await b.commands.get("agents").handler("resume @explore", ctx({ isIdle: () => true }));
+    await flush();
+    settle();
+    await flush();
+
+    const row = manifest().list().find(e => e.id === id)!;
+    expect(row.status).toBe("completed");
+    expect(row.error).toBeUndefined();
+    // The refresh keeps the original capture time.
+    expect(row.pausedAt).toBe(pausedAt);
+  });
+
+  it("keeps an errored row it has no report for", async () => {
+    // The transcript ends on a user message: nothing deliverable, and the
+    // failure text must never be passed off as the report.
+    const b = seedRow({ status: "error", error: "boom" }, "");
+    const path = join(hermetic!.dir, "agent-session.jsonl");
+    writeFileSync(path, JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 } }) + "\n");
+    const { cmdCtx } = runCommand(b, "continue");
+    await flush();
+
+    expect(vi.mocked(b.pi.sendMessage).mock.calls.filter(c => (c[0] as any)?.customType === "subagent-notification")).toEqual([]);
+    // No final report in the transcript, so the row is not deliverable at all:
+    // it stays in the manifest rather than delivering the failure text as the
+    // report.
+    expect(cmdCtx.ui.notify).toHaveBeenCalledWith("1 could not be revived (kept in the manifest).", "warning");
+    const row = manifest().list()[0];
+    expect(row.status).toBe("error");
+    expect(row.error).toBe("boom");
   });
 });

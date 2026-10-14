@@ -214,7 +214,14 @@ process, or by reading the final assistant report from the agent's session
 file after a restart — and marks it consumed. Already-consumed results are
 never re-delivered. An agent parked exactly at a finished turn (final
 answer persisted, nothing pending) is delivered rather than revived: its
-report is the result.
+report is the result. Each captured row carries the outcome its run settled
+with (`completed`, `steered` or `error`, plus the failure text of an errored
+run), and the delivery renders that outcome exactly as the live completion
+notification would — an agent that errored before a restart is not reported
+as a completion. Rows written before this field existed, and rows for parked
+runs, are still treated as completions and rendered like one — the delivered
+band reads `<status>Done</status>`, as a live clean completion does — but
+nothing claims a status the run never settled with.
 
 ### 5.6 Held input and notifications
 
