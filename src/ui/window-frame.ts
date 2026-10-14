@@ -18,6 +18,8 @@
  *   line fits, so the escape hatch always survives and no hint is ever cut in
  *   half.
  * - {@link paneBodyHeight} is the height basis, in viewport percent.
+ * - {@link paneRule} is the titled rule between the panes: `├ ─ Phases ─┬─ …
+ *   ─┤`, whose cells fill their pane widths the way the rows do.
  *
  * The two surfaces stay separate where they differ on purpose: which pane
  * policy picks the left cell's width ({@link leftPaneWidth} is the
@@ -25,7 +27,7 @@
  * column), how each styles a segment, and every key they bind.
  */
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /** The bars that separate the cells of a two-pane row: `│ a │ b │`. */
 export const FRAME_BARS = 3;
@@ -154,6 +156,80 @@ export function frameRow(
   const clamped = truncateToWidth(content, inner, ellipsis, true);
   const gap = Math.max(0, inner - visibleWidth(clamped));
   return `${border(box.vertical)} ${clamped}${" ".repeat(gap + 1)}${border(box.vertical)}`;
+}
+
+/**
+ * One cell of a rule: ` Title ─────` — the three regions unstyled, so each
+ * surface themes them its own way (the inspector's segment levels want a
+ * segment per region, its log level a themed string).
+ */
+export interface RuleCell {
+  /** The single column between the cell's bar and the title. */
+  lead: string;
+  /** The title, cut to the cell; absent when the cell carries no title. */
+  title?: string;
+  /** The space closing the title's region and the rule out to the cell width. */
+  rule: string;
+}
+
+/**
+ * Where a title's padding sits when the title has to be cut to fit:
+ * `outside` cuts the title alone and keeps the space either side of it,
+ * `inside` cuts ` title ` as one string, so a title that overruns eats its own
+ * leading column. Both fill the cell exactly; the inspector's segment levels
+ * have always done the first and its log level the second, and both are
+ * pinned byte-for-byte by their tests.
+ */
+export type RuleTitlePadding = "outside" | "inside";
+
+/** One titled cell, cut to `width` with the ellipsis rather than left to overrun. */
+function titledRuleCell(width: number, title: string, box: PaneBox, ellipsis: string, padding: RuleTitlePadding): RuleCell {
+  // A cell this narrow has room for neither title nor rule; the bar padding
+  // alone is all that fits, and it is what the segment path used to clamp to.
+  if (width <= 1) return { lead: " ".repeat(Math.max(0, width)), rule: "" };
+  const measured = padding === "inside" ? ` ${title} ` : title;
+  const shown = stripTerminalSequences(truncateToWidth(measured, width - 2, ellipsis));
+  const tail = padding === "outside" ? 1 : 0;
+  return {
+    lead: " ",
+    title: shown,
+    rule: `${" ".repeat(tail)}${box.horizontal.repeat(Math.max(0, width - 1 - visibleWidth(shown) - tail))}`,
+  };
+}
+
+/**
+ * The window's rule with the panes' titles in it:
+ * `├ ─ Phases ─┬─ Verify · 1 agent ─┤`.
+ *
+ * `├` and `┤` close the line and the cells fill their pane widths exactly, so
+ * the bars stay in the columns the rows above and below put them in. The tee
+ * where the cells meet is `┬` when the left cell is titled and the pane `│`
+ * when it is not — the shape the inspector draws at every level, from one set
+ * of widths.
+ */
+export function paneRule(options: {
+  leftWidth: number;
+  rightWidth: number;
+  box: PaneBox;
+  leftTitle?: string;
+  rightTitle?: string;
+  ellipsis?: string;
+  titlePadding?: RuleTitlePadding;
+}): { leftTee: string; left: RuleCell; tee: string; right: RuleCell; rightTee: string } {
+  const { box, leftTitle, leftWidth, rightWidth } = options;
+  const ellipsis = options.ellipsis ?? "…";
+  const padding = options.titlePadding ?? "outside";
+  const plain = (width: number): RuleCell => ({ lead: "", rule: box.horizontal.repeat(Math.max(0, width)) });
+  if (leftTitle === undefined) {
+    return { leftTee: box.leftTee, left: plain(leftWidth), tee: box.vertical, right: plain(rightWidth), rightTee: box.rightTee };
+  }
+  return {
+    leftTee: box.leftTee,
+    left: titledRuleCell(leftWidth, leftTitle, box, ellipsis, padding),
+    tee: box.topTee,
+    right: titledRuleCell(rightWidth, options.rightTitle ?? "", box, ellipsis, padding),
+    rightTee: box.rightTee,
+  };
 }
 
 /**

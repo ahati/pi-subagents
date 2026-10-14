@@ -879,6 +879,56 @@ describe("width", () => {
  * Header
  * ------------------------------------------------------------------------- */
 
+describe("pane rules", () => {
+  // The rules the frame draws are the shared window-frame rule. These lines are
+  // pinned byte-for-byte from the render before that move, so the dialog cannot
+  // grow a second implementation without this failing.
+  const progress: WorkflowEntry[] = [
+    { type: "workflow_phase", index: 0, title: "Verify" },
+    agentEntry({ index: 0, label: "row-one", state: "progress", startedAt: START, recordId: "rec-1", promptPreview: "first agent prompt" }),
+    agentEntry({ index: 1, label: "row-two", state: "start" }),
+    { type: "workflow_phase", index: 1, title: "Plan" },
+    agentEntry({ index: 2, label: "row-three", phaseIndex: 1, state: "start" }),
+  ];
+  const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
+
+  it("draws the titled rule under the header and the plain one above the footer", () => {
+    expect(rules(dialog({ progress, width: 86 }))).toEqual([
+      "├ Phases ──────────┬ Verify · 2 agents ──────────────────────────────────────────────┤",
+      "├──────────────────│─────────────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(dialog({ progress, width: 60 }))).toEqual([
+      "├ Phases ──────────┬ Verify · 2 agents ────────────────────┤",
+      "├──────────────────│───────────────────────────────────────┤",
+    ]);
+    expect(rules(dialog({ progress, width: 40 }))).toEqual([
+      "├ Phases ────┬ Verify · 2 agents ──────┤",
+      "├────────────│─────────────────────────┤",
+    ]);
+    // A cell narrower than the title cuts it rather than tearing the frame.
+    expect(rules(dialog({ progress, width: 30 }))).toEqual([
+      "├ Phases ─┬ Verify · 2 agen… ┤",
+      "├─────────│──────────────────┤",
+    ]);
+  });
+
+  it("themes the rule's three regions: dim lead, bold title, border rule", () => {
+    expect(styled({ progress, width: 86 }).filter(line => line.includes("\u251c"))).toEqual([
+      "<border>├</border><dim> </dim><muted>*Phases*</muted><border> ──────────</border><border>┬</border><dim> </dim><muted>*Verify · 2 agents*</muted><border> ──────────────────────────────────────────────</border><border>┤</border>",
+      "<border>├</border><border>──────────────────</border><border>│</border><border>─────────────────────────────────────────────────────────────────</border><border>┤</border>",
+    ]);
+  });
+
+  it("swaps the rule for the ASCII tier with the rest of the frame", () => {
+    const ascii = dialog({ progress, width: 86, ascii: true })
+      .filter(line => line.startsWith("+ ") || (line.startsWith("+") && line.includes("|")));
+    expect(ascii).toEqual([
+      "+ Phases ----------+ Verify · 2 agents ----------------------------------------------+",
+      "+------------------|-----------------------------------------------------------------+",
+    ]);
+  });
+});
+
 describe("replayed rows", () => {
   it("annotates a replayed agent's row in the agents pane", () => {
     // The helper is unit-tested above; this pins that the row actually carries
