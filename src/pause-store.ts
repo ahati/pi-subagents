@@ -8,10 +8,12 @@
  * revives each conversation from its session file — the same
  * `resumeSessionFile` path `/agents revive` and `@handle` use.
  *
- * Only disk-resumable agents are listed. A paused agent without a session
- * file (`persist_session: false`, or paused out of the queue) has nothing to
- * reopen, so quitting loses it regardless; `/pause` reports that split
- * instead of pretending otherwise.
+ * A row carries either the agent's session file — `/continue` reopens that
+ * conversation — or a `respawn` recipe (the prompt and the invocation fields
+ * the live record held when it was parked), for an agent paused with nothing
+ * on disk (`persist_session: false`, or paused out of the queue). A respawn is
+ * a fresh run of the original task: the earlier transcript, tool state and
+ * usage history are gone. `/pause` reports that split.
  *
  * A row may also list a settled-but-unconsumed result `/pause` captured. Such
  * a row carries the outcome its run settled with (`status`, plus `error` for
@@ -28,7 +30,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentRecord, EffectiveThinkingLevel, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentRecord, EffectiveThinkingLevel, SubagentType } from "./types.js";
 
 /**
  * Minimal recipe for re-running an agent parked without a persisted session.
@@ -61,8 +63,10 @@ export interface PausedAgentEntry {
   handle?: string;
   alias?: string;
   description: string;
-  /** The agent's persisted pi session — the whole point of the entry. */
-  sessionFile: string;
+  /** Present when the run has a persisted session: `/continue` revives it. */
+  sessionFile?: string;
+  /** Present when it has none: `/continue` re-runs it from scratch. Never both. */
+  respawn?: PausedRespawnSpec;
   /** ISO timestamp of when the pause landed (kept across re-syncs). */
   pausedAt: string;
   /**

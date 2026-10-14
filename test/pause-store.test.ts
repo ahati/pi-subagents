@@ -292,6 +292,8 @@ describe("captured result status (additive v3)", () => {
     const onDisk = JSON.parse(readFileSync(file, "utf8"));
     expect("status" in onDisk.entries[0]).toBe(false);
     expect("error" in onDisk.entries[0]).toBe(false);
+  });
+});
 
 /** The sweep helper: a missing export must fail the test, not the file. */
 function sweep(dir: string, sessionExists: (id: string) => boolean): string[] {

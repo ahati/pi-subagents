@@ -4355,7 +4355,7 @@ Terse command-style prompts produce shallow, generic work.
       }
       // One resume funnel, so a queued (session-less) agent announces itself
       // with `subagents:resumed` exactly as a session-bearing one does.
-      if (manager.unpause(record.id)) {
+      if (await resumeAgentById(ctx, record)) {
         ctx.ui.notify(`Resumed @${name} — queued.`, "info");
         return;
       }
