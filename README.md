@@ -18,7 +18,7 @@ UI-layer enhancements over upstream:
 - **Windowed panel stays the default** — opening an agent (fleet `Enter`, `/agents`, workflow inspector `c`) shows the familiar 90%×70% live conversation; **`f`** expands it to the full-screen hub and **`f`** collapses back, with view/selection/filter state carried across
 - **Detailed agentic log** — tool calls render as `⏺ name(key-arg)` with their results paired inline: `✓`/`✗` plus a preview (`m` cycles full/preview as before), thinking blocks as a receded `✻` preview, pending calls marked
 - **Main-window-quality tool rendering** — tool calls and results render with pi's own per-tool renderers (edit diffs, highlighted reads, bash command blocks), wired exactly like the main transcript
-- **Two-pane agent view** — the conversation panel carries the workflow inspector's layout, one overall border spanning both panes: the agent list in the left pane, grouped `ACTIVE`/`COMPLETED`/`FAILED` (empty groups stay hidden; the selection follows an agent as it moves between them), the selected agent's conversation on the right (`↑`/`↓` move the selection and the live stream follows instantly). **`c`** copies the shown agent's finished response to the system clipboard. Replaces the earlier `←`/`→` blind cycling; conversation scrolling stays on `PgUp`/`PgDn`, `Shift+↑↓`, `j`/`k` and the mouse wheel
+- **Two-pane agent view** — the conversation panel instantiates the same window the workflow inspector does (`window-frame.ts`), one overall border spanning both panes: the agent list in the left pane, grouped `ACTIVE`/`COMPLETED`/`FAILED` (empty groups stay hidden; the selection follows an agent as it moves between them), the selected agent's conversation on the right (`↑`/`↓` move the selection and the live stream follows instantly). **`c`** copies the shown agent's finished response to the system clipboard. Replaces the earlier `←`/`→` blind cycling; conversation scrolling stays on `PgUp`/`PgDn`, `Shift+↑↓`, `j`/`k` and the mouse wheel
 - **`→` closes the FleetView** — the key that opens the list (`←`/`↓`) now has a mirror: `→` dismisses it entirely. `↓`/`←` recall a dismissed list, and a fresh batch of agents re-shows it on its own
 - **Mouse wheel scrolling** — wheel over an agent's conversation scrolls it; over the hub roster it moves the selection. Works in **both** TUI modes: fullscreen uses pi's native mouse dispatch, while in regular mode the panel captures terminal mouse reporting for its own lifetime and restores it on close (so the terminal's native scrollback and mouse text-selection are only borrowed while a panel is open — hold Shift to select text as usual)
 - **Fixed**: opening an agent from `/agents` no longer stacks the menu dialog on top of the panel (keyboard and close behavior restored)
@@ -571,17 +571,18 @@ Send a steering message to a running agent. The message interrupts after the cur
 | `/pause` | Park the agentic execution and write one manifest row per agent — its session file, or a respawn recipe when it has none — safe to quit right after; `/continue` brings them back, even in a fresh process (a session-less agent is re-run from its original prompt, without its earlier transcript or tool state). Parked agents hand their concurrency slots back, so nothing waits behind them while you are stopped. While the main model streams, `/pause` arms instead: the park lands the moment the turn reaches its next boundary — before the next unstarted tool call (pending calls stay pending; one already running finishes and its output is cached), or before the next model request. A second `/pause` cancels the arming. No argument — for one agent use `/agents pause [handle]` |
 | `/continue` | Reopen what `/pause` parked — with no prompt of any kind: the main turn resumes at its boundary (pending tool calls execute, the next request is the transcript as it stands) and live paused agents resume in place, re-taking their concurrency slots first (a resume whose pool is full waits its turn in the queue rather than oversubscribing); manifest-only ones are revived from their session files after a reload, and rows with no session file are re-run from scratch with their original prompt (handles reclaimed; the earlier transcript and tool state are gone). Entries that cannot be revived or re-run — session file deleted, agent type disabled, model gone — stay parked for a later attempt. No argument — for one agent use `/agents resume [handle]` |
 
-`/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a three-level inspector over a run, drawn in the agent hub's windowed popup style — title inside the frame, key hints in a bordered footer — and sized like it too, filling the same 70%-of-terminal panel the hub's popup does:
+`/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a three-level inspector over a run. It draws the **same window** the agent hub's chat view draws — one layout, in `window-frame.ts`, that both surfaces instantiate: the split top edge names the left pane and a `┬` sits where the panes meet, both cells carry a padding column so content reads clear of the bars, the detail pane's rule titles it, and the footer follows the edge in the hub's row shape. Selecting and scrolling a pane is the hub's too: the list windows around the selection, centered when it outgrows the pane. Only the content is workflow-specific. It is sized like the hub's popup, filling the same 70%-of-terminal panel:
 
 ```
-╭ audit-src ────────────────────────────────────────── 1/3 agents · 32s ─╮
-│ Dynamically discover files under src/ and audit each …                │
-├ ─ Phases ────────┬─ Discover · 1 agent ────────────────────────────── ┤
-│ ❯ ✔ Discover 1/1 │ ❯ ✔ discover:src Opus 5 (1M context) · 26.4k tok 25s│
-│   2 Audit    0/2 │                                                     │
-├ ─────────────────┴──────────────────────────────────────────────────── ┤
-│ ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo          │
-╰───────────────────────────────────────────────────────────────────────╯
+╭ Phases ────────────┬──────────────────────────────────────────────────╮
+│ audit-src                                         1/3 agents · 32s    │
+│ Dynamically discover files under src/ and audit each                  │
+├────────────────────┬ Discover · 1 agent ──────────────────────────────┤
+│  ❯ ✔ Discover 1/1  │  ❯ ✔ discover:src · 26.4k tok               25s  │
+│    2 Audit    0/2  │                                                  │
+├────────────────────┴──────────────────────────────────────────────────┤
+│ ↑↓ select · ⏎ open · f filter · p pause · x stop · esc close          │
+╰────────────────────┴──────────────────────────────────────────────────╯
 ```
 
 The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `e` expanding the prompt and `esc` going back a level rather than closing. `⏎` on an agent with a conversation descends to the third level: the agent's **live conversation** embedded in the right pane — the same streaming viewer the hub's chat view shows, with `↑↓` switching agents, `c` copying the agent's settled result, `p` pausing or resuming it, the mouse wheel scrolling the conversation (the two levels above move the selection instead, as the hub's roster does), and `esc` walking back. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay at the hub popup's size (90% × 70% of the terminal) and `f` at the detail or log level expands it to the full terminal and back, carrying the level and selection across — the hub popup's same toggle. The panes scroll inside it, so a two-hundred-agent fan-out never pastes two hundred rows. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
@@ -1155,7 +1156,7 @@ src/
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
     workflow-dialog.ts    # /agents → Workflows inspector — hub-style window, three levels
-    window-frame.ts       # Window chrome shared by the hub and the inspector: edges, rows, pane split, rules, footer, height
+    window-frame.ts       # The one window: edges, rows, master/detail split, rules, footer, list windowing, height — cloned by neither surface
 ```
 
 ## License

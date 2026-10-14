@@ -15,6 +15,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
+import { paneGeometry, splitEdge, UNICODE_PANE_BOX } from "../src/ui/window-frame.js";
 import type { WorkflowDialogLogDeps } from "../src/ui/workflow-dialog.js";
 import { WorkflowDialog } from "../src/ui/workflow-dialog.js";
 
@@ -108,21 +109,22 @@ describe("workflow dialog window alignment across levels", () => {
   });
 
   it("draws the same rule line at every level, byte for byte", () => {
-    // Captured from the render before the rule moved into the shared frame
-    // module, so this is the no-rendered-change proof: the segment levels and
-    // the log level's string path draw one rule, and their bytes cannot drift.
+    // Captured from the render, so this is the no-drift proof: the segment
+    // levels and the log level's string path draw one window, and their bytes
+    // cannot drift. The master pane is named in the top edge, so the rule
+    // titles the detail pane alone and the seam closes with a `┴`.
     const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
     expect(rules(frames.phases!)).toEqual([
-      "├ Phases ──────────┬ Verify · 1 agent ─────────────────────────────────────────────────────────────┤",
-      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ Verify · 1 agent ───────────────────────────────────────────────────────────┤",
+      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(frames.detail!)).toEqual([
-      "├ Verify · 1 agent ┬ row-one ──────────────────────────────────────────────────────────────────────┤",
-      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(frames.log!)).toEqual([
-      "├  Verify · 1 age…─┬  row-one ─────────────────────────────────────────────────────────────────────┤",
-      "├──────────────────│───────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
     ]);
   });
 
@@ -148,7 +150,11 @@ describe("workflow dialog window alignment across levels", () => {
       levels.push(instance.render(host));
       for (const lines of levels) {
         expect(lines.length, `w=${host}`).toBeGreaterThan(0);
-        expect(lines[0], `w=${host}`).toBe(`╭${"─".repeat(host - 2)}╮`);
+        const panes = paneGeometry(host);
+        // The top edge splits where the pane bars are, whichever level is up:
+        // the corner, then the master cell, then the tee.
+        expect(lines[0]!.indexOf("\u252c"), `w=${host}`).toBe(panes.leftCellWidth + 1);
+        expect(lines.at(-1), `w=${host}`).toBe(splitEdge(host, panes.leftCellWidth, UNICODE_PANE_BOX, "bottom"));
         for (const line of lines) {
           expect(visibleWidth(line), `w=${host}: ${JSON.stringify(line)}`).toBe(host);
         }

@@ -20,6 +20,13 @@
  * - {@link paneBodyHeight} is the height basis, in viewport percent.
  * - {@link paneRule} is the titled rule between the panes: `├ ─ Phases ─┬─ …
  *   ─┤`, whose cells fill their pane widths the way the rows do.
+ * - {@link paneGeometry} and {@link renderWindow} are the window itself: the
+ *   split the hub's ` Agents ` pane established, and the row assembly (edges,
+ *   full-width rows, pane rows, titled rules, seams) both surfaces render
+ *   through. A surface contributes CONTENT — cells, hints, pane bodies — and
+ *   the window decides where it goes. Neither overlay does column math.
+ * - {@link windowRange} is the list windowing rule: the visible slice that
+ *   keeps the selection centered and clamps at both ends.
  *
  * The two surfaces stay separate where they differ on purpose: which pane
  * policy picks the left cell's width ({@link leftPaneWidth} is the
@@ -28,6 +35,7 @@
  */
 
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { clampLine, type WorkflowCardLine, type WorkflowCardSegment } from "./workflow-card.js";
 
 /** The bars that separate the cells of a two-pane row: `│ a │ b │`. */
 export const FRAME_BARS = 3;
@@ -141,6 +149,14 @@ export function splitEdge(
 }
 
 /**
+ * The columns a full-width row has for content: the frame's bars and its one
+ * padding column each side, removed once, here, rather than by each surface.
+ */
+export function windowInnerWidth(width: number): number {
+  return Math.max(0, width - 4);
+}
+
+/**
  * One padded content row: `│ content │`, the content clamped to `width - 4`
  * so the bars stay in their columns and the row never wraps. `border` stylizes
  * the bars, which each surface does with its own theme.
@@ -152,7 +168,7 @@ export function frameRow(
   border: (s: string) => string,
   ellipsis = "…",
 ): string {
-  const inner = Math.max(0, width - 4);
+  const inner = windowInnerWidth(width);
   const clamped = truncateToWidth(content, inner, ellipsis, true);
   const gap = Math.max(0, inner - visibleWidth(clamped));
   return `${border(box.vertical)} ${clamped}${" ".repeat(gap + 1)}${border(box.vertical)}`;
@@ -203,9 +219,9 @@ function titledRuleCell(width: number, title: string, box: PaneBox, ellipsis: st
  *
  * `├` and `┤` close the line and the cells fill their pane widths exactly, so
  * the bars stay in the columns the rows above and below put them in. The tee
- * where the cells meet is `┬` when the left cell is titled and the pane `│`
- * when it is not — the shape the inspector draws at every level, from one set
- * of widths.
+ * where the cells meet is `┬` when either cell is titled and the pane `│` when
+ * neither is — the shape the inspector draws at every level, and the shape the
+ * hub's chat pane titles its master cell in.
  */
 export function paneRule(options: {
   leftWidth: number;
@@ -220,14 +236,14 @@ export function paneRule(options: {
   const ellipsis = options.ellipsis ?? "…";
   const padding = options.titlePadding ?? "outside";
   const plain = (width: number): RuleCell => ({ lead: "", rule: box.horizontal.repeat(Math.max(0, width)) });
-  if (leftTitle === undefined) {
+  if (leftTitle === undefined && options.rightTitle === undefined) {
     return { leftTee: box.leftTee, left: plain(leftWidth), tee: box.vertical, right: plain(rightWidth), rightTee: box.rightTee };
   }
   return {
     leftTee: box.leftTee,
-    left: titledRuleCell(leftWidth, leftTitle, box, ellipsis, padding),
+    left: leftTitle === undefined ? plain(leftWidth) : titledRuleCell(leftWidth, leftTitle, box, ellipsis, padding),
     tee: box.topTee,
-    right: titledRuleCell(rightWidth, options.rightTitle ?? "", box, ellipsis, padding),
+    right: options.rightTitle === undefined ? plain(rightWidth) : titledRuleCell(rightWidth, options.rightTitle, box, ellipsis, padding),
     rightTee: box.rightTee,
   };
 }
@@ -254,6 +270,192 @@ export function hintLine(keys: readonly string[], width: number, joiner = "·"):
  * `viewportPct` of the terminal. The inspector's `WINDOW_CHROME_ROWS`.
  */
 export const WINDOW_CHROME_ROWS = 7;
+
+/* ------------------------------------------------------------------------- *
+ * The window component
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Content columns of the master (left) list cell — the hub's ` Agents ` pane.
+ * Fixed, not proportional: the cell holds a name and the detail pane holds
+ * everything that needs room.
+ */
+export const MASTER_LIST_WIDTH = 18;
+
+/** One padding column inside each pane cell, so content reads clear of the bars. */
+export const PANE_PADDING = 1;
+
+/**
+ * The split both overlays draw: one master cell, one detail cell, three bars.
+ *
+ * `listWidth` and `detailWidth` are the cells' *content* columns; each cell
+ * adds `pad` columns either side, and {@link leftCellWidth} is the whole
+ * master cell — which is where the top edge's tee and the middle bars land.
+ * The invariant `1 + leftCellWidth + 1 + rightCellWidth + 1 = width` is
+ * {@link paneRightWidth}'s, applied here rather than a second time.
+ */
+export interface PaneGeometry {
+  /** Content columns of the master cell. */
+  listWidth: number;
+  /** Content columns of the detail cell. */
+  detailWidth: number;
+  /** The whole master cell: padding included. */
+  leftCellWidth: number;
+  /** The whole detail cell: padding included. */
+  rightCellWidth: number;
+  /** Padding columns inside each cell. */
+  pad: number;
+}
+
+/**
+ * The master/detail split at `width`. Both surfaces take their pane columns
+ * from here — the hub's chat pane and the inspector's levels alike — so the
+ * divider stays in one column across every window either one draws.
+ *
+ * The master cell gives way on a narrow terminal the way {@link leftPaneWidth}
+ * says: capped at a third of the cells, so the detail pane keeps twice the
+ * room, and at least one column for itself. That is what stops a 12-column
+ * window tearing when its two cells cannot both be full width.
+ */
+export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad = PANE_PADDING): PaneGeometry {
+  const list = leftPaneWidth(width, listWidth, pad);
+  const leftCellWidth = list + 2 * pad;
+  const rightCellWidth = paneRightWidth(width, list, pad) + 2 * pad;
+  return { listWidth: list, detailWidth: rightCellWidth - 2 * pad, leftCellWidth, rightCellWidth, pad };
+}
+
+/**
+ * One row of a window, as content: the surface says what, the window says
+ * where. `full` spans the frame's inner width, `split` puts a master cell
+ * beside a detail cell, `titles` is the rule that names them and `seam` the
+ * closing rule (with a `┴` where the panes meet).
+ */
+export type WindowRow =
+  | { kind: "full"; cells: WorkflowCardLine }
+  | { kind: "split"; left?: WorkflowCardLine; right?: WorkflowCardLine }
+  | { kind: "titles"; left?: string; right?: string; padding?: RuleTitlePadding }
+  | { kind: "seam" };
+
+/** Measured width of a cell line. */
+const lineWidth = (line: WorkflowCardLine) => line.reduce((sum, segment) => sum + visibleWidth(segment.text), 0);
+
+/**
+ * One pane cell, padded to `cellWidth` exactly: `pad` columns, the clamped
+ * content, then the space that fills the rest. A cell is never wider than its
+ * column and never narrower, which is what keeps the bars vertical.
+ */
+function paneCell(line: WorkflowCardLine | undefined, cellWidth: number, pad: number, ellipsis: string): WorkflowCardLine {
+  const inner = Math.max(0, cellWidth - 2 * pad);
+  const clamped = clampLine(line ?? [], inner, ellipsis);
+  const gap = Math.max(0, inner - lineWidth(clamped));
+  return [{ text: " ".repeat(pad) }, ...clamped, { text: " ".repeat(gap + pad) }];
+}
+
+/** One titled region of a rule, with the window's style roles. */
+function ruleCell(cell: RuleCell): WorkflowCardLine {
+  return cell.title === undefined
+    ? [{ text: cell.rule, color: "border" }]
+    : [{ text: cell.lead, color: "dim" }, { text: cell.title, color: "muted", bold: true }, { text: cell.rule, color: "border" }];
+}
+
+/**
+ * The window, from the rows a surface contributed.
+ *
+ * Draws the `╭─┬─╮` / `╰─┴─╯` edges (split and titled when `panes` is given,
+ * plain otherwise), every row in between, and nothing else: the caller owns
+ * the content and the order, this owns the columns. That is the whole contract
+ * — the hub's chat, its roster table and the workflow inspector's three levels
+ * are all calls to this function with different rows.
+ */
+export function renderWindow(options: {
+  width: number;
+  box: PaneBox;
+  rows: readonly WindowRow[];
+  /** Absent → a single-pane window: no split bars, no tee. */
+  panes?: PaneGeometry;
+  /** The master pane's name, drawn into the top edge — the hub's ` Agents `. */
+  title?: string;
+  ellipsis?: string;
+}): WorkflowCardLine[] {
+  const { width, box, panes } = options;
+  const ellipsis = options.ellipsis ?? "…";
+  const edge = (text: string): WorkflowCardSegment => ({ text, color: "border" });
+  const bar = [edge(box.vertical)];
+  const rightCell = panes ? width - panes.leftCellWidth - FRAME_BARS : width - 2;
+  const lines: WorkflowCardLine[] = [];
+
+  lines.push([edge(panes
+    ? splitEdge(width, panes.leftCellWidth, box, "top", stripTerminalSequences(truncateToWidth(options.title ?? "", panes.leftCellWidth, ellipsis)))
+    : frameEdge(width, box, "top"))]);
+
+  for (const item of options.rows) {
+    switch (item.kind) {
+      case "full": {
+        const inner = windowInnerWidth(width);
+        const clamped = clampLine(item.cells, inner, ellipsis);
+        const gap = Math.max(0, inner - lineWidth(clamped));
+        lines.push([...bar, { text: " " }, ...clamped, { text: " ".repeat(gap + 1) }, ...bar]);
+        break;
+      }
+      case "split":
+        lines.push(panes
+          ? [
+              ...bar,
+              ...paneCell(item.left, panes.leftCellWidth, panes.pad, ellipsis),
+              ...bar,
+              ...paneCell(item.right, rightCell, panes.pad, ellipsis),
+              ...bar,
+            ]
+          : [...bar, ...paneCell(item.left ?? item.right, width - 2, 0, ellipsis), ...bar]);
+        break;
+      case "titles": {
+        // One rule, whether there are one or two cells to title: the pane `│`
+        // becomes a `┬` as soon as a title needs a cell to sit in.
+        const rule = paneRule({
+          leftWidth: panes ? panes.leftCellWidth : width - 2,
+          rightWidth: panes ? rightCell : 0,
+          box,
+          leftTitle: item.left,
+          rightTitle: item.right,
+          ellipsis,
+          titlePadding: item.padding ?? "outside",
+        });
+        const tee = edge(item.left !== undefined || item.right !== undefined ? box.topTee : box.vertical);
+        lines.push(panes
+          ? [edge(rule.leftTee), ...ruleCell(rule.left), tee, ...ruleCell(rule.right), edge(rule.rightTee)]
+          : [edge(rule.leftTee), ...ruleCell(rule.left), edge(rule.rightTee)]);
+        break;
+      }
+      case "seam":
+        lines.push(panes
+          ? [
+              edge(box.leftTee),
+              edge(box.horizontal.repeat(panes.leftCellWidth)),
+              edge(box.bottomTee),
+              edge(box.horizontal.repeat(Math.max(0, rightCell))),
+              edge(box.rightTee),
+            ]
+          : [edge(box.leftTee), edge(box.horizontal.repeat(width - 2)), edge(box.rightTee)]);
+        break;
+    }
+  }
+
+  lines.push([edge(panes ? splitEdge(width, panes.leftCellWidth, box, "bottom") : frameEdge(width, box, "bottom"))]);
+  return lines;
+}
+
+/**
+ * The visible slice of a list, centered on `selected` and clamped at both
+ * ends: the selection stays on screen and the list never leaves a blank row
+ * where a row could be. The hub's roster and the inspector's panes both
+ * window this way, so a long list reads the same in either window.
+ */
+export function windowRange(selected: number, total: number, height: number): { start: number; end: number } {
+  const rows = Math.max(0, height);
+  const visible = Math.min(rows, total);
+  const start = Math.max(0, Math.min(selected - Math.floor(rows / 2), total - visible));
+  return { start, end: start + visible };
+}
 
 /**
  * Rows a window may draw between its edges, from the share of the terminal its

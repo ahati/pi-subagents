@@ -1,18 +1,24 @@
 /**
  * workflow-dialog.ts — the `/agents → Workflows` inspector.
  *
- * Three levels inside one agent-hub-style window:
+ * Three levels inside the agent hub's window — the same layout, from the same
+ * module (`window-frame.ts`), so this file names content and never a column:
  *
  * ```
- * ╭ review-changes ───────────────────── 3/7 agents · 1m12s ─╮
- * │ Review changed files across dimensions                  │
- * ├ ─ Phases ──────┬─ Verify · 1 agent ───────────────────── ┤
- * │ ❯ ✔ Review 3/3 │ ❯ ◌ verify:auth.ts · attempt 2 · wait 8s│
- * │   2 Verify 1/2 │                                         │
- * ├ ───────────────┴───────────────────────────────────────── ┤
- * │ ↑↓ select · ⏎ open · f filter · x stop · esc close       │
- * ╰──────────────────────────────────────────────────────────╯
+ * ╭ Phases ────────────┬──────────────────────────────────────╮
+ * │ review-changes                         1/3 agents · 1m12s│
+ * │ Review changed files across dimensions                   │
+ * ├────────────────────┬ Verify · 1 agent ────────────────────┤
+ * │  ❯ ✔ Review  3/3   │  ❯ ◌ verify:auth.ts · attempt 2  8s  │
+ * │    2 Verify  1/2   │                                      │
+ * ├────────────────────┴──────────────────────────────────────┤
+ * │ ↑↓ select · ⏎ open · f filter · x stop · esc close        │
+ * ╰────────────────────┴──────────────────────────────────────╯
  * ```
+ *
+ * The master pane is named in the top edge, the hub's ` Agents ` placement;
+ * both cells carry a padding column; the rule titles the detail pane alone and
+ * the seam closes at a `┴`.
  *
  * Enter on a phase swaps the panes — that phase's agents move left and the
  * right becomes the agent's Prompt / Activity / Outcome detail. Enter on an
@@ -20,10 +26,11 @@
  * `ConversationViewer` embedded frameless in the right pane, the same surface
  * the agent hub's chat view shows. Esc walks back one level at a time.
  *
- * The window is the hub's popup chrome — title inside the frame, hints in a
- * bordered footer, `border`-coloured rules — and sized like it too: the shell
- * spans the overlay's whole width and fills the same 70%-of-terminal ceiling
- * the hub's overlay caps at, rather than shrink-wrapping the content.
+ * The window is the hub's, to the column: the edges, rows, rules and footer
+ * come from the shared renderer, the pane split from the shared geometry. It is
+ * sized like the hub's popup too: the shell spans the overlay's whole width and
+ * fills the same 70%-of-terminal ceiling the hub's overlay caps at, rather than
+ * shrink-wrapping the content.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -57,9 +64,7 @@ import {
   type Component,
   matchesKey,
   type ScrollViewScrollbar,
-  stripTerminalSequences,
   type TUI,
-  truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -83,17 +88,17 @@ import { copyRecordResult } from "./copy-result.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import {
   ASCII_PANE_BOX,
-  frameEdge,
-  frameRow,
   hintLine,
   leftPaneWidth,
   type PaneBox,
   paneBodyHeight,
-  paneRightWidth,
-  paneRule,
-  type RuleCell,
+  paneGeometry,
+  renderWindow,
   UNICODE_PANE_BOX,
   WINDOW_CHROME_ROWS,
+  type WindowRow,
+  windowInnerWidth,
+  windowRange,
 } from "./window-frame.js";
 import {
   ASCII_GLYPHS,
@@ -113,9 +118,6 @@ import {
 /** Fallback width when the caller does not know the terminal's. */
 const DEFAULT_WIDTH = 80;
 
-
-/** Inner width of the left pane at any comfortable terminal size. */
-const LEFT_PANE_WIDTH = 18;
 
 /**
  * Most rows the frame will ever draw between its top and bottom edges.
@@ -515,16 +517,6 @@ function rightAlign(left: WorkflowCardLine, right: WorkflowCardLine, width: numb
   return clampLine([...clampedLeft, { text: " ".repeat(gap) }, ...right], width);
 }
 
-/**
- * Window a list around its selection, so a 200-agent fan-out still shows the
- * row you are on. Mirrors `fleet-list.ts`'s arithmetic.
- */
-function windowRange(selected: number, total: number, max: number): { start: number; end: number } {
-  const visible = Math.min(max, total);
-  const start = selected < visible ? 0 : selected - visible + 1;
-  return { start, end: start + visible };
-}
-
 /* ------------------------------------------------------------------------- *
  * The pane frame
  * ------------------------------------------------------------------------- */
@@ -540,85 +532,9 @@ export function agentPaneTitleFor(filter: WorkflowDialogFilter, phaseTitle: stri
     : `${phaseTitle} · ${shown} ${filter}`;
 }
 
-/** One pane row, padded to exactly `width` so the frame stays vertical. */
-function padCell(line: WorkflowCardLine, width: number): WorkflowCardLine {
-  const clamped = clampLine(line, width);
-  const gap = Math.max(0, width - lineWidth(clamped));
-  return gap > 0 ? [...clamped, { text: " ".repeat(gap) }] : clamped;
-}
+/** One full-width window row, from content this layout has already shaped. */
+const fullRow = (content: WorkflowCardLine): WindowRow => ({ kind: "full", cells: content });
 
-/**
- * A window row: content between the outer borders, one padding column each
- * side — the hub's row shape (`│ content │`).
- */
-function windowRow(content: WorkflowCardLine, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardLine {
-  const inner = clampLine(content, width - 4);
-  const gap = Math.max(0, width - 4 - lineWidth(inner));
-  return [
-    { text: glyphs.box.vertical, color: "border" },
-    { text: " " },
-    ...inner,
-    { text: " ".repeat(gap + 1) },
-    { text: glyphs.box.vertical, color: "border" },
-  ];
-}
-
-/** One body row: the two cells zipped between the shared vertical borders. */
-function paneBodyRow(
-  left: WorkflowCardLine | undefined,
-  right: WorkflowCardLine | undefined,
-  leftWidth: number,
-  rightWidth: number,
-  glyphs: WorkflowDialogGlyphs,
-): WorkflowCardLine {
-  return [
-    { text: glyphs.box.vertical, color: "border" },
-    ...padCell(left ?? [], leftWidth),
-    { text: glyphs.box.vertical, color: "border" },
-    ...padCell(right ?? [], rightWidth),
-    { text: glyphs.box.vertical, color: "border" },
-  ];
-}
-
-/**
- * The shared rule, as segments: `├ ─ Phases ─┬─ Verify · 1 agent ─┤`, with a
- * `┬` where the panes meet. The titles' padding stays outside the ellipsis —
- * the segment levels' reading of a rule cell; the log level, which draws the
- * same rule in strings, measures ` title ` instead.
- */
-function paneRuleLine(options: {
-  leftTitle?: string;
-  rightTitle?: string;
-  leftWidth: number;
-  rightWidth: number;
-  glyphs: WorkflowDialogGlyphs;
-}): WorkflowCardLine {
-  const { glyphs } = options;
-  const rule = paneRule({
-    leftWidth: options.leftWidth,
-    rightWidth: options.rightWidth,
-    box: glyphs.box,
-    leftTitle: options.leftTitle,
-    rightTitle: options.rightTitle,
-    ellipsis: glyphs.ellipsis,
-    titlePadding: "outside",
-  });
-  const cell = (c: RuleCell): WorkflowCardLine =>
-    c.title === undefined
-      ? [{ text: c.rule, color: "border" }]
-      : [
-          { text: c.lead, color: "dim" },
-          { text: c.title, color: "muted", bold: true },
-          { text: c.rule, color: "border" },
-        ];
-  return [
-    { text: rule.leftTee, color: "border" },
-    ...cell(rule.left),
-    { text: rule.tee, color: "border" },
-    ...cell(rule.right),
-    { text: rule.rightTee, color: "border" },
-  ];
-}
 
 /* ------------------------------------------------------------------------- *
  * Detail sections
@@ -764,34 +680,31 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const capacity = Math.max(MIN_PANE_BODY_ROWS, input.bodyRows ?? DEFAULT_PANE_BODY_ROWS);
   const spinnerFrame = input.spinnerFrame ?? 0;
 
-  const lines: WorkflowCardLine[] = [];
+  const rows: WindowRow[] = [];
 
-  // ---- The window's top edge, then the header rows it wraps: the run's name
-  // with the counters flush right (the hub puts its counts on the title line),
-  // and the description under it.
+  // ---- The header rows the window wraps: the run's name with the counters
+  // flush right (the hub puts its counts on the title line), and the
+  // description under it.
   const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now);
-  lines.push([{ text: glyphs.box.topLeft, color: "border" }, { text: glyphs.box.horizontal.repeat(width - 2), color: "border" }, { text: glyphs.box.topRight, color: "border" }]);
-  lines.push(
-    windowRow(
+  rows.push(
+    fullRow(
       rightAlign(
         [{ text: head.name, color: "toolTitle", bold: true }],
         head.stats ? [{ text: `${head.stats} `, color: "dim" }] : [],
         width - 6,
       ),
-      width,
-      glyphs,
     ),
   );
   if (head.subtext) {
-    lines.push(windowRow([{ text: head.subtext, color: "dim" }], width, glyphs));
+    rows.push(fullRow([{ text: head.subtext, color: "dim" }]));
   }
 
-  // The panes span the window's full inner width, so their right bar sits ON
-  // the window's right border and the divider stays in one column across the
-  // levels: left + right + the three bars = width, exactly.
-  const frameWidth = width;
-  const leftWidth = leftPaneWidth(frameWidth, LEFT_PANE_WIDTH);
-  const rightWidth = paneRightWidth(frameWidth, leftWidth);
+  // The master/detail split and both cells' content widths come from the
+  // shared window, so the divider sits in the hub's column at every level and
+  // the cells read clear of the bars.
+  const panes = paneGeometry(width);
+  const leftWidth = panes.listWidth;
+  const rightWidth = panes.detailWidth;
   const inPhases = state.level === "phases";
   const entry = view.selectedEntry;
 
@@ -937,21 +850,18 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // pad out below their last row, so the dialog does not resize as the
   // selection moves.
   const bodyRows = provided ? capacity : Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length));
-  // The titled rule under the header; the panes' cells between shared borders;
-  // the plain rule; the hints; the bottom edge.
-  lines.push(
-    paneRuleLine({
-      leftTitle: inPhases ? "Phases" : agentPaneTitle,
-      rightTitle: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
-      leftWidth,
-      rightWidth,
-      glyphs,
-    }),
-  );
+  // The rule that names the detail pane; the panes' cells between the shared
+  // bars; the seam; the hints. The master pane is named in the top edge, the
+  // way the hub names its ` Agents ` list, so the rule titles only the pane
+  // beside it.
+  rows.push({
+    kind: "titles",
+    right: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
+  });
   for (let row = 0; row < bodyRows; row++) {
-    lines.push(paneBodyRow(leftRows[row], rightRows[row], leftWidth, rightWidth, glyphs));
+    rows.push({ kind: "split", left: leftRows[row], right: rightRows[row] });
   }
-  lines.push(paneRuleLine({ leftWidth, rightWidth, glyphs }));
+  rows.push({ kind: "seam" });
 
   // ---- Key hints ----
   // Only the actions the run can currently take, so the footer never advertises
@@ -995,14 +905,16 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   if (view.selectedEntry?.recordId !== undefined && can("onOpenAgent")) {
     hints.push("c convo");
   }
-  lines.push(windowRow([{ text: hintLine(hints, width - 4, " · "), color: "dim" }], width, glyphs));
-  lines.push([
-    { text: glyphs.box.bottomLeft, color: "border" },
-    { text: glyphs.box.horizontal.repeat(width - 2), color: "border" },
-    { text: glyphs.box.bottomRight, color: "border" },
-  ]);
+  rows.push(fullRow([{ text: hintLine(hints, windowInnerWidth(width), " · "), color: "dim" }]));
 
-  return lines;
+  return renderWindow({
+    width,
+    box: glyphs.box,
+    panes,
+    title: inPhases ? " Phases " : ` ${agentPaneTitle} `,
+    rows,
+    ellipsis: glyphs.ellipsis,
+  });
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1499,15 +1411,16 @@ export class WorkflowDialog implements Component {
    * bypasses its table renderer. Same window, same rows:
    *
    * ```
-   * ╭ review-changes ───────── 2/3 agents · 40s ─╮
-   * │ Verify the auth flow                       │
-   * ├ ─ Verify · 2 agents ─┬─ verify:auth.ts ─── ┤
-   * │ ❯ ◌ verify:auth.ts   │ (live conversation) │
-   * │   ✓ plan             │                     │
-   * ├ ─────────────────────┴───────────────────── ┤
-   * │ ↑↓ agent · p pause · x stop · esc back ·    │
-   * │   c copy · f expand                         │
-   * ╰────────────────────────────────────────────╯
+   * ╭ Verify · 2 agents ──┬────────────────────────╮
+   * │ review-changes         2/3 agents · 40s      │
+   * │ Verify the auth flow                         │
+   * ├─────────────────────┬ verify:auth.ts ────────┤
+   * │  ❯ ◌ verify:auth.ts │ (live conversation)    │
+   * │    ✓ plan           │                        │
+   * ├─────────────────────┴────────────────────────┤
+   * │ ↑↓ agent · p pause · x stop · esc back ·     │
+   * │   c copy · f expand                          │
+   * ╰─────────────────────┴────────────────────────╯
    * ```
    */
   private renderLog(width: number, viewer: ConversationViewer): string[] {
@@ -1517,26 +1430,21 @@ export class WorkflowDialog implements Component {
     const view = resolveWorkflowDialog(input);
     const entry = view.selectedEntry;
 
-    // The SAME width basis and pane arithmetic as the segment path — the
-    // host's render width itself, panes spanning the full window — so
-    // descending to this level moves nothing: the divider and the right bar
-    // stay in the columns the other two levels drew them in.
+    // The SAME width basis and pane geometry as the segment path, from the
+    // shared window — so descending to this level moves nothing: the divider
+    // and the right bar stay in the columns the other two levels drew them in.
     const contentWidth = workflowDialogContentWidth(width);
-    const leftWidth = leftPaneWidth(contentWidth, LEFT_PANE_WIDTH);
-    const rightWidth = paneRightWidth(contentWidth, leftWidth);
-    // The window's non-body rows: borders, headers, two rules, footer. The same
-    // height basis the segment levels use, so descending to this level moves
-    // nothing — including on a host that reports no terminal size.
+    const panes = paneGeometry(contentWidth);
     const bodyRows = this.paneHeight();
 
-    const chat = viewer.render(rightWidth);
+    const chat = viewer.render(panes.detailWidth);
     if (chat.length === 0) return [];
 
     // Left cells reuse the segment pipeline at its narrowest, styled like the
     // segment path styles them — the selection's accent colour survives.
     const leftRows: WorkflowCardLine[] = [];
     if (view.visibleAgents.length === 0) {
-      leftRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], leftWidth));
+      leftRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], panes.listWidth));
     } else {
       const agents = windowRange(view.clampedAgent, view.visibleAgents.length, bodyRows);
       for (let i = agents.start; i < Math.min(agents.end, view.visibleAgents.length); i++) {
@@ -1545,7 +1453,7 @@ export class WorkflowDialog implements Component {
             entry: view.visibleAgents[i],
             selected: i === view.clampedAgent,
             compact: true,
-            width: leftWidth,
+            width: panes.listWidth,
             glyphs,
             workflowActive: view.workflowActive,
             spinnerFrame: this.spinnerFrame,
@@ -1560,54 +1468,25 @@ export class WorkflowDialog implements Component {
     const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
     const agentPaneTitle = agentPaneTitleFor(this.state.filter, phaseTitle, view.visibleAgents.length);
 
-    // ---- Window helpers, in strings. The shapes mirror the segment path's
-    // windowRow/paneRuleLine so both render paths draw the same window — the
-    // edges, the content row and the rule all come from the shared frame
-    // module outright.
-    const border = (s: string) => th.fg("border", s);
-    const windowTop = () => border(frameEdge(contentWidth, glyphs.box, "top"));
-    const windowBottom = () => border(frameEdge(contentWidth, glyphs.box, "bottom"));
-    const windowLine = (content: string) => frameRow(contentWidth, content, glyphs.box, border, glyphs.ellipsis);
-    // The shared rule, in strings. ` title ` is what this level has always
-    // measured and cut — its padding inside the ellipsis, unlike the segment
-    // levels — and the resets pi's truncation wraps the marker in are stripped
-    // for the same reason the segment path strips them: resets inside a rule
-    // cell skew every raw-column offset to the right of them.
-    const ruleRow = (leftTitle: string | undefined, rightTitle: string | undefined) => {
-      const rule = paneRule({
-        leftWidth,
-        rightWidth,
-        box: glyphs.box,
-        leftTitle,
-        rightTitle,
-        ellipsis: glyphs.ellipsis,
-        titlePadding: "inside",
-      });
-      const cell = (c: RuleCell) =>
-        c.title === undefined ? border(c.rule) : `${border(c.lead)}${th.fg("muted", th.bold(c.title))}${border(c.rule)}`;
-      return border(rule.leftTee) + cell(rule.left) + border(rule.tee) + cell(rule.right) + border(rule.rightTee);
-    };
-
-    const lines: string[] = [];
-    lines.push(windowTop());
-    lines.push(windowLine(`${th.fg("toolTitle", th.bold(head.name))}  ${th.fg("dim", head.stats)}`));
-    if (head.subtext) lines.push(windowLine(th.fg("dim", head.subtext)));
-    lines.push(ruleRow(agentPaneTitle, entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents));
-
+    const rows: WindowRow[] = [
+      fullRow(
+        rightAlign(
+          [{ text: head.name, color: "toolTitle", bold: true }],
+          head.stats ? [{ text: `${head.stats} `, color: "dim" }] : [],
+          contentWidth - 6,
+        ),
+      ),
+    ];
+    if (head.subtext) rows.push(fullRow([{ text: head.subtext, color: "dim" }]));
+    rows.push({ kind: "titles", right: entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents });
     for (let i = 0; i < bodyRows; i++) {
-      // Same row shape as `paneBodyRow`: cells padded to their pane width, no
-      // extra spacing columns — the three bars plus both cells total exactly
-      // the window width, keeping the bars on the window's borders.
-      const leftCell = stripTerminalSequences(truncateToWidth(leftText[i] ?? "", leftWidth, glyphs.ellipsis, true));
-      const leftPad = " ".repeat(Math.max(0, leftWidth - visibleWidth(leftCell)));
-      const chatLine = chat[i] ?? "";
-      const chatPad = " ".repeat(Math.max(0, rightWidth - visibleWidth(chatLine)));
-      lines.push(
-        `${border(glyphs.box.vertical)}${leftCell}${leftPad}${border(glyphs.box.vertical)}${chatLine}${chatPad}${border(glyphs.box.vertical)}`,
-      );
+      // The viewer's rows are already styled strings: they ride through the
+      // window's cell as one colourless cell, exactly as the hub's chat pane
+      // hands them over.
+      rows.push({ kind: "split", left: [{ text: leftText[i] ?? "" }], right: [{ text: chat[i] ?? "" }] });
     }
+    rows.push({ kind: "seam" });
 
-    lines.push(ruleRow(undefined, undefined));
     // The level's own keys. `p` here pauses the AGENT being viewed — not the
     // run — so it is gated on the record's lifecycle and the wiring, not on
     // the run's. `c` and `f` sit after the way out so a narrow terminal drops
@@ -1622,9 +1501,21 @@ export class WorkflowDialog implements Component {
     hints.push("esc back");
     hints.push("c copy");
     hints.push(this.popup ? "f expand" : "f popup");
-    lines.push(windowLine(th.fg("dim", hintLine(hints, contentWidth - 4, " · "))));
-    lines.push(windowBottom());
-    return lines;
+    rows.push(fullRow([{ text: hintLine(hints, windowInnerWidth(contentWidth), " · "), color: "dim" }]));
+
+    // One rendering for both paths: the window's own cells carry role colours
+    // and are painted here, the viewer's and the list's arrive already styled.
+    return styleWorkflowCardLines(
+      renderWindow({
+        width: contentWidth,
+        box: glyphs.box,
+        panes,
+        title: ` ${agentPaneTitle} `,
+        rows,
+        ellipsis: glyphs.ellipsis,
+      }),
+      th,
+    );
   }
 
   private dispatch(action: WorkflowDialogAction): void {

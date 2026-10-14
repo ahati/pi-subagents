@@ -270,7 +270,7 @@ function rowGlyph(entry: WorkflowAgentEntry, glyphs: WorkflowGlyphs): WorkflowCa
  * ------------------------------------------------------------------------- */
 
 /** Trim a line to `width`, cutting inside whichever segment crosses the edge. */
-export function clampLine(line: WorkflowCardLine, width: number): WorkflowCardLine {
+export function clampLine(line: WorkflowCardLine, width: number, ellipsis = "…"): WorkflowCardLine {
   const clamped: WorkflowCardLine = [];
   let used = 0;
   for (const segment of line) {
@@ -284,7 +284,7 @@ export function clampLine(line: WorkflowCardLine, width: number): WorkflowCardLi
     // truncateToWidth wraps its ellipsis in resets, which would leak escape
     // codes into a layout that is supposed to be plain text until it is themed.
     if (room > 0) {
-      clamped.push({ ...segment, text: stripTerminalSequences(truncateToWidth(segment.text, room, "…")) });
+      clamped.push({ ...segment, text: stripTerminalSequences(truncateToWidth(segment.text, room, ellipsis)) });
     }
     return clamped;
   }
