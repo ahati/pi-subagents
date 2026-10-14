@@ -67,6 +67,38 @@ export interface WorkflowJournalEntry {
    * partway through, which is why the flag is on the journal and not derived.
    */
   resumed?: true;
+  /**
+   * The call's `gate` outcome, when it had a gate.
+   *
+   * Recorded for both verdicts, because both are worth reading back: a pass is
+   * the evidence the work was verified at all, and a failure is what a retry
+   * loop was reacting to. Absent on an entry written before this existed, so
+   * every reader has to treat it as optional.
+   */
+  gate?: WorkflowJournalGate;
+}
+
+/** A `gate` command's outcome, as the run's audit trail keeps it. */
+export interface WorkflowJournalGate {
+  /** Whether the command exited zero. */
+  ok: boolean;
+  /**
+   * The command's combined output, tail-truncated.
+   *
+   * The tail rather than the head: a test run's summary is at the bottom, and
+   * the whole log of a failing suite does not belong in a journal line.
+   */
+  output: string;
+  /**
+   * The directory the command actually ran in.
+   *
+   * The one thing that distinguishes a gate against the child's worktree from
+   * a fallback gate against the main checkout — and by the time the journal is
+   * read back, the worktree is long gone and this path is the only evidence of
+   * which tree was verified. Absent on an entry written by a host that did not
+   * report one.
+   */
+  cwd?: string;
 }
 
 /**
@@ -150,6 +182,16 @@ export function appendJournal(path: string, entry: WorkflowJournalEntry): void {
   }
 }
 
+function isGate(value: unknown): value is WorkflowJournalGate {
+  if (typeof value !== "object" || value === null) return false;
+  const gate = value as Record<string, unknown>;
+  return (
+    typeof gate.ok === "boolean" &&
+    typeof gate.output === "string" &&
+    (gate.cwd === undefined || typeof gate.cwd === "string")
+  );
+}
+
 function isEntry(value: unknown): value is WorkflowJournalEntry {
   if (typeof value !== "object" || value === null) return false;
   const entry = value as Record<string, unknown>;
@@ -159,6 +201,7 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
     typeof entry.key === "string" &&
     typeof entry.ok === "boolean" &&
     (entry.text === undefined || typeof entry.text === "string") &&
-    (entry.resumed === undefined || entry.resumed === true)
+    (entry.resumed === undefined || entry.resumed === true) &&
+    (entry.gate === undefined || isGate(entry.gate))
   );
 }

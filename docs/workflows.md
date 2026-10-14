@@ -101,7 +101,7 @@ Re-running normally re-pays for every agent. `resumeFromRunId` avoids that:
 
 > Its unchanged leading `agent()` calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live.
 
-Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
+Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed. A gated call's entry also records the gate's outcome: whether it passed, the tail of its output, and the directory the command ran in.
 
 Four things it will not do:
 
@@ -342,7 +342,7 @@ See [`structured-findings.js`](../examples/workflows/structured-findings.js).
 
 > *"fix it, and don't report success unless `npm test` passes"*
 
-Recognize it by `gate: 'npm test'` on the fix agent. An LLM judging whether a fix works is a weaker signal than the test suite; this is the difference between a result that is *verified* and one that is merely *claimed*.
+Recognize it by `gate: 'npm test'` on the fix agent. An LLM judging whether a fix works is a weaker signal than the test suite; this is the difference between a result that is *verified* and one that is merely *claimed*. Each settled call journals its gate outcome — whether it passed, the tail of the command's output, and the directory the command actually ran in — so a run can be read back afterwards and tell a gate that verified the child's worktree from one that fell back to the session's tree.
 
 See [`gated-fix.js`](../examples/workflows/gated-fix.js).
 
