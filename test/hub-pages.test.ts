@@ -368,12 +368,74 @@ describe("the run's state mark and its item cursor", () => {
     const pane = runPane(h.frame());
     // Live facts on the running row, flush right with the duration…
     expect(pane).toContain("turn 3 · 63.4k tok");
-    // …and the last output line one dim row under it. The done row (m-1)
-    // carries neither — no turn count, no tail.
-    expect(pane).toContain("Editing api.ts — route handlers split");
+    // …and the last output line one dim row under it, a `↳` continuation.
+    // The done row (m-1) carries neither — no turn count, no tail.
+    expect(pane).toContain("↳ Editing api.ts — route handlers split");
     expect(pane).not.toMatch(/m-1.*turn \d/);
     // A running agent whose record is gone gets nothing: no record, no facts.
     expect(pane.match(/turn \d/g)?.length).toBe(1);
+  });
+
+  it("between turns the tail falls back to the session's last assistant line, like the main window's tree", () => {
+    // Nothing streams and no tool runs — the case that used to stick at
+    // "thinking…" forever.
+    const activity = new Map([["r2", { activeTools: new Map(), toolUses: 2, responseText: "", turnCount: 3 }]]);
+    const h = harness(
+      [
+        makeRecord({
+          id: "r2", parentAgentId: "main", description: "api endpoints", status: "running",
+          session: { subscribe: () => () => {}, messages: [{ role: "assistant", content: [{ type: "text", text: "first line\nRoute handlers split into modules" }] }] },
+        }),
+      ],
+      { workflows, workflowRun: () => phasedRunSource(), agentActivity: activity },
+    );
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // page W
+    const pane = runPane(h.frame());
+    // The LAST line of the last assistant text — the freshest output.
+    expect(pane).toContain("↳ Route handlers split into modules");
+    expect(pane).not.toContain("thinking…");
+  });
+
+  it("← focuses the parent pane, → descends — the run page's roster is reachable without esc", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // page W
+    h.press("\u001b[D"); // ← : back on the roster, the run still selected
+    const roster = h.frame().join("\n");
+    expect(roster).toContain("❯ ● migrate-v2");
+    expect(roster).toContain("⏎ open run");
+    // ↑ from the run row walks onto the agent rows — the agents are reachable.
+    h.press("\u001b[A");
+    expect(h.frame().join("\n")).not.toContain("❯ ● migrate-v2");
+    // → on a run row descends again (⏎'s alias).
+    h.press("\u001b[B");
+    h.press("\u001b[C");
+    expect(h.frame().join("\n")).toContain("PHASES");
+    // ← on W lands on the roster; ← from the roster does nothing — the
+    // window must not close on it.
+    h.press("\u001b[D");
+    expect(h.frame().join("\n")).toContain("⏎ open run");
+    h.press("\u001b[D");
+    expect(h.settled()).toBe(false);
+    expect(h.frame().join("\n")).toContain("⏎ open run");
+  });
+
+  it("← pops from WA to W", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    // The item cursor walks to m-1 — the agent with a record — and ⏎ opens WA.
+    h.press("\u001b[B");
+    h.press("\u001b[B");
+    h.press("\u001b[B");
+    h.press("\r");
+    expect(h.frame().join("\n")).toContain("Esc back");
+    h.press("\u001b[D"); // ← : WA → W
+    expect(h.frame().join("\n")).toContain("PHASES");
   });
 
   it("W seeds both marks on the current phase row and draws one glyph there", () => {

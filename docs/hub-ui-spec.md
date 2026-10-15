@@ -350,9 +350,15 @@ and the run's agents — the level the next `⏎` descends into.
 current phase. In `RUNNING WORKFLOW AGENTS`, a running agent with a record
 carries its live facts on the row — `turn <n>` and the record's token total,
 flush right beside the duration — and its last output line one dim row under
-it (the same `describeActivity` text the widget's live row uses);
-settled and queued rows carry neither. The 18-column masters keep the
-section's clamped label and the compact rows only.
+it as a `↳` continuation: while a tool runs, the tool summary; while text
+streams, its last line; between turns, the last assistant line pulled from
+the session — the same derivation the main window's agent tree uses
+(`getLastAssistantText`). Settled and queued rows carry neither. The
+18-column masters keep the section's clamped label and the compact rows only.
+`←` from any run page focuses its parent pane — the same level `esc` pops
+to, so the roster is reachable without closing anything — and `→` is `⏎`'s
+alias where a descent exists; on the transcript panes the arrows stay with
+the viewer (the steer composer's cursor needs them).
 
 ```text
 ╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -368,7 +374,7 @@ section's clamped label and the compact rows only.
 │                    │ RUNNING WORKFLOW AGENTS                                                                         │
 │                    │    ✓ m-1                                                                                   35s  │
 │                    │    ⠋ m-2                                                              turn 3 · 63.4k tok · 32s  │
-│                    │      Editing api.ts — route handlers split                                                      │
+│                    │      ↳ Editing api.ts — route handlers split                                                    │
 │                    │    ✓ m-3                                                                                   26s  │
 │                    │    ◌ m-4 · waiting 1s                                                                           │
 │                    │    ◌ m-5 · waiting 1s                                                                           │
@@ -460,7 +466,7 @@ events interleaved with its agents' spawns, edits and completions.
  fleet Enter on an agent ──> R with that row selected, in the popup twin
  R (subagent sel) ──l──────────────> SL ──esc──> R
  fleet Enter on a run / `/agents → Workflows` ──> W (the run selected)
- R (run sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
+ R (run sel) ──⏎/→──> W ──⏎ on agent──> WA ──l──> SAL ──esc/←──> WA ──esc/←──> W ──esc/←──> R   ←/→: pane-focus aliases of esc/⏎
                 W ──l──> L ──esc──> W
  R ──⇥ / 2──> A (activity view) ──1 / ⇥──> R
  any page ──f──> twin (popup ⇄ fullscreen; frame size only)

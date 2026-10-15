@@ -262,10 +262,10 @@ export function agentRow(options: {
   if (entry.durationMs) parts.push(formatDuration(entry.durationMs));
   const tail: WorkflowCardLine = parts.length > 0 ? [{ text: `${parts.join(" · ")} `, color: "dim" }] : [];
   const headRow = tail.length > 0 ? rightAlign(head, tail, width) : clampLine(head, width);
-  // The live tail's last output line, one dim line under the head — the same
-  // `describeActivity` text the roster preview's live row uses.
+  // The live tail's last output line, one dim line under the head — a `↳`
+  // continuation of the row, the same glyph the identity block uses.
   if (!live?.tail) return [headRow];
-  return [headRow, clampLine([{ text: "     ", color: "dim" }, { text: live.tail, color: "dim" }], width)];
+  return [headRow, clampLine([{ text: "      ↳ ", color: "dim" }, { text: live.tail, color: "dim" }], width)];
 }
 
 /** The agent row's dot-separated tail. The model is not in it — it leads. */

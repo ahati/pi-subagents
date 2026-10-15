@@ -22,6 +22,7 @@
 import { type Component, Input, matchesKey, type ScrollViewScrollbar, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import {
@@ -100,6 +101,16 @@ const ROSTER_SUBAGENTS_LABEL = "SUBAGENTS";
 const ROSTER_WORKFLOWS_LABEL = "WORKFLOWS";
 /** The run's agent section on W and the run-agent pages' master. */
 const RUN_AGENTS_LABEL = "RUNNING WORKFLOW AGENTS";
+
+/** The last non-empty line of a streamed or settled text — the freshest output. */
+function lastNonEmptyLine(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line) return line;
+  }
+  return "";
+}
 
 /**
  * The run-state glyph for a roster workflow row, the same vocabulary the
@@ -813,6 +824,22 @@ export class AgentHub implements Component {
     if (this.filterInput) {
       this.filterInput.handleInput(data);
       this.tui.requestRender();
+      return;
+    }
+
+    // The arrows walk the panes the way they point: left is the parent pane
+    // (the one level `esc` pops to — from a run page that is the roster, so
+    // the agents are reachable without closing anything), right is the
+    // descent `⏎` under the cursor would make. On the transcript panes the
+    // arrows fall through to the viewer — its composer's cursor needs them.
+    if (matchesKey(data, "left")) {
+      if (this.page !== "R" || this.detailOpen) {
+        this.popPage();
+        return;
+      }
+    }
+    if (matchesKey(data, "right") && (this.page === "W" || (this.page === "R" && (this.runRowSelected() || this.stackedMode())))) {
+      this.enterPage(this.entries());
       return;
     }
 
@@ -1626,8 +1653,7 @@ export class AgentHub implements Component {
 
   /**
    * A running run agent's live facts: turn count and tokens from its record
-   * and activity, and the last output line (`describeActivity`, the same text
-   * the roster preview's live row carries). Only a running agent has them.
+   * and activity, and its last output line. Only a running agent has them.
    */
   private runAgentLive(entry: WorkflowAgentEntry): { turns?: number; tokens?: number; tail?: string } | undefined {
     if (entry.recordId === undefined || displayState(entry, true) !== "running") return undefined;
@@ -1637,8 +1663,33 @@ export class AgentHub implements Component {
     return {
       turns: activity?.turnCount,
       tokens: record ? getLifetimeTotal(record.lifetimeUsage) : entry.tokens,
-      tail: describeActivity(activity?.activeTools ?? new Map(), activity?.responseText ?? ""),
+      tail: this.runAgentTail(record, activity),
     };
+  }
+
+  /**
+   * The running agent's last output line. While a tool runs, the tool
+   * summary is the live thing; while text streams, its last line. Between
+   * turns nothing streams and the activity's text is empty — the last
+   * assistant text is pulled from the session instead, exactly how the main
+   * window's agent tree derives its line (`getLastAssistantText`).
+   */
+  private runAgentTail(record: AgentRecord | undefined, activity: AgentActivity | undefined): string {
+    const tools = activity?.activeTools ?? new Map<string, string>();
+    if (tools.size > 0) return describeActivity(tools, activity?.responseText);
+    const streamed = lastNonEmptyLine(activity?.responseText ?? "");
+    if (streamed) return streamed;
+    // Between turns nothing streams and the activity's text is empty — the
+    // last assistant text is pulled from the session instead, the same walk
+    // the main window's agent tree makes (`getLastAssistantText`).
+    const messages = record?.session?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role !== "assistant") continue;
+      const line = lastNonEmptyLine(extractText(message.content as unknown[]));
+      if (line) return line;
+    }
+    return "thinking…";
   }
 
   /** The phase groups of the named run, or none when its detail source is gone. */
