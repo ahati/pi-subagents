@@ -23,15 +23,17 @@ was accepted (update this file in the same change). All frames are drawn at 120
 columns; `f` twins redraw the same pages at terminal size.
 
 **Implementation status.** The page model is landed and stays: the page enum
-**R · T · SL · W · WA · SAL · L** (`enterPage`/`popPage`, `PAGE_PARENT`), the
-pane invariant, the shared `ConversationViewer` behind **T**/**WA**, the 40×10
+**R · SL · W · WA · SAL · L** (`enterPage`/`popPage`, `PAGE_PARENT`), the
+pane invariant, the shared `ConversationViewer` behind **R**/**WA**, the 40×10
 refusal and the 40–59 stacked / ≥ 60 two-pane ladder, and per-row key dispatch
 (`test/hub-pages.test.ts`). Landed in the previous style and restyled by this
 rewrite: the half-width roster (`hubPaneGeometry`, description/stats columns)
 becomes the narrow 18-column master (`masterPaneGeometry`); the window-title
 breadcrumb is dropped (the title cell is 20 columns) — the header block names
 the item, and on run-agent pages the run name rides the `↳` line; the roster's
-transcript preview becomes the agent-log preview; the `❞` status strip is
+agent-log preview becomes the selected agent's conversation (the separate
+transcript page **T** is deleted; `l` still opens its event log); the `❞`
+status strip is
 removed (activity = header stats, the log's trailing line, the `▍` live
 tail); the single-list `hintLine` footer becomes the two-slot band; `▸` becomes `❯`; the
 `⋯` queued glyph becomes `○`; evicted `◌ ⇋` roster rows are dropped (revival
@@ -92,8 +94,7 @@ view into the left pane.
 
 | Page | Left pane (parent level) | Right pane (detail) |
 |---|---|---|
-| **R** — roster | grouped roster (subagents + runs) | selected item's live preview |
-| **T** — subagent transcript | grouped roster, selection pinned | full conversation |
+| **R** — roster | grouped roster (subagents + runs) | the selected agent's full conversation, or the selected run's overview |
 | **SL** — subagent log | grouped roster, selection pinned | the subagent's event log |
 | **W** — workflow run | grouped roster, selection pinned | the run's phases + agents |
 | **WA** — a run's agent | the run's agent list (+ phases) | that agent's full conversation |
@@ -106,7 +107,9 @@ There is exactly one window. What used to be separate popups (agent roster,
 workflow inspector, transcript, log) are **pages** inside it. A page = (left
 pane = parent level, right pane = detail, footer band). `⏎`
 descends, `esc` ascends exactly one level, `o`/`ctrl+o` expands in place —
-never a page. Every page has a twin (`f`).
+never a page. On **R** the left pane's selection *is* the detail: `⏎` descends
+nowhere on a subagent row (its conversation is already the right pane) and
+opens **W** on a run row. Every page has a twin (`f`).
 
 The footer band holds two slots (the grammar is in
 [The footer band](#the-footer-band)); the tables below list each page's slots
@@ -114,11 +117,10 @@ in full — the fitter may drop hints at narrower widths.
 
 | Page | Reached by | Footer left slot | Footer right slot |
 |---|---|---|---|
-| **R** — roster, subagent selected | hub open; `esc` from T | `⏎ transcript · l log · p pause · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
+| **R** — roster, subagent selected | hub open; the window's top page | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc close` |
 | **R** — roster, run selected | `↑↓` onto a run row | `⏎ open run · s stop run · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
-| **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
-| **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, with `m md` swapped for `c copy diff · o collapse` | as the page it sits in, without `o expand` |
-| **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
+| **TD** — expanded tool-call | `o` / `ctrl+o` in R or WA | as the page it sits in, with `m md` swapped for `c copy diff · o collapse` | as the page it sits in, without `o expand` |
+| **SL** — subagent log | `l` on a subagent row (in R's conversation) | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **W** — workflow run | `⏎` on a run row; fleet Enter on a run; `/agents → Workflows` | `<done>/<total> agents · phase <n> of <m> · p pause run` (or `p resume run`) | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
 | **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md · s skip · r retry` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back` |
 | **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
@@ -139,7 +141,7 @@ q close`); restyling it to the header-block grammar is a follow-up.
 ## The right pane opens with a header block
 
 Every right pane begins with identity — the same block on a page and in its
-roster preview — and identity is exactly **three rows**: the header line, the
+roster page's pane — and identity is exactly **three rows**: the header line, the
 `↳` line, the header rule. The rule sits directly under the `↳` line —
 never a blank row between identity and body — and everything below it is
 body: the item's transcript or event log, taking every remaining row. The
@@ -147,7 +149,7 @@ left pane's rows continue beside the body; the panes flow independently, so a
 tall roster never pushes the right pane's content down. The 20-column title
 cell never carries a breadcrumb; the header block is the identity.
 
-The agent header (R preview, **T**, **SL**):
+The agent header (R's conversation, **SL**):
 
 ```text
 ● <name>[(twin)]  <description> · <N> tools · <elapsed> (<state>) · <tokens> token (<ctx>%)
@@ -157,7 +159,7 @@ The agent header (R preview, **T**, **SL**):
 `(twin)` marks append prompt mode; invocation tags list only what applies. The
 `↳` line is always drawn — an agent with no invocation tag renders `  ↳ —` —
 so the header rule and the body below it never move by a row per record. The
-run header (R preview, **W**, **L**):
+run header (R's run-row selection, **W**, **L**):
 
 ```text
 ● <name>  workflow · <done>/<total> agents · <elapsed> (<state>)
@@ -168,7 +170,7 @@ A settled run freezes its clock and reads `↳ <m> phases · <state word>`. The
 run-agent header (**WA**, **SAL**) is the agent header with the run name
 leading the `↳` line: `↳ migrate-v2 · <provider/model> · worktree`.
 
-## Transcript block grammar (right pane of T and WA)
+## Transcript block grammar (right pane of R's agent selection and WA)
 
 | Block | Marker | Rendering |
 |---|---|---|
@@ -210,30 +212,34 @@ order: (1) the readout; (2) left actions right-to-left — `m md` first,
 `Enter steer` last; (3) right hints right-to-left — the `f` twin first — with
 the `Esc …` anchor pinned. Hints are never cut mid-hint. `x` is armed on
 first press (`x again to STOP`); `k` aliases `x` on roster and transcript
-pages. The readout is the first thing the band gives up: at 120 columns **T**,
-**WA** and **TD** have already dropped `<N> lines · <P>%` (**TD**, which
-carries `c copy diff` instead of `m md`, its `o collapse` too) — the frames
-show the fitter's honest output; wider terminals restore them.
+pages. The readout is the first thing the band gives up: at 120 columns **R**
+with a subagent selected, **WA** and **TD** have already dropped `<N> lines ·
+<P>%` (**TD**, which carries `c copy diff` instead of `m md`, its `o collapse`
+too) — the frames show the fitter's honest output; wider terminals restore
+them.
 
 ## Page R — roster
 
-### R1 — subagent selected (live agent-log preview)
+### R1 — subagent selected (the conversation)
 
 ```text
 ╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ SUBAGENTS          │ ● explore (twin)  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token          │
 │ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
 │   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
-│   ‖ refactor       │ 12:01:02 spawn  explore · opencode-go/deepseek-v4.1-flash · background                          │
-│   ✓ docs-gen       │ 12:01:03 turn   1 start                                                                         │
-│   ✗ crawl-old      │ 12:01:04 tool   read README.md → 42 lines                                                       │
-│ WORKFLOWS          │ 12:01:06 tool   bash: grep -rn flaky test/ → 3 hits                                             │
-│   ● migrate-v2 3/5 │ 12:01:21 note   steering: focus on test/e2e                                                     │
-│   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
-│                    │ 12:01:41 still running — 3 unstable detected                                                    │
-│                    │ (⏎ opens the full transcript)                                                                   │
+│   ‖ refactor       │ [User]                                                                                          │
+│ WORKFLOWS          │ Find and fix the flaky tests in test/. Start from test/e2e and verify with pnpm.                │
+│   ● migrate-v2 3/5 │ ───                                                                                             │
+│                    │ [Assistant]                                                                                     │
+│                    │   ✻ thinking                                                                                    │
+│                    │   Three tests share one temp dir — the failures vanish in isolation. Confirm with a solo run,   │
+│                    │   then scope the temp dir per worker.                                                           │
+│                    │ The e2e helpers reuse one mkdtemp root. I'll prove it with a solo run, then scope the temp dir  │
+│                    │ per worker.                                                                                     │
+│                    │ ▍ editing…                                                                                      │
+│                    │                                                                                                 │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ ⏎ transcript · l log · p pause · c copy                                  ↑↓ select · ⇥ activity · f full · Esc close │
+│ Enter steer · x stop · m md          PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc close │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -266,56 +272,32 @@ right; the name truncates first, the counter survives. Glyphs: `●` running,
 is open or a filter is applied, a full-width filter row sits directly under the
 top edge — never a split row — and costs the body one row.
 
-The preview pane is the item's **agent log** — the same event grammar as
-**SL** — closed by the `(⏎ opens the full transcript)` hint. It is the
-compact answer to "what is this agent doing": the trailing line is the live
-activity (`describeActivity` in `src/ui/agent-widget.ts`), which is where the
-removed `❞` strip's information went. A selected run previews its overview
+**R1** is the selected subagent's **conversation itself** — the same blocks
+the run-agent page renders, from the same `ConversationViewer`: the header
+block, the header rule, then the transcript, tail-anchored, with the live `▍`
+activity line where the removed `❞` strip's information went. There is no
+descent left: `⏎` on an agent row opens no page (the pane is already the
+conversation) — the viewer's own `⏎`, the steering composer, is the key the
+band advertises — and `l` opens the agent's event log (**SL**). `↑`/`↓` move
+the roster selection and the conversation follows; the
+walk crosses the `WORKFLOWS` header too — a run row has no transcript, so
+landing on one turns the pane into the run's overview (its keys, and `⏎` →
+**W**). An agent whose session is gone still draws its header block and an
+honest `transcript unavailable` note. A selected run previews its overview
 instead: header block, phases (the current phase carries the `❯`), and the
 `(⏎ opens the run page)` hint.
 
-## Page T — subagent transcript (nested level 1)
-
-Left: the roster stays, selection pinned. Right: the header block, then the
-full conversation. **TD** is this page with one rich block expanded. `↑`/`↓`
-move the roster selection and the conversation follows; the walk crosses the
-`WORKFLOWS` header too — a run row has no transcript, so landing on one
-turns the page into the roster with the run selected (its overview and keys),
-where `⏎` opens the run.
-
-```text
-╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
-│ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
-│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
-│   ‖ refactor       │ [User]                                                                                          │
-│   ✓ docs-gen       │ Find and fix the flaky tests in test/. Start from test/e2e and verify with pnpm.                │
-│   ✗ crawl-old      │ ───                                                                                             │
-│ WORKFLOWS          │ ✻ thinking                                                                                      │
-│   ● migrate-v2 3/5 │   Three tests share one temp dir — the failures vanish in isolation. Confirm                    │
-│   ✓ batch-d… 12/12 │   with a solo run, then scope the temp dir per worker.                                          │
-│                    │   … +2 lines                                                                                    │
-│                    │ ───                                                                                             │
-│                    │ [Assistant]                                                                                     │
-│                    │   The e2e helpers reuse one mkdtemp root. I'll prove it with a solo run,                        │
-│                    │   then scope the temp dir per worker.                                                           │
-│                    │ ───                                                                                             │
-│                    │ ● Edit test/e2e/helpers/boot.ts                                                                 │
-│                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
-│                    │ ▍ running tests…                                                                                │
-│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ Enter steer · x stop · m md         PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-```
-
 ## Page TD — expanded tool-call (in-place view state)
 
-`o`/`ctrl+o` on the `Edit` call expands its diff in place; the roster does not
-move, no nesting level is added.
+`o`/`ctrl+o` on the `Edit` call expands its diff in place — on **R** or on
+**WA**, the pages whose right pane is a transcript; the roster does not move,
+no nesting level is added, and the page's escape anchor does not change.
+The frame below is the **R** state, drawn at 120 columns; its footer is the
+fitter's real output.
 
 ```text
 ╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ SUBAGENTS          │ ● explore (twin)  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token          │
 │ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
 │   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
 │   ‖ refactor       │   (earlier blocks scroll up — identical)                                                        │
@@ -332,13 +314,13 @@ move, no nesting level is added.
 │                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
 │                    │ ▍ running tests…                                                                                │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ Enter steer · x stop · c copy diff             PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc roster │
+│ Enter steer · x stop · c copy diff              PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc close │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page SL — subagent log (nested level 2)
 
-`l` from **T** — or `l` directly on a roster subagent row (skipping **T**).
+`l` from **R**'s conversation — `l` directly on a roster subagent row.
 The event log is the compact, timestamped companion to the transcript:
 spawns, turn starts, tool results, steering notes, completion with
 tokens/cost.
@@ -368,7 +350,7 @@ and the run's agents — the level the next `⏎` descends into.
 current phase. In `RUNNING WORKFLOW AGENTS`, a running agent with a record
 carries its live facts on the row — `turn <n>` and the record's token total,
 flush right beside the duration — and its last output line one dim row under
-it (the same `describeActivity` text the roster preview's live row uses);
+it (the same `describeActivity` text the widget's live row uses);
 settled and queued rows carry neither. The 18-column masters keep the
 section's clamped label and the compact rows only.
 
@@ -398,7 +380,7 @@ section's clamped label and the compact rows only.
 ## Page WA — a run's agent (nested level 2)
 
 Left: the run's agent list — now the parent level — with the phases beneath.
-Right: that agent's full conversation, same grammar as **T**. `↑↓` in the
+Right: that agent's full conversation, same grammar as **R**'s. `↑↓` in the
 left list switches agents in place.
 
 ```text
@@ -474,21 +456,23 @@ events interleaved with its agents' spawns, edits and completions.
 ## Transition map
 
 ```text
- R (subagent sel) ──⏎──> T ──o──> TD (in place) ──o──> T ──l──> SL ──esc──> T ──esc──> R
- fleet Enter on an agent ──> T directly, in the popup twin (roster master beside it)
- R (subagent sel) ──l──────────────> SL (skips T) ──esc──> R
+ R (subagent sel) ──o──> TD (in place) ──o──> R ──l──> SL ──esc──> R
+ fleet Enter on an agent ──> R with that row selected, in the popup twin
+ R (subagent sel) ──l──────────────> SL ──esc──> R
  fleet Enter on a run / `/agents → Workflows` ──> W (the run selected)
  R (run sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
                 W ──l──> L ──esc──> W
  R ──⇥ / 2──> A (activity view) ──1 / ⇥──> R
  any page ──f──> twin (popup ⇄ fullscreen; frame size only)
  roster ──↑/↓──> cursor crosses group headers; right pane + footer follow
+ 40–59 cols ──⏎ on R──> the pane pushed full width (a view state) ──esc──> R
  /agents menu ── "Agent hub" ──> R
  /agents menu ── "Workflows" ──> W, that run selected (AgentHubInitial.runId)
 ```
 
 `esc` always ascends exactly one nesting level; the footer's `Esc <target>`
-names where it lands. Maximum nesting depth is 3 (roster → run → agent → log).
+names where it lands (on **R**, the top page, it closes the window). Maximum
+nesting depth is 3 (roster → run → agent → log).
 
 ## Live regrouping
 
@@ -512,7 +496,7 @@ two-pane size and the detail pane takes the rest.
 |---|---|
 | ≥ 60 cols | Full layout: narrow master + detail, header blocks, footer band |
 | 60–99 cols | Same grammar; detail wraps at its width; footer degrades by the fitter |
-| 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` pushes the right pane's content as a full-width page (header block + `esc` pops) |
+| 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` on a subagent row pushes the pane (header block + transcript) as a full-width page — a view state, not a page: `esc` pops it back to the roster |
 | < 40 cols or < 10 rows | The window refuses to open: `ctx.ui.notify("Agent hub needs a terminal ≥ 40×10")` — no partial frame is drawn |
 | any height ≥ 10 rows | The same layout at every height — the body simply gains rows. At the 10-row floor it is six rows — five while the filter row is up; diff boxes keep their shape, older hunks scroll |
 
@@ -544,13 +528,15 @@ may not.
 - **Footer band**: each page renders its two slots; the fitter's drop order
   (readout → left actions → right hints, `Esc` pinned, never mid-hint) is
   pinned.
-- **Transcript grammar**: T and WA render the same block set from the same
+- **Transcript grammar**: R with a subagent selected and WA render the same
+  block set from the same
   `ConversationViewer` (`[User]` / `[Assistant]` / `✻` / `───` / `▍` pinned;
   renderer-owned chrome pinned by shape, not bytes).
 - **Roster**: windowing, counter truncation, the glyph set, and live
   regrouping pins.
-- **Preview**: R's right pane renders the selected subagent's log in the SL
-  grammar (a run row renders its overview), closed by the `⏎` hint.
+- **Roster pane**: R's right pane renders the selected subagent's conversation
+  from the shared viewer (a run row renders its overview) — there is no
+  separate transcript page to descend into.
 - **Size ladder**: the 40×10 refusal, 40–59 stacked and ≥ 60 two-pane
   boundaries trigger exactly at the table above; resize up restores in
   reverse order with state preserved.

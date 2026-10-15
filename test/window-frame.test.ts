@@ -342,17 +342,16 @@ describe("the footer band", () => {
  * ------------------------------------------------------------------------- */
 
 describe("the spec's frames' footer bands", () => {
-  // The nine bands `docs/hub-ui-spec.md`'s frames carry, at the band's 116
+  // The bands `docs/hub-ui-spec.md`'s frames carry, at the band's 116
   // content columns (a 120-column window). The frames hold these exact strings,
   // so a change to the fitter — or to a page's slots — fails here first.
   const readout = (text: string): FooterHint => ({ text, group: "readout" });
   const action = (text: string): FooterHint => ({ text, group: "action" });
   const hint = (text: string, pinned = false): FooterHint => ({ text, group: "hint", pinned });
   const cases: Array<[string, string, FooterHint[], FooterHint[]]> = [
-    ["R1", "⏎ transcript · l log · p pause · c copy                                  ↑↓ select · ⇥ activity · f full · Esc close", [ action("⏎ transcript"), action("l log"), action("p pause"), action("c copy") ], [ hint("↑↓ select"), hint("⇥ activity"), hint("f full"), hint("Esc close", true) ]],
+    ["R1", "Enter steer · x stop · m md          PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc close", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc close", true) ]],
     ["R2", "⏎ open run · s stop run · c copy                                         ↑↓ select · ⇥ activity · f full · Esc close", [ action("⏎ open run"), action("s stop run"), action("c copy") ], [ hint("↑↓ select"), hint("⇥ activity"), hint("f full"), hint("Esc close", true) ]],
-    ["T", "Enter steer · x stop · m md         PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
-    ["TD", "Enter steer · x stop · c copy diff             PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc roster", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("c copy diff"), action("o collapse") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
+    ["TD", "Enter steer · x stop · c copy diff              PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc close", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("c copy diff"), action("o collapse") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc close", true) ]],
     ["SL", "42 lines · 100% · x stop                                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("42 lines · 100%"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
     ["W", "3/5 agents · phase 2 of 4 · p pause run             ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster", [ readout("3/5 agents · phase 2 of 4"), action("p pause run") ], [ hint("↑↓ item"), hint("⏎ agent"), hint("l run log"), hint("s stop run"), hint("f full"), hint("Esc roster", true) ]],
     ["WA", "Enter steer · x stop · m md · s skip  PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md"), action("s skip"), action("r retry") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc back", true) ]],
