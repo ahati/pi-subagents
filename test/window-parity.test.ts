@@ -162,7 +162,19 @@ describe("one window for both surfaces", () => {
       const tee = panes.leftCellWidth + 1;
       for (const [level, lines] of Object.entries({ hub: hubFrames(width), ...dialogFrames(width) })) {
         expect(lines[0]!.indexOf("┬"), `${level} top edge`).toBe(tee);
-        expect(lines.at(-1)!.indexOf("┴"), `${level} bottom edge`).toBe(tee);
+        const bottom = lines.at(-1)!;
+        if (level === "hub") {
+          // The popup chat twin still bottoms out at a split edge; it is a
+          // separate window, restyled in a later phase.
+          expect(bottom.indexOf("┴"), `${level} bottom edge`).toBe(tee);
+        } else {
+          // The inspector's divider terminates at the band rule: the `┴` is in
+          // the band and the bottom edge below it is plain.
+          const band = lines.find(line => line.startsWith("\u2502 \u2500"));
+          expect(band, `${level} band rule`).toBeDefined();
+          expect(band!.indexOf("\u2534"), `${level} band tee`).toBe(tee);
+          expect(bottom.indexOf("\u2534"), `${level} bottom edge`).toBe(-1);
+        }
         for (const line of lines) {
           expect(visibleWidth(line), `${level} at ${width}: ${JSON.stringify(line)}`).toBe(width);
         }
@@ -253,14 +265,18 @@ describe("one window for both surfaces", () => {
     );
     for (let i = 0; i < 10; i++) instance.handleInput("j");
     const frame = instance.render(100);
-    // The pane rows: the header row and the footer row are full-width and would
-    // otherwise bracket them.
-    const body = frame.filter(line => line.startsWith("\u2502")).slice(1, -1);
+    // The pane rows only: the header, the band rule and the footer are
+    // full-width, so a split row is the one with three bars in it.
+    const body = frame.filter(line => line.split("\u2502").length === 4);
     // The pointer is the phase pane's — read the master cell, not the agent
     // row beside it, which carries a `\u276f` of its own.
     const master = body.map(line => line.split("\u2502")[1] ?? "");
-    expect(master.findIndex(cell => cell.includes("\u276f"))).toBe(3); // three rows above, two below
-    expect(master.at(-1)).toContain("P12");
+    // Seven body rows: a 19-row terminal at the popup's 70% ceiling is 13
+    // rows, minus the six chrome rows this run's window draws (two edges, the
+    // name row, the titled rule, the band rule and the footer).
+    expect(body).toHaveLength(7);
+    expect(master.findIndex(cell => cell.includes("\u276f"))).toBe(3); // three rows above, three below
+    expect(master.at(-1)).toContain("P13");
     expect(master.some(cell => cell.includes("P8"))).toBe(true);
     instance.dispose();
   });

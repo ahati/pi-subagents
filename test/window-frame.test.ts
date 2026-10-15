@@ -325,10 +325,14 @@ const DETAIL_HINTS = new Set([
 ]);
 const LOG_HINTS = new Set(["↑↓ agent", "p pause", "p resume", "x stop", "esc back", "c copy", "f expand"]);
 
-/** The hint fragments a rendered footer holds, bars and padding stripped. */
+/**
+ * The hint fragments a rendered footer holds, bars and padding stripped. The
+ * band's two slots are separated by padding rather than a joiner, so a run of
+ * two or more spaces splits as well as the `·`.
+ */
 function footerFragments(line: string): string[] {
   const inner = line.replace(/^\S\s/, "").replace(/\s\S$/, "").trim();
-  return inner === "" ? [] : inner.split(" · ");
+  return inner === "" ? [] : inner.split(" · ").flatMap(slot => slot.split(/\s{2,}/));
 }
 
 /** A dialog whose footer has every hint live: all actions, a long prompt, a record. */
@@ -522,7 +526,11 @@ describe("the inspector draws through the shared frame", () => {
     // in it — and the matching split bottom edge, from the shared geometry.
     const panes = paneGeometry(100);
     expect(lines[0]).toBe(splitEdge(100, panes.leftCellWidth, UNICODE_PANE_BOX, "top", " Phases "));
-    expect(lines.at(-1)).toBe(splitEdge(100, panes.leftCellWidth, UNICODE_PANE_BOX, "bottom"));
+    // The divider ends at the band rule's `┴`; below it the bottom edge is
+    // plain, since a split one would hang a second tee under the first.
+    expect(lines.at(-1)).toBe(frameEdge(100, UNICODE_PANE_BOX, "bottom"));
+    const band = lines.find(line => line.startsWith("│ ─"));
+    expect(band?.indexOf("┴")).toBe(panes.leftCellWidth + 1);
     for (const line of lines) expect(visibleLength(line)).toBe(100);
     instance.dispose();
   });
