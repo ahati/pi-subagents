@@ -31,13 +31,12 @@ import {
   type WorkflowEntry,
 } from "../workflow/progress.js";
 import { SPINNER } from "./agent-widget.js";
-import { type PaneBox, UNICODE_PANE_BOX, windowRange } from "./window-frame.js";
+import { windowRange } from "./window-frame.js";
 import {
   clampLine,
   formatCompactTokens,
   formatModel,
   REPLAYED_ANNOTATION,
-  UNICODE_GLYPHS,
   type WorkflowCardColor,
   type WorkflowCardLine,
   type WorkflowCardSegment,
@@ -64,17 +63,8 @@ export interface WorkflowDialogGlyphs {
   queued: string;
   /** `figures.pointer` — the selected row in either pane. */
   pointer: string;
-  /** Marks whichever pane currently owns j/k. */
-  focus: string;
   /** Running rows cycle these. */
   spinner: readonly string[];
-  /** The pane frame: corners, edges and the tees where the two panes meet. */
-  box: PaneBox;
-  /** Trailing marker on a title the pane was too narrow to hold. */
-  ellipsis: string;
-  /** How the footer names the arrow keys and Enter. */
-  upDown: string;
-  enter: string;
 }
 
 export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
@@ -85,12 +75,7 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   cross: "✗",
   queued: "◌",
   pointer: "❯",
-  focus: UNICODE_GLYPHS.pointer,
   spinner: SPINNER,
-  box: UNICODE_PANE_BOX,
-  ellipsis: "…",
-  upDown: "↑↓",
-  enter: "⏎",
 };
 
 /**

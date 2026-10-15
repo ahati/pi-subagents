@@ -1182,13 +1182,35 @@ describe("P10 — runId opens the run's page and the run controls live there", (
     expect(frame.join("\n")).toContain("❯ 2 migrate");
     expect(frame.join("\n")).toContain("RUN AGENTS");
     expect(bandOf(frame)).toContain("Esc roster");
+    // The item cursor is seeded on the CURRENT phase, not left at the top:
+    // ⏎ opens migrate's first agent (m-2), not discover's (m-1). The string
+    // pins above cannot see this — the phase's state mark draws the same
+    // `❯ 2 migrate` wherever the cursor sits.
+    h.press("\r");
+    const agentPage = h.frame().join("\n");
+    expect(agentPage).toContain("m-2");
+    expect(agentPage).not.toContain("❯ m-1");
   });
 
-  it("a swept runId falls back to the roster instead of an empty run page", () => {
-    const h = openRun();
+  it("a runId with no detail source falls back to the roster instead of an empty run page", () => {
+    const h = openRun({ workflowRun: id => (id === "wf_1" ? phasedRunSource() : undefined) });
     h.open({ runId: "wf_gone" });
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
     expect(h.frame().at(-2)).toContain("Esc close");
+  });
+
+  it("a run off the roster still opens on W — the menu lists every task of the session", () => {
+    // Finished long ago: the roster's linger window has dropped it, but the
+    // task (the detail source) is still there. `/agents → Workflows` lists
+    // it, so opening it must land on W — phases in the detail pane, the
+    // run's identity block naming it — not back on the roster preview.
+    const h = openRun({ workflows: () => [] });
+    h.open({ runId: "wf_1" });
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("PHASES");
+    expect(frame).toContain("❯ 2 migrate");
+    expect(frame).toContain("workflow · ");
+    expect(frame).not.toContain("(⏎ opens");
   });
 
   it("p on W pauses a running run; on a parked run it resumes", () => {

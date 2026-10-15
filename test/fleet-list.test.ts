@@ -528,8 +528,9 @@ describe("FleetList navigation", () => {
     const frame = (h.overlayComponent() as { render(width: number): string[] }).render(120).map(plain).join("\n");
     // Page W: the run's pane on the right, the run row selected in the master.
     expect(frame).toContain("RUN AGENTS");
-    // The master's cursor marker sits on the run's row (the fake theme's tags
-    // cost the 18-column cell its name, so the marker is what there is to see).
+    // The master's cursor marker sits on a row (the fake theme's tags cost
+    // the 18-column cell its name, so the marker is what there is to see
+    // here; the hub-pages suite pins WHICH row under a passthrough theme).
     expect(frame).toMatch(/^│ ❯/m);
     expect(frame).toContain("migrate-v2");
     // W's escape anchor names the roster, not the hub close.

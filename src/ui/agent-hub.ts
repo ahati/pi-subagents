@@ -502,20 +502,23 @@ export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: A
   // children the fleet opens are not roster rows, but they have a transcript.
   // A stale id falls back to the roster, which is always drawable.
   const known = target != null && deps.manager.listAgents().some(a => a.id === target);
-  // A run still on the roster (or lingering in it) is openable; a swept one is
-  // not, and the window falls back to the roster rather than drawing a run
-  // page whose detail source is gone.
+  // The menu lists every task of the session, finished runs included, and a
+  // run outlives the roster's linger window: what decides openability is the
+  // detail source, not the roster row. A run with neither is not openable,
+  // and the window falls back to the roster rather than drawing a run page
+  // whose source is gone.
+  const runSource = runTarget != null ? deps.workflowRun?.(runTarget) : undefined;
   const run = runTarget != null ? hubWorkflows(deps).find(w => w.id === runTarget) : undefined;
   const resume: HubResumeState = {
     view: "table",
     selected: Math.max(0, known ? hubEntryIndex(deps, target) : run ? hubRunIndex(deps, run.id) : 0),
     filterText: "",
     // The popup opens on the agent's transcript page or the run's page.
-    page: known ? "T" : run ? "W" : "R",
+    page: known ? "T" : runSource ? "W" : "R",
     focusId: known ? target : undefined,
-    runId: run?.id,
+    runId: runSource ? (run?.id ?? runTarget) : undefined,
     // D8: the item cursor starts where the run is, on the current phase row.
-    runItemSel: run ? currentPhaseIndex(hubRunGroups(deps, run.id)) : undefined,
+    runItemSel: runSource ? currentPhaseIndex(hubRunGroups(deps, runTarget!)) : undefined,
   };
   let popup = initial?.popup ?? (target != null || runTarget != null);
   for (;;) {
@@ -826,9 +829,10 @@ export class AgentHub implements Component {
         return;
       }
       // A run agent whose record has no viewer left still takes the page's
-      // run-agent keys, exactly as the roster does without a session.
-      if (this.page === "WA" && matchesKey(data, "s")) { this.skipRunAgent(); return; }
-      if (this.page === "WA" && matchesKey(data, "r")) { this.retryRunAgent(); return; }
+      // run-agent keys, gated exactly like the viewer-backed path — an ungated
+      // copy would let `s` skip a done agent.
+      if (this.page === "WA" && matchesKey(data, "s")) { this.runAgentKey("skip"); return; }
+      if (this.page === "WA" && matchesKey(data, "r")) { this.runAgentKey("retry"); return; }
     }
 
     // The log pages (SL/SAL/L): scroll, copy, pause, stop, back.
@@ -1945,7 +1949,25 @@ export class AgentHub implements Component {
 
   /** The run the page is on, live. */
   private currentRun(): FleetWorkflow | undefined {
-    return this.runId === undefined ? undefined : this.workflows().find(w => w.id === this.runId);
+    if (this.runId === undefined) return undefined;
+    const roster = this.workflows().find(w => w.id === this.runId);
+    if (roster) return roster;
+    // The menu can still open a run that left the roster (finished long
+    // ago): rebuild its row facts from the task so W keeps its name, state
+    // glyph and frozen clock instead of drawing an empty identity.
+    const source = this.runSource();
+    if (!source) return undefined;
+    const agents = flattenRunAgents(source.progress, source.meta?.phases);
+    return {
+      id: this.runId,
+      name: source.task.workflowName ?? this.runId,
+      status: source.task.status,
+      doneCount: agents.filter(a => a.state === "done").length,
+      totalCount: source.agentCount ?? agents.length,
+      startedAt: source.task.startTime,
+      completedAt: source.task.endTime,
+      tokens: 0,
+    };
   }
 
   /** The run's detail source — the named run's, or the current page's. */

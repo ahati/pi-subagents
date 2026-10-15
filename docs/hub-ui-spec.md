@@ -125,8 +125,9 @@ in full — the fitter may drop hints at narrower widths.
 | **L** — run log | `l` in W | `<N> lines · <P>% · s stop run` | `↑↓ scroll · c copy tail · f full · Esc back` |
 
 On **WA** the per-agent `s skip` and `r retry` keys act on the current run
-agent, gated exactly as the retired inspector gated them — skip only while a
-live run, retry only a failed or interrupted agent inside a live run — and
+agent, gated exactly as the retired inspector gated them — `agentActions` in
+`src/ui/workflow-view.ts`: skip only a queued or running agent inside a live
+run, retry only a running agent (its `agent()` call still unanswered) — and
 neither is advertised when the extension wired no run controls for that run.
 **W**'s `s` stays stop-run; its `p` toggles pause/resume on the run.
 
@@ -473,7 +474,7 @@ events interleaved with its agents' spawns, edits and completions.
  any page ──f──> twin (popup ⇄ fullscreen; frame size only)
  roster ──↑/↓──> cursor crosses group headers; right pane + footer follow
  /agents menu ── "Agent hub" ──> R
- SubagentWorkflow tool ── open ──> W, that run selected (AgentHubInitial.runId)
+ /agents menu ── "Workflows" ──> W, that run selected (AgentHubInitial.runId)
 ```
 
 `esc` always ascends exactly one nesting level; the footer's `Esc <target>`
@@ -519,9 +520,11 @@ may not.
 ## Tests that hold this together
 
 - **Chrome parity**: the shared chrome (edges, tees, rules, band, footer row
-  shape) renders identically for the hub's popup and fullscreen twins at equal
-  widths — `renderWindow` owns it; parity pins fail if a surface drifts. The
-  workflow inspector that used to be the second surface is retired (P10); its
+  shape) is drawn once by `renderWindow`, and the hub's popup and fullscreen
+  twins get it from the same call — the per-page byte pins in
+  `test/hub-pages.test.ts` at 120 columns and the popup-height pins in
+  `test/agent-hub.test.ts` are what fail if a surface drifts. The workflow
+  inspector that used to be the second surface is retired (P10); its
   surviving row vocabulary lives in `src/ui/workflow-view.ts`.
 - **Pane invariant**: every page's left pane shows the parent level and its
   right pane the detail — pinned per page in `test/hub-pages.test.ts`.

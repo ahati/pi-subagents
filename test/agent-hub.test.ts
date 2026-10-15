@@ -774,14 +774,12 @@ describe("agent hub roster", () => {
     expect(row!.slice(1, 21)).toBe(" ❯ ● mig… 1234/9999 ");
   });
 
-  it("Enter on a workflow row opens the run inspector and the hub stays up", async () => {
-    const openWorkflow = vi.fn();
+  it("Enter on a workflow row opens page W in the same window", async () => {
     const h = harness([makeRecord({ id: "a1" })], {
       workflows: () => [{
         id: "wf_1", name: "audit", status: "running", doneCount: 1, totalCount: 2,
         startedAt: Date.now() - 1000, tokens: 500,
       }],
-      openWorkflow,
     });
     h.open();
     // The roster groups SUBAGENTS first, then WORKFLOWS: the workflow row is
@@ -789,9 +787,7 @@ describe("agent hub roster", () => {
     // cursor slot.
     h.press("\u001b[B");
     h.press("\r");
-    // The run opens as page W inside the same window; the legacy inspector is
-    // not opened (it stays the fallback adapter for non-hub entry points).
-    expect(openWorkflow).not.toHaveBeenCalled();
+    // The run opens as page W inside the same window — no second overlay.
     expect(h.settled()).toBe(false);
     expect(h.components).toHaveLength(1);
     const frame = h.frame().join("\n");

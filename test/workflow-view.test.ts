@@ -6,11 +6,14 @@
  * grammar are the contract those pages inherit.
  */
 
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
+import { SPINNER } from "../src/ui/agent-widget.js";
 import type { WorkflowCardLine } from "../src/ui/workflow-card.js";
 import {
   agentActions,
   agentRow,
+  dialogRowGlyph,
   phaseListRows,
   subStatusAnnotations,
   UNICODE_DIALOG_GLYPHS,
@@ -122,5 +125,39 @@ describe("subStatusAnnotations", () => {
   it("says why a queued row has not started", () => {
     const parts = subStatusAnnotations(entry({ queuedAt: 0 }), "queued", 5_000);
     expect(parts).toContain("waiting 5s");
+  });
+});
+
+describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
+  it("maps every one of the seven display states to its glyph and colour", () => {
+    expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✓", color: "success" });
+    expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "error" });
+    // The three ✗ states are told apart by colour alone — dim for skipped,
+    // warning for blocked (waiting on the user).
+    expect(dialogRowGlyph("skipped", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "dim" });
+    expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "warning" });
+    expect(dialogRowGlyph("queued", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
+    expect(dialogRowGlyph("interrupted", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
+    expect(dialogRowGlyph("running", UNICODE_DIALOG_GLYPHS, 3)).toEqual({ text: SPINNER[3], color: "dim" });
+    // Every glyph is one column wide — the rows' right-aligned counters and
+    // the panes' column math depend on it.
+    for (const state of ["done", "failed", "skipped", "blocked", "queued", "interrupted"] as const) {
+      expect(visibleWidth(dialogRowGlyph(state, UNICODE_DIALOG_GLYPHS).text)).toBe(1);
+    }
+  });
+
+  it("keys off the derived display state, not the raw entry state", () => {
+    // `state: "error"` inline splits three ways — failed, skipped (dim ✗),
+    // blocked (warning ✗) — and only the derived key draws ◌ for queued.
+    const rows = [
+      agentRow({ entry: entry({ label: "done", state: "done" }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "skipped", state: "error", skipped: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "blocked", state: "error", blocked: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "queued", state: "start", queuedAt: 1 }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
+    ].map(r => r.map(s => s.text).join(""));
+    expect(rows[0]).toContain("✓ done");
+    expect(rows[1]).toContain("✗ skipped");
+    expect(rows[2]).toContain("✗ blocked");
+    expect(rows[3]).toContain("◌ queued");
   });
 });
