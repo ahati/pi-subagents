@@ -25,7 +25,7 @@ import { type Component, Input, matchesKey, type ScrollViewScrollbar, type TUI, 
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
-import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { buildPhaseGroups, displayState, type WorkflowAgentEntry } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
@@ -36,7 +36,7 @@ import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./te
 import type { ViewerKeybindings } from "./viewer-keys.js";
 import {
   hintLine,
-  hubPaneGeometry,
+  masterPaneGeometry,
   paneGeometry,
   renderWindow,
   TWO_PANE_MIN_WIDTH,
@@ -60,8 +60,6 @@ const FINISHED_LINGER_MS = 4000;
 const TICK_MS = 200;
 /** Roster never renders fewer body rows than this, even on tiny terminals. */
 const MIN_BODY_ROWS = 3;
-/** Cap on the padded name column so descriptions keep room on narrow terminals. */
-const MAX_NAME_COL = 24;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
 function chatGroupRank(status: AgentRecord["status"]): number {
@@ -85,9 +83,9 @@ const CHAT_GROUP_LABELS = ["ACTIVE", "COMPLETED", "FAILED"] as const;
 
 /**
  * The roster's top-level group headers, in display order. The subagents
- * section keeps the chat pane's lifecycle grouping inside it (active →
- * completed → failed, via {@link chatGroupRank}); workflow runs follow as one
- * section, sorted by launch time.
+ * section is one list in stable launch order — a row's identity never moves,
+ * so a settling agent cannot reshuffle the roster under the cursor; workflow
+ * runs follow as one section, sorted by launch time.
  */
 const ROSTER_SUBAGENTS_LABEL = "SUBAGENTS";
 const ROSTER_WORKFLOWS_LABEL = "WORKFLOWS";
@@ -537,9 +535,11 @@ export class AgentHub implements Component {
 
   private entries(): HubEntry[] {
     const matching = this.roster().filter(e => this.matchesFilter(e));
+    // Stable launch order inside SUBAGENTS: a row's identity never moves, so a
+    // settling agent cannot reshuffle the list under the cursor.
     const agents = matching
       .filter((e): e is AgentEntry => e.kind === "agent")
-      .sort((a, b) => chatGroupRank(a.record.status) - chatGroupRank(b.record.status) || a.record.startedAt - b.record.startedAt);
+      .sort((a, b) => a.record.startedAt - b.record.startedAt);
     const workflows = matching.filter((e): e is WorkflowEntry => e.kind === "workflow");
     return [...agents, ...workflows];
   }
@@ -994,7 +994,7 @@ export class AgentHub implements Component {
       // its own page; `esc` pops it — the page model unchanged, one column.
       for (const line of this.stackedLines(width - 4, bodyRows)) body.push({ kind: "full", cells: line });
     } else {
-      const panes = hubPaneGeometry(width);
+      const panes = masterPaneGeometry(width);
       const left = this.leftPaneLines(panes.listWidth, bodyRows);
       const right = this.rightPaneLines(panes.detailWidth, bodyRows);
       for (let i = 0; i < bodyRows; i++) {
@@ -1011,7 +1011,7 @@ export class AgentHub implements Component {
       renderWindow({
         width,
         box: UNICODE_PANE_BOX,
-        panes: twoPane ? hubPaneGeometry(width) : undefined,
+        panes: twoPane ? masterPaneGeometry(width) : undefined,
         title: ` ${this.breadcrumb(windowInnerWidth(width))} `,
         rows,
         ellipsis: "…",
@@ -1208,15 +1208,6 @@ export class AgentHub implements Component {
     if (items.length === 0) {
       return [clampLine([{ text: this.theme.fg("dim", this.activeFilter() ? "no matches" : "(no agents yet — spawn one to see it here)") }], width)];
     }
-    // Pad the name column to the widest visible name so descriptions align,
-    // counting the status glyph every row now carries.
-    let nameCol = 0;
-    for (const e of items) {
-      const name = e.kind === "workflow" ? e.workflow.name : renderAgentRecordName(e.record, this.theme, {});
-      nameCol = Math.max(nameCol, visibleWidth(name) + 2);
-    }
-    nameCol = Math.min(nameCol, MAX_NAME_COL);
-
     // The display list carries the section headers; the selection counts only
     // the rows, so `selAt` finds the selection's row position under the headers.
     const display = this.rosterItems(items);
@@ -1232,7 +1223,7 @@ export class AgentHub implements Component {
         lines.push([{ text: item.label, color: "dim", bold: true }]);
         continue;
       }
-      lines.push(clampLine([{ text: this.renderEntry(item, item === selectedEntry, nameCol, width) }], width));
+      lines.push(clampLine([{ text: this.renderEntry(item, item === selectedEntry, width) }], width));
     }
     return lines;
   }
@@ -1714,54 +1705,36 @@ export class AgentHub implements Component {
     return lines.slice(start, start + rows);
   }
 
-  private renderEntry(entry: HubEntry, selected: boolean, nameCol: number, width: number): string {
+  /**
+   * One roster row: the cursor, the state glyph and the name, plus a run row's
+   * `<done>/<total>` counter flush right. Identity only: the master cell is 18
+   * columns, so a description, live activity or stats tail could never survive
+   * here — the detail pane's header and preview carry them.
+   */
+  private renderEntry(entry: HubEntry, selected: boolean, width: number): string {
     const th = this.theme;
-    const marker = selected ? th.fg("accent", "▸") : " ";
+    const marker = selected ? th.fg("accent", "❯") : " ";
     if (entry.kind === "workflow") {
       const wf = entry.workflow;
       const glyph = workflowStatusGlyph(wf.status, th);
       const name = selected ? th.fg("text", wf.name) : th.fg("muted", wf.name);
-      const left = `${marker} ${glyph} ${name}`;
-      const elapsed = (wf.completedAt ?? Date.now()) - wf.startedAt;
-      const stats = `${wf.doneCount}/${wf.totalCount} agents · ${workflowStatusWord(wf.status)} · ${formatFleetElapsed(elapsed)}`;
-      return finishRow(left, nameCol + 4, selected ? th.fg("text", stats) : th.fg("dim", stats), width);
+      // The counter is the run row's one datum and survives; the name truncates
+      // first. Its space is the row's floor, so the counter is never the tail
+      // that gets cut.
+      const counter = `${wf.doneCount}/${wf.totalCount}`;
+      return finishRow(
+        `${marker} ${glyph} ${name}`,
+        visibleWidth(counter) + 1,
+        selected ? th.fg("text", counter) : th.fg("dim", counter),
+        width,
+      );
     }
-
     const record = entry.record;
     const glyph = statusGlyph(record.status, th);
     const name = renderAgentRecordName(record, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
-    const description = selected ? th.fg("text", record.description) : record.description;
-    // Live activity segment: what the agent is doing right now, dimmed so the
-    // description stays the anchor. Skipped for settled agents.
-    let activity = "";
-    if (record.status === "running") {
-      const act = this.deps.agentActivity.get(record.id);
-      if (act) activity = th.fg("dim", ` — ${describeActivity(act.activeTools, act.responseText)}`);
-    }
-    const left = `${marker} ${glyph} ${name.padEnd(nameCol - 2)} ${description}${activity}`;
-
-    const toolUses = this.deps.agentActivity.get(record.id)?.toolUses ?? record.toolUses;
-    const stats: string[] = [];
-    if (toolUses > 0) stats.push(`${toolUses}t`);
-    const tokens = getLifetimeTotal(record.lifetimeUsage);
-    if (tokens > 0) stats.push(`↓${compactCount(tokens)}`);
-    if (this.deps.showCost) {
-      const cost = formatCost(getLifetimeCost(record.lifetimeUsage));
-      if (cost) stats.push(cost);
-    }
-    if (record.status === "running") {
-      const pct = getSessionContextPercent(this.deps.agentActivity.get(record.id)?.session);
-      if (pct != null) stats.push(`${Math.round(pct)}%ctx`);
-    }
-    const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt;
-    stats.push(formatFleetElapsed(elapsedMs));
-
-      const stopNote = selected && this.stopArmed
-        ? th.fg("error", " x to STOP")
-        : "";
-    return finishRow(left, nameCol + 4, (selected ? th.fg("text", stats.join(" · ")) : th.fg("dim", stats.join(" · "))) + stopNote, width);
+    return `${marker} ${glyph} ${name}`;
   }
 
   private renderActivity(bodyRows: number): WindowRow[] {
@@ -1840,18 +1813,11 @@ function paintWindow(lines: readonly WorkflowCardLine[], th: Theme): string[] {
   );
 }
 
-/** `13.1k` — compact magnitude for table cells (no `tokens` suffix). */
-function compactCount(n: number): string {
-  if (n < 1_000) return `${n}`;
-  if (n < 1_000_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-}
-
-/** Left cell + right-aligned stats, truncated hard so lines never wrap. */
+/** Left cell + a right-aligned tail, truncated hard so lines never wrap. */
 function finishRow(left: string, minWidth: number, right: string, width: number): string {
   const rightW = visibleWidth(right);
-  const maxLeft = Math.max(minWidth, width - rightW - 2);
-  const leftClamped = truncateToWidth(left, maxLeft);
+  const maxLeft = Math.max(minWidth, width - rightW - 1);
+  const leftClamped = truncateToWidth(left, maxLeft, "…");
   const gap = Math.max(1, width - visibleWidth(leftClamped) - rightW);
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
 }

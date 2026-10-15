@@ -4,14 +4,16 @@ import type { AgentRecord } from "../src/types.js";
 import { AgentHub, type AgentHubDeps, HUB_SIZE_REFUSAL, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import type { FleetWorkflow } from "../src/ui/fleet-list.js";
+import { MASTER_LIST_WIDTH, PANE_PADDING } from "../src/ui/window-frame.js";
 import type { WorkflowDialogSource } from "../src/ui/workflow-dialog.js";
 import type { WorkflowAgentEntry } from "../src/workflow/progress.js";
 
 const ESC = "\x1b";
 const DOWN = "\x1b[B";
-const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
+/** A passthrough theme: the master cell is 18 columns, so nothing may count as visible text. */
+const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-/** Visible text: ANSI and the fake theme's markers stripped (their width is zero in a terminal). */
+/** Visible text: ANSI stripped (agent name badges). */
 function plain(line: string): string {
   return line.replace(/\u001b\[[0-9;]*m/g, "").replace(/<\/?[a-zA-Z]+>|\*/g, "");
 }
@@ -94,15 +96,42 @@ function harness(
   };
 }
 
-/** The cells either side of the pane bars, measured from the line itself. */
-const leftCell = (line: string) => line.slice(1, line.indexOf("│", 1));
-const rightCell = (line: string) => line.slice(line.indexOf("│", 1) + 1);
+/**
+ * The divider column at 120 columns — the fixed master cell: `│ <18> │ <95> │`.
+ * The parser reads the layout's known split rather than discovering a bar, so
+ * a surface that moved it fails these tests instead of redefining them.
+ */
+const DIVIDER = 1 + MASTER_LIST_WIDTH + 2 * PANE_PADDING;
+/** The cells either side of the pane divider, measured from the line itself. */
+const leftCell = (line: string) => line.slice(1, DIVIDER);
+const rightCell = (line: string) => line.slice(DIVIDER + 1);
 
 describe("hub pane invariant — detail is always on the right", () => {
   const workflows = (): FleetWorkflow[] => [{
     id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
     startedAt: Date.now() - 60_000, tokens: 500,
   }];
+
+  it("pins the master cell at 18 columns: `│ <18> │ <95> │` at 120", () => {
+    const h = harness([makeRecord({ id: "a1" })]);
+    h.open();
+    const body = h.frame().filter(l => l.startsWith("│"));
+    expect(body.length).toBeGreaterThan(5);
+    for (const line of body) {
+      expect(line.length).toBe(120);
+      // A body row is either full-width or split at the master cell's edge —
+      // no other interior bar is allowed.
+      for (const [index, ch] of [...line].entries()) {
+        if (ch === "│" && index > 0 && index < line.length - 1) expect(index, line).toBe(DIVIDER);
+      }
+    }
+    const split = body.filter(l => l.indexOf("│", 1) === DIVIDER);
+    expect(split.length).toBeGreaterThan(5);
+    for (const line of split) {
+      expect(leftCell(line)).toHaveLength(MASTER_LIST_WIDTH + 2 * PANE_PADDING);
+      expect(rightCell(line).slice(1, 1 + 95)).toHaveLength(95);
+    }
+  });
 
   it("R: the grouped roster sits left, the selected agent's transcript right", () => {
     const h = harness([makeRecord({ id: "a1", description: "alpha task" }), makeRecord({ id: "a2", description: "beta task" })]);
@@ -279,7 +308,7 @@ describe("size ladder", () => {
     expect(frame.join("\n")).toContain("SUBAGENTS");
     // ⏎ pushes the detail page full width; esc pops it — the page model with
     // one column. (The breadcrumb, not the footer, is the stable witness: the
-    // test theme's fake markers push hints out of a 50-column line.)
+    // footer's fitter drops whole hints from the right at 50 columns.)
     h.press("\r");
     expect(h.frame(50).join("\n")).toContain("general-purp");
     expect(h.frame(50).join("\n")).toContain("waiting for first message");

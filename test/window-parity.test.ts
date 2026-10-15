@@ -20,6 +20,7 @@ import { AgentHub, type AgentHubDeps } from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import {
   MASTER_LIST_WIDTH,
+  masterPaneGeometry,
   PANE_PADDING,
   paneGeometry,
   renderWindow,
@@ -49,8 +50,12 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   } as AgentRecord;
 }
 
-/** The hub's chat window at `width`, with the roster list beside the stream. */
-function hubFrames(width: number): string[] {
+/**
+ * The hub at `width`, rendered once and disposed: the popup chat twin by
+ * default (the roster list beside the stream), or — with `popup` false — the
+ * roster page's own split (`renderHubPage`).
+ */
+function hubFrames(width: number, popup = true): string[] {
   vi.useFakeTimers();
   const agents = [
     makeRecord({ id: "rec-1", description: "verify:auth.ts", status: "running" }),
@@ -67,7 +72,9 @@ function hubFrames(width: number): string[] {
     undefined,
     () => undefined,
     deps,
-    { popup: true, resume: { view: "chat", selected: 0, filterText: "", chatRecordId: "rec-1" }, onToggle: () => undefined },
+    popup
+      ? { popup: true, resume: { view: "chat", selected: 0, filterText: "", chatRecordId: "rec-1" }, onToggle: () => undefined }
+      : { popup: false, resume: { view: "table", selected: 0, filterText: "", chatRecordId: undefined }, onToggle: () => undefined },
   );
   const lines = hub.render(width);
   hub.dispose();
@@ -168,6 +175,20 @@ describe("one window for both surfaces", () => {
     expect(hubFrames(100)[0]).toContain(" Agents ");
     expect(dialogFrames(100).phases![0]).toContain(" Phases ");
     expect(dialogFrames(100).detail![0]).toContain(" Verify · 1 agent ");
+  });
+
+  it("pins the hub page's 120-column split at 18 + 95, tees in one column", () => {
+    // The roster page, where the master was a half split: the fixed 18-column
+    // master now owns the divider column, and the detail takes the rest.
+    const panes = masterPaneGeometry(120);
+    expect(panes.listWidth).toBe(18);
+    expect(panes.detailWidth).toBe(95);
+    const lines = hubFrames(120, false);
+    const tee = panes.leftCellWidth + 1;
+    expect(barColumns(lines)).toEqual([0, tee, 119]);
+    expect(lines[0]!.indexOf("┬"), "top edge").toBe(tee);
+    expect(lines.at(-1)!.indexOf("┴"), "bottom edge").toBe(tee);
+    for (const line of lines) expect(visibleWidth(line), JSON.stringify(line)).toBe(120);
   });
 
   it("draws the frame from one row vocabulary", () => {

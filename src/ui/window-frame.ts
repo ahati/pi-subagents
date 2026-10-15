@@ -322,17 +322,18 @@ export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad =
 }
 
 /**
- * The hub's split: the master cell takes half the cells, not a third.
+ * The hub's split: the master cell is pinned at {@link MASTER_LIST_WIDTH}
+ * content columns at every two-pane width.
  *
- * The hub's master is a roster with columns of its own — name, description,
- * stats — not the inspector's short labels, so the third-of-the-width cap that
- * keeps the inspector readable would starve it. Half the cells each way, with
- * the detail pane keeping at least its last column, is the placement every hub
- * page draws: the roster beside a preview, a run, or a transcript.
+ * The roster is identity — cursor, state glyph, name — so its cell is exactly
+ * the 18 columns the spec gives it and the detail pane takes every column left
+ * over. {@link paneGeometry}'s third-of-the-cells cap would shave the master to
+ * 17 below ~66 columns, moving the divider on resize; that proportional policy
+ * stays where its bytes are pinned — the inspector and the popup chat twin.
  */
-export function hubPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {
+export function masterPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {
   const available = Math.max(2, width - FRAME_BARS - 4 * pad);
-  const list = Math.max(1, Math.min(Math.floor(available / 2), available - 1));
+  const list = Math.max(1, Math.min(MASTER_LIST_WIDTH, available - 1));
   return geometryForList(width, list, pad);
 }
 
