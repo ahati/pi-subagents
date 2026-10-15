@@ -5,6 +5,7 @@ import { styleWorkflowCardLines, type WorkflowCardTask } from "../src/ui/workflo
 import {
   ASCII_DIALOG_GLYPHS,
   DEFAULT_PANE_BODY_ROWS,
+  dialogChromeRows,
   dialogRowGlyph,
   handleWorkflowDialogKey,
   initialWorkflowDialogState,
@@ -1053,6 +1054,18 @@ describe("WorkflowDialog component", () => {
     );
     return { dialog: instance, calls, closed };
   }
+
+  it("the chrome constant matches the rows the window actually draws", () => {
+    // The shell sizes the overlay box from `dialogChromeRows()` (via
+    // paneBodyHeight) while the window draws what layoutWorkflowDialog
+    // pushes — the two must agree, or the window overruns its box. The old
+    // line-count pin compared the layout against itself and could not catch
+    // a stale constant.
+    for (const bodyRows of [MIN_PANE_BODY_ROWS, 12, 23]) {
+      const lines = layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows });
+      expect(lines.length, `bodyRows ${bodyRows}`).toBe(bodyRows + dialogChromeRows());
+    }
+  });
 
   it("themes the layout and keeps its line count", () => {
     const { dialog: instance } = harness();
