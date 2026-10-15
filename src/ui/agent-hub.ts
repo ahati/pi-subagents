@@ -180,17 +180,17 @@ const PAGE_KEYS: Record<HubPage, PageFooterKeys> = {
   R: { actions: ["⏎ transcript", "l log", "p pause", "c copy"], hints: ["↑↓ select", "⇥ activity"], esc: "close" },
   T: {
     actions: ["Enter steer", "x stop", "m md"],
-    hints: ["PgUp/PgDn", "j/k scroll", "o expand", "l log", "p pause", "c copy"],
+    hints: ["PgUp/PgDn", "j scroll", "o expand", "l log", "p pause", "c copy"],
     esc: "roster",
   },
-  SL: { actions: ["Enter steer", "x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
+  SL: { actions: ["x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
   W: { actions: [], hints: ["↑↓ item", "⏎ agent", "l run log", "s stop run"], esc: "roster" },
   WA: {
     actions: ["Enter steer", "x stop", "m md"],
-    hints: ["PgUp/PgDn", "j/k scroll", "o expand", "l log", "p pause", "c copy"],
+    hints: ["PgUp/PgDn", "j scroll", "o expand", "l log", "p pause", "c copy"],
     esc: "back",
   },
-  SAL: { actions: ["Enter steer", "x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
+  SAL: { actions: ["x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
   L: { actions: ["s stop run"], hints: ["↑↓ scroll", "c copy tail"], esc: "back" },
 };
 
@@ -226,6 +226,9 @@ const HUB_CHROME_ROWS = 4;
  * item the right pane is showing.
  */
 const HUB_TITLE = " Agents & Workflows ";
+
+/** Log pages open at the newest events: `scrollTail` clamps and re-anchors. */
+const LOG_TAIL = Number.MAX_SAFE_INTEGER;
 /** How the window refuses a terminal under the ladder. */
 export const HUB_SIZE_REFUSAL = "Agent hub needs a terminal ≥ 40×10";
 
@@ -1222,7 +1225,9 @@ export class AgentHub implements Component {
       { text: `f ${this.popup ? "full" : "popup"}`, group: "hint" },
       { text: `Esc ${keys.esc}`, group: "hint", pinned: true },
     ];
-    return footerBand({ width, left, right });
+    const band = footerBand({ width, left, right });
+    // The armed stop keeps the error color the old one-line footer gave it.
+    return armed ? this.theme.fg("error", band) : band;
   }
 
   /** The embedded viewer's band state, when a page is showing one. */
@@ -1447,7 +1452,7 @@ export class AgentHub implements Component {
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     return this.identityPane(
       this.agentIdentity(record, width),
-      this.agentLogLines(width, this.bodyRows(rows, true)),
+      this.agentLogLines(width, this.bodyRows(rows, true), LOG_TAIL),
       this.noteLine("(⏎ opens the full transcript)", width),
     );
   }
@@ -1620,7 +1625,7 @@ export class AgentHub implements Component {
    * activity (`describeActivity`), which is where the removed `❞` strip's
    * information lives now.
    */
-  private agentLogLines(width: number, rows: number): PaneRow[] {
+  private agentLogLines(width: number, rows: number, offset: number = this.logScroll): PaneRow[] {
     const record = this.focusedRecord();
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     const activity = this.deps.agentActivity.get(record.id);
@@ -1647,7 +1652,7 @@ export class AgentHub implements Component {
       const cost = this.deps.showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
       lines.push(clampLine([{ text: `${stamp(record.completedAt)} usage  ${tokens} tokens${cost ? ` · ${cost}` : ""}`, color: "dim" }], width));
     }
-    return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
+    return padLines(this.scrollTail(lines, offset, rows), rows);
   }
 
   /**
@@ -1767,7 +1772,9 @@ export class AgentHub implements Component {
     const next = Math.min(this.runAgents().length - 1, Math.max(0, this.clampRunAgentIndex() + delta));
     if (next === this.runAgentSel) return;
     this.runAgentSel = next;
-    // A new agent is a new page subject: the viewer rebuilds on the next render.
+    // A new agent is a new page subject: the viewer rebuilds on the next
+    // render, and an armed stop must not carry over to it.
+    this.stopArmed = false;
     if (this.page === "WA") this.chatRecordId = undefined;
     this.requestRender();
   }
@@ -1916,7 +1923,11 @@ export class AgentHub implements Component {
     } else {
       return;
     }
-    this.logScroll = 0;
+    // Entering a log page is navigation: the armed stop must not survive it.
+    this.stopArmed = false;
+    // Log pages open at the newest events; the first scroll up re-anchors
+    // (one press is eaten while the tail seed clamps down).
+    this.logScroll = LOG_TAIL;
     this.requestRender();
   }
 
@@ -1964,6 +1975,9 @@ export class AgentHub implements Component {
   private scrollTail(lines: readonly WorkflowCardLine[], offset: number, rows: number): WorkflowCardLine[] {
     const max = Math.max(0, lines.length - rows);
     const start = Math.max(0, Math.min(offset, max));
+    // Re-anchor a tail seed (or an offset gone stale after a resize): the
+    // stored offset should always be a window the user could be looking at.
+    if (offset > max) this.logScroll = start;
     this.logReadout = {
       lines: lines.length,
       percent: lines.length <= rows ? 100 : Math.round(((start + rows) / lines.length) * 100),

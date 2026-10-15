@@ -416,7 +416,7 @@ describe("the footer band", () => {
     h.press("\r"); // T
     const { left, right } = slots(bandOf(h.frame()));
     expect(left).toBe("Enter steer · x stop · m md");
-    expect(right).toBe("PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f popup · Esc roster");
+    expect(right).toBe("PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f popup · Esc roster");
   });
 
   it("TD: the expanded call swaps `m md` for `c copy diff` and drops `o expand`", () => {
@@ -439,7 +439,7 @@ describe("the footer band", () => {
     h.open();
     h.press("l"); // SL straight from the roster
     const { left, right } = slots(bandOf(h.frame()));
-    expect(left).toBe("2 lines · 100% · Enter steer · x stop");
+    expect(left).toBe("2 lines · 100% · x stop");
     expect(right).toBe("↑↓ scroll · c copy tail · p pause agent · f popup · Esc back");
   });
 
@@ -580,7 +580,25 @@ describe("per-row keys", () => {
     h.press("l"); // L
     h.press("k"); // scroll-up on the log pages (D7), never a stop
     expect(stopWorkflow).not.toHaveBeenCalled();
+    // The guarded failure mode: `k` falling through to the roster's
+    // per-row stop for the focused record.
+    expect(h.deps.manager.abort).not.toHaveBeenCalled();
     expect(h.frame().join("\n")).not.toContain("x again to STOP");
+  });
+
+  it("log pages open at the newest events, not the spawn line", () => {
+    const h = harness(
+      [makeRecord({ id: "r1" })],
+      {
+        agentActivity: new Map([["r1", { turnCount: 9, activeTools: [], responseText: "" } as never]]),
+      },
+      { rows: 10 },
+    );
+    h.open();
+    h.press("l"); // SL — the body is three rows, the log is eleven lines
+    const body = h.frame().filter(l => l.startsWith("│")).map(l => l.slice(23, 118).trimEnd());
+    expect(body.join("\n")).not.toContain("spawn");
+    expect(body.join("\n")).toContain("still running");
   });
 
   it("c on the run log page still has a subject: the run's most recently active agent", async () => {

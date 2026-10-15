@@ -394,34 +394,35 @@ describe("the footer band", () => {
   const action = (text: string): FooterHint => ({ text, group: "action" });
   const hint = (text: string, pinned = false): FooterHint => ({ text, group: "hint", pinned });
   const left = [readout("9 lines · 100%"), action("Enter steer"), action("x stop"), action("m md")];
-  const right = [hint("PgUp/PgDn"), hint("j/k scroll"), hint("f full"), hint("Esc roster", true)];
+  const right = [hint("PgUp/PgDn"), hint("j scroll"), hint("f full"), hint("Esc roster", true)];
   const band = (width: number) => footerBand({ width, left, right });
   const LEFT_FULL = "9 lines · 100% · Enter steer · x stop · m md";
-  const RIGHT_FULL = "PgUp/PgDn · j/k scroll · f full · Esc roster";
+  const RIGHT_FULL = "PgUp/PgDn · j scroll · f full · Esc roster";
 
   it("puts the left slot at the start and the right slot flush to the last column", () => {
     expect(band(200)).toBe(`${LEFT_FULL}${" ".repeat(200 - LEFT_FULL.length - RIGHT_FULL.length)}${RIGHT_FULL}`);
     expect(visibleWidth(band(200))).toBe(200);
-    // A pair that only just fits keeps the spec's two columns between slots.
-    expect(band(90)).toBe(`${LEFT_FULL}  ${RIGHT_FULL}`);
-    expect(visibleWidth(band(90))).toBe(90);
+    // A pair that only just fits keeps the spec's two columns between slots
+    // (the readout included: 44 + 2 + 42).
+    expect(band(88)).toBe(`${LEFT_FULL}  ${RIGHT_FULL}`);
+    expect(visibleWidth(band(88))).toBe(88);
   });
 
   it("drops whole hints: the readout, then the left actions, then the right hints", () => {
-    expect(band(89)).toBe(`Enter steer · x stop · m md${" ".repeat(18)}${RIGHT_FULL}`);
-    expect(band(73)).toBe("Enter steer · x stop · m md  " + RIGHT_FULL);
-    expect(band(72)).toBe(`Enter steer · x stop${" ".repeat(8)}${RIGHT_FULL}`);
-    expect(band(65)).toBe(`Enter steer${" ".repeat(10)}${RIGHT_FULL}`);
-    expect(band(56)).toBe(`${" ".repeat(12)}${RIGHT_FULL}`);
+    expect(band(89)).toBe(`9 lines · 100% · Enter steer · x stop · m md   ${RIGHT_FULL}`);
+    expect(band(73)).toBe(`Enter steer · x stop · m md    ${RIGHT_FULL}`);
+    expect(band(72)).toBe(`Enter steer · x stop · m md   ${RIGHT_FULL}`);
+    expect(band(65)).toBe(`Enter steer · x stop   ${RIGHT_FULL}`);
+    expect(band(54)).toBe(`${" ".repeat(12)}${RIGHT_FULL}`);
     // The right slot next, right-to-left, skipping the pinned escape anchor.
-    expect(band(43)).toBe(`${" ".repeat(8)}PgUp/PgDn · j/k scroll · Esc roster`);
-    expect(band(34)).toBe(`${" ".repeat(12)}PgUp/PgDn · Esc roster`);
+    expect(band(43)).toBe(` PgUp/PgDn · j scroll · f full · Esc roster`);
+    expect(band(34)).toBe(` PgUp/PgDn · j scroll · Esc roster`);
     expect(band(21)).toBe(`${" ".repeat(11)}Esc roster`);
     expect(band(10)).toBe("Esc roster");
   });
 
   it("never cuts a hint in half, down to the last width that fits one", () => {
-    const hints = ["9 lines", "100%", "Enter steer", "x stop", "m md", "PgUp/PgDn", "j/k scroll", "f full", "Esc roster"];
+    const hints = ["9 lines", "100%", "Enter steer", "x stop", "m md", "PgUp/PgDn", "j scroll", "f full", "Esc roster"];
     for (let width = 10; width <= 200; width++) {
       const line = band(width);
       // A cut hint leaves its opening characters behind without the whole text
@@ -449,12 +450,12 @@ describe("the spec's frames' footer bands", () => {
   const cases: Array<[string, string, FooterHint[], FooterHint[]]> = [
     ["R1", "⏎ transcript · l log · p pause · c copy                                  ↑↓ select · ⇥ activity · f full · Esc close", [ action("⏎ transcript"), action("l log"), action("p pause"), action("c copy") ], [ hint("↑↓ select"), hint("⇥ activity"), hint("f full"), hint("Esc close", true) ]],
     ["R2", "⏎ open run · s stop run · c copy                                         ↑↓ select · ⇥ activity · f full · Esc close", [ action("⏎ open run"), action("s stop run"), action("c copy") ], [ hint("↑↓ select"), hint("⇥ activity"), hint("f full"), hint("Esc close", true) ]],
-    ["T", "Enter steer · x stop · m md       PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j/k scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
-    ["TD", "Enter steer · x stop · c copy diff           PgUp/PgDn · j/k scroll · l log · p pause · c copy · f full · Esc roster", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("c copy diff"), action("o collapse") ], [ hint("PgUp/PgDn"), hint("j/k scroll"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
-    ["SL", "42 lines · 100% · Enter steer · x stop                   ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("42 lines · 100%"), action("Enter steer"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
+    ["T", "Enter steer · x stop · m md         PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
+    ["TD", "Enter steer · x stop · c copy diff             PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc roster", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("c copy diff"), action("o collapse") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
+    ["SL", "42 lines · 100% · x stop                                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("42 lines · 100%"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
     ["W", "3/5 agents · phase 2 of 4                           ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster", [ readout("3/5 agents · phase 2 of 4") ], [ hint("↑↓ item"), hint("⏎ agent"), hint("l run log"), hint("s stop run"), hint("f full"), hint("Esc roster", true) ]],
-    ["WA", "Enter steer · x stop · m md         PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j/k scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc back", true) ]],
-    ["SAL", "7 lines · 100% · Enter steer · x stop                    ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("7 lines · 100%"), action("Enter steer"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
+    ["WA", "Enter steer · x stop · m md           PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc back", true) ]],
+    ["SAL", "7 lines · 100% · x stop                                  ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("7 lines · 100%"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
     ["L", "11 lines · 64% · s stop run                                              ↑↓ scroll · c copy tail · f full · Esc back", [ readout("11 lines · 64%"), action("s stop run") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("f full"), hint("Esc back", true) ]],
   ];
 

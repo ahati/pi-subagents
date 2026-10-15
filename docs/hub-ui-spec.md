@@ -107,12 +107,12 @@ in full — the fitter may drop hints at narrower widths.
 |---|---|---|---|
 | **R** — roster, subagent selected | hub open; `esc` from T | `⏎ transcript · l log · p pause · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
 | **R** — roster, run selected | `↑↓` onto a run row | `⏎ open run · s stop run · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
-| **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
+| **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
 | **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, with `m md` swapped for `c copy diff · o collapse` | as the page it sits in, without `o expand` |
-| **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · Enter steer · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
+| **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **W** — workflow run | `⏎` on a run row | `<done>/<total> agents · phase <n> of <m>` | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
-| **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back` |
-| **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · Enter steer · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
+| **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back` |
+| **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **L** — run log | `l` in W | `<N> lines · <P>% · s stop run` | `↑↓ scroll · c copy tail · f full · Esc back` |
 
 **TD** is a view state of the page it sits in, not a nesting level. The
@@ -182,10 +182,10 @@ One row, full window width, under the band rule — never a split row, never
 two stacked rows:
 
 - **left slot** — the readout and live actions: `<N> lines · <P>%` then
-  `Enter steer · x stop · m md` on pages embedding a live conversation or log;
+  `Enter steer · x stop · m md` on the transcript pages, `x stop` alone on the log pages;
   on **R** the selected row's action keys; on **W** the run counters;
 - **right slot** — navigation, then the page's keys, then the twin toggle and
-  the escape anchor: `PgUp/PgDn · j/k scroll · <page keys> · f <twin> ·
+  the escape anchor: `PgUp/PgDn · j scroll · <page keys> · f <twin> ·
   Esc <target>`.
 
 The slots keep at least two columns between them and the right slot is flush
@@ -284,7 +284,7 @@ full conversation. **TD** is this page with one rich block expanded.
 │                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
 │                    │ ▍ running tests…                                                                                │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ Enter steer · x stop · m md       PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster │
+│ Enter steer · x stop · m md         PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -312,7 +312,7 @@ move, no nesting level is added.
 │                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
 │                    │ ▍ running tests…                                                                                │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ Enter steer · x stop · c copy diff           PgUp/PgDn · j/k scroll · l log · p pause · c copy · f full · Esc roster │
+│ Enter steer · x stop · c copy diff             PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc roster │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -336,7 +336,7 @@ tokens/cost.
 │   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
 │                    │ 12:01:41 still running — 3 unstable detected                                                    │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 42 lines · 100% · Enter steer · x stop                   ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
+│ 42 lines · 100% · x stop                                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -399,7 +399,7 @@ left list switches agents in place.
 │                    │   └ +42 −6 [━━━━━━━━━━] • 1 hunk at line 88                                                     │
 │                    │ ▍ editing 2 files…                                                                              │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ Enter steer · x stop · m md         PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back │
+│ Enter steer · x stop · m md           PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -418,7 +418,7 @@ left list switches agents in place.
 │ ❯ 2 migrate        │ 12:02:45 tool   bash: pnpm test → 12 passing                                                    │
 │                    │ 12:02:46 still running                                                                          │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 7 lines · 100% · Enter steer · x stop                    ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
+│ 7 lines · 100% · x stop                                  ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
