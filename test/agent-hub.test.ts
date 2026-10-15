@@ -701,6 +701,67 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(out).not.toContain("spawn");
   });
 
+  it("a stacked twin opened on an agent opens with the conversation pushed, and keeps it across f", async () => {
+    const h = harness(
+      [makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 })],
+      {}, { cols: 50, rows: 30 },
+    );
+    h.open({ agentId: "a1" });
+    // The conversation is what was asked for — not the roster list.
+    expect(h.frame(50).join("\n")).toContain("waiting for first message");
+    expect(h.frame(50).join("\n")).not.toContain("SUBAGENTS");
+    // The pushed pane is view state: it survives the frame-size toggle.
+    h.press("f");
+    await h.flush();
+    expect(h.frame(50).join("\n")).toContain("waiting for first message");
+  });
+
+  it("a stacked twin's wheel drives the roster once the pane is popped, not the hidden viewer", () => {
+    const h = harness(
+      [
+        makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+        makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
+      ],
+      {}, { cols: 50, rows: 30 },
+    );
+    h.open({ agentId: "a1" });
+    h.press(ESC); // pop the pushed pane back to the roster
+    expect(h.frame(50).join("\n")).toContain("SUBAGENTS");
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+    // The wheel moved the roster selection — the invisible viewer did not eat it.
+    expect(h.frame(50).join("\n")).toContain("❯ ● beta");
+  });
+
+  it("the activity view owns keys and wheel while it is up, not the live viewer", async () => {
+    const h = harness([makeRecord({ id: "a1", alias: "alpha", description: "alpha task" })]);
+    h.open({ agentId: "a1" }); // R with a live viewer in the pane
+    h.press("2"); // the activity view
+    const frame = h.frame().join("\n");
+    expect(frame).toContain("activity · 1 agents · 1 active");
+    // A wheel moves the activity list's selection; the hidden viewer must not
+    // consume it and scroll itself.
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+    expect(h.settled()).toBe(false);
+  });
+
+  it("an agent without a roster row still shows its identity and note when opened by id", () => {
+    const h = harness([
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", alias: "swept", description: "swept task", session: undefined, status: "completed", startedAt: Date.now() - 4000 }),
+    ]);
+    h.open({ agentId: "a2" });
+    const out = h.frame().join("\n");
+    expect(out).toContain("swept task");
+    expect(out).toContain("unavailable");
+    expect(out).not.toContain("[User]");
+  });
+
   it("carries selection and filter across the toggle", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),

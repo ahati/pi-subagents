@@ -318,7 +318,7 @@ fitter's real output.
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## Page SL — subagent log (nested level 2)
+## Page SL — subagent log (nested level 1)
 
 `l` from **R**'s conversation — `l` directly on a roster subagent row.
 The event log is the compact, timestamped companion to the transcript:

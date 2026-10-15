@@ -600,9 +600,9 @@ export class FleetList {
       );
       return;
     }
-    // Agents open in the hub window, on their transcript page — Esc comes
-    // back to the roster instead of closing the overlay. The hub's transcript
-    // viewer carries this row's `b` handoff and scrollbar mode.
+    // Agents open in the hub window with their conversation in the pane —
+    // Esc there closes the overlay. The hub's transcript viewer carries
+    // this row's `b` handoff and scrollbar mode.
     this.openHub({ agentId: entry.record.id });
   }
 

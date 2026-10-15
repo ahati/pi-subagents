@@ -468,10 +468,13 @@ interface HubResumeState {
   runAgentSel?: number;
   runItemSel?: number;
   logScroll?: number;
+  /** The stacked twin's pushed detail pane — a view state that must survive `f`. */
+  detailOpen?: boolean;
 }
 
 export interface AgentHubInitial {
-  /** Start on this agent's transcript page (the fleet Enter-on-agent flow). */
+  /** Start on the roster with this agent selected — its conversation is the
+   * pane from the first frame (the fleet Enter-on-agent flow). */
   agentId?: string;
   /**
    * Start on this run's page (**W**) with the run selected on the roster (the
@@ -525,6 +528,9 @@ export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: A
     runId: runSource ? (run?.id ?? runTarget) : undefined,
     // D8: the item cursor starts where the run is, on the current phase row.
     runItemSel: runSource ? currentPhaseIndex(hubRunGroups(deps, runTarget!)) : undefined,
+    // A stacked twin opened straight onto an agent opens with its pane
+    // pushed — the conversation is what was asked for, not the roster list.
+    detailOpen: known ?? false,
   };
   let popup = initial?.popup ?? (target != null || runTarget != null);
   for (;;) {
@@ -650,6 +656,7 @@ export class AgentHub implements Component {
     this.runAgentSel = this.resume.runAgentSel ?? 0;
     this.runItemSel = this.resume.runItemSel ?? 0;
     this.logScroll = this.resume.logScroll ?? 0;
+    this.detailOpen = this.resume.detailOpen ?? false;
     // A window resumed with an agent in the roster page's pane builds its
     // viewer now, not on the first render: the page's keys are handled by
     // delegating to the viewer, and input can arrive before the first frame.
@@ -1040,6 +1047,12 @@ export class AgentHub implements Component {
    * transcript directly, so it owns the transcript's keys and its band.
    */
   private transcriptPage(): boolean {
+    // The viewer owns keys and the wheel only while its pane is the one on
+    // screen: never in the activity view, and in the stacked twin only once
+    // the pane is pushed (`detailOpen`) — an invisible viewer must not eat
+    // the roster's input.
+    if (this.view === "activity") return false;
+    if (this.stackedMode() && this.page === "R" && !this.detailOpen) return false;
     return this.page === "WA" || (this.page === "R" && !this.runRowSelected());
   }
 
@@ -1069,6 +1082,7 @@ export class AgentHub implements Component {
     this.resume.runAgentSel = this.runAgentSel;
     this.resume.runItemSel = this.runItemSel;
     this.resume.logScroll = this.logScroll;
+    this.resume.detailOpen = this.detailOpen;
   }
 
   private close(): void {
@@ -1725,7 +1739,7 @@ export class AgentHub implements Component {
    * activity (`describeActivity`), which is where the removed `❞` strip's
    * information lives now.
    */
-  private agentLogLines(width: number, rows: number, offset: number = this.logScroll): PaneRow[] {
+  private agentLogLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     const activity = this.deps.agentActivity.get(record.id);
@@ -1752,7 +1766,7 @@ export class AgentHub implements Component {
       const cost = this.deps.showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
       lines.push(clampLine([{ text: `${stamp(record.completedAt)} usage  ${tokens} tokens${cost ? ` · ${cost}` : ""}`, color: "dim" }], width));
     }
-    return padLines(this.scrollTail(lines, offset, rows), rows);
+    return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
   }
 
   /**
@@ -2022,12 +2036,12 @@ export class AgentHub implements Component {
   private focusedRecord(): AgentRecord | undefined {
     const fresh = (id: string | undefined) => (id === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === id));
     if (this.page === "R") {
-      // The roster cursor is the pane's subject when it addresses an agent; a
-      // swept record the window was opened on by id is all that is left when
-      // no row does.
+      // The seeded subject (kept in step by ↑↓, cleared on run rows) is the
+      // pane's subject — a swept record the window was opened on by id keeps
+      // its identity and note even though no row addresses it; the cursor's
+      // row stands in only when nothing was seeded.
       const entry = this.entries()[this.selected];
-      if (entry?.kind === "agent") return fresh(entry.record.id) ?? entry.record;
-      return fresh(this.focusId);
+      return fresh(this.focusId) ?? (entry?.kind === "agent" ? fresh(entry.record.id) ?? entry.record : undefined);
     }
     if (this.page === "SL") return fresh(this.focusId);
     if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
@@ -2201,10 +2215,8 @@ export class AgentHub implements Component {
   private scrollTail(lines: readonly WorkflowCardLine[], offset: number, rows: number): WorkflowCardLine[] {
     const max = Math.max(0, lines.length - rows);
     const start = Math.max(0, Math.min(offset, max));
-    // Re-anchor a tail seed (or an offset gone stale after a resize) — but
-    // only when the offset is the stored one; callers passing an explicit
-    // offset (the R preview) must not move the user's window.
-    if (offset === this.logScroll && offset > max) this.logScroll = start;
+    // Re-anchor a tail seed (or an offset gone stale after a resize).
+    if (offset > max) this.logScroll = start;
     this.logReadout = {
       lines: lines.length,
       percent: lines.length <= rows ? 100 : Math.round(((start + rows) / lines.length) * 100),
