@@ -43,16 +43,23 @@ const text = (line: WorkflowCardLine) => line.map(segment => segment.text).join(
 
 describe("agentActions — the skip/retry gate the inspector owned", () => {
   it("refuses both when there is no agent or the run has settled", () => {
-    expect(agentActions(undefined, true)).toEqual({ skip: false, retry: false });
-    expect(agentActions(entry(), false)).toEqual({ skip: false, retry: false });
+    expect(agentActions(undefined, "running")).toEqual({ skip: false, retry: false });
+    expect(agentActions(entry(), "completed")).toEqual({ skip: false, retry: false });
+    expect(agentActions(entry(), "killed")).toEqual({ skip: false, retry: false });
   });
 
   it("allows skip while the call is unanswered, retry only once a child is running", () => {
-    expect(agentActions(entry({ startedAt: 1 }), true)).toEqual({ skip: true, retry: true });
+    expect(agentActions(entry({ startedAt: 1 }), "running")).toEqual({ skip: true, retry: true });
     // Queued: accepted, no slot yet — nothing to stop and restart.
-    expect(agentActions(entry({ queuedAt: 1 }), true)).toEqual({ skip: true, retry: false });
-    expect(agentActions(entry({ state: "done" }), true)).toEqual({ skip: false, retry: false });
-    expect(agentActions(entry({ state: "error" }), true)).toEqual({ skip: false, retry: false });
+    expect(agentActions(entry({ queuedAt: 1 }), "running")).toEqual({ skip: true, retry: false });
+    expect(agentActions(entry({ state: "done" }), "running")).toEqual({ skip: false, retry: false });
+    expect(agentActions(entry({ state: "error" }), "running")).toEqual({ skip: false, retry: false });
+  });
+
+  it("keeps both live through a park — the children stay alive", () => {
+    expect(agentActions(entry({ startedAt: 1 }), "paused")).toEqual({ skip: true, retry: true });
+    expect(agentActions(entry({ queuedAt: 1 }), "paused")).toEqual({ skip: true, retry: false });
+    expect(agentActions(entry({ state: "done" }), "paused")).toEqual({ skip: false, retry: false });
   });
 });
 
@@ -94,7 +101,7 @@ describe("agentRow — one run agent, compact or detailed", () => {
       compact: true,
       width: 18,
       glyphs: UNICODE_DIALOG_GLYPHS,
-      workflowActive: true,
+      runStatus: "running",
       spinnerFrame: 0,
       now: 0,
     })[0]);
@@ -110,7 +117,7 @@ describe("agentRow — one run agent, compact or detailed", () => {
       compact: false,
       width: 60,
       glyphs: UNICODE_DIALOG_GLYPHS,
-      workflowActive: true,
+      runStatus: "running",
       spinnerFrame: 0,
       now: 0,
     })[0]);
@@ -119,6 +126,21 @@ describe("agentRow — one run agent, compact or detailed", () => {
     expect(row).toContain("from resume journal");
     expect(row.trimEnd().endsWith("40s")).toBe(true);
   });
+
+  it("reads a parked run's live row with the pause mark and the reason", () => {
+    const row = text(agentRow({
+      entry: entry({ queuedAt: 1, startedAt: 2 }),
+      selected: false,
+      compact: false,
+      width: 60,
+      glyphs: UNICODE_DIALOG_GLYPHS,
+      runStatus: "paused",
+      spinnerFrame: 0,
+      now: 0,
+    })[0]);
+    expect(row).toContain("‖");
+    expect(row).toContain("run paused");
+  });
 });
 
 describe("subStatusAnnotations", () => {
@@ -126,10 +148,15 @@ describe("subStatusAnnotations", () => {
     const parts = subStatusAnnotations(entry({ queuedAt: 0 }), "queued", 5_000);
     expect(parts).toContain("waiting 5s");
   });
+
+  it("says why a parked row looks alive, and keeps its waiting clock", () => {
+    expect(subStatusAnnotations(entry({ startedAt: 1 }), "paused", 5_000)).toEqual(["run paused"]);
+    expect(subStatusAnnotations(entry({ queuedAt: 0 }), "paused", 5_000)).toEqual(["run paused", "waiting 5s"]);
+  });
 });
 
 describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
-  it("maps every one of the seven display states to its glyph and colour", () => {
+  it("maps every one of the eight display states to its glyph and colour", () => {
     expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✓", color: "success" });
     expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "error" });
     // The three ✗ states are told apart by colour alone — dim for skipped,
@@ -138,10 +165,11 @@ describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
     expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "warning" });
     expect(dialogRowGlyph("queued", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
     expect(dialogRowGlyph("interrupted", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
+    expect(dialogRowGlyph("paused", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "‖", color: "dim" });
     expect(dialogRowGlyph("running", UNICODE_DIALOG_GLYPHS, 3)).toEqual({ text: SPINNER[3], color: "dim" });
     // Every glyph is one column wide — the rows' right-aligned counters and
     // the panes' column math depend on it.
-    for (const state of ["done", "failed", "skipped", "blocked", "queued", "interrupted"] as const) {
+    for (const state of ["done", "failed", "skipped", "blocked", "queued", "interrupted", "paused"] as const) {
       expect(visibleWidth(dialogRowGlyph(state, UNICODE_DIALOG_GLYPHS).text)).toBe(1);
     }
   });
@@ -150,14 +178,16 @@ describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
     // `state: "error"` inline splits three ways — failed, skipped (dim ✗),
     // blocked (warning ✗) — and only the derived key draws ◌ for queued.
     const rows = [
-      agentRow({ entry: entry({ label: "done", state: "done" }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
-      agentRow({ entry: entry({ label: "skipped", state: "error", skipped: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
-      agentRow({ entry: entry({ label: "blocked", state: "error", blocked: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
-      agentRow({ entry: entry({ label: "queued", state: "start", queuedAt: 1 }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "done", state: "done" }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, runStatus: "running", spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "skipped", state: "error", skipped: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, runStatus: "running", spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "blocked", state: "error", blocked: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, runStatus: "running", spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "queued", state: "start", queuedAt: 1 }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, runStatus: "running", spinnerFrame: 0, now: 0 }),
+      agentRow({ entry: entry({ label: "parked" }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, runStatus: "paused", spinnerFrame: 0, now: 0 }),
     ].map(r => r.flat().map(s => s.text).join(""));
     expect(rows[0]).toContain("✓ done");
     expect(rows[1]).toContain("✗ skipped");
     expect(rows[2]).toContain("✗ blocked");
     expect(rows[3]).toContain("◌ queued");
+    expect(rows[4]).toContain("‖ parked");
   });
 });

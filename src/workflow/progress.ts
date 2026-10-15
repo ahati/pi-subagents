@@ -29,6 +29,7 @@ export type WorkflowEntryState = "start" | "progress" | "done" | "error";
 export type WorkflowDisplayState =
   | "queued"
   | "running"
+  | "paused"
   | "done"
   | "failed"
   | "skipped"
@@ -169,17 +170,24 @@ export function collapse(progress: readonly WorkflowEntry[]): CollapsedProgress 
 /**
  * Derive what to render for one agent.
  *
- * `workflowActive` is false once the run has stopped: anything still mid-flight
- * at that point was cut off rather than finished, hence "interrupted".
+ * `runStatus` is the owning run's status, not a boolean: a settled run's
+ * mid-flight rows were cut off rather than finished, hence "interrupted", while
+ * a parked run's rows are alive but only because the run was parked — that is
+ * the readable state a `‖ paused` run glyph alone does not give the agents it
+ * owns.
  */
-export function displayState(entry: WorkflowAgentEntry, workflowActive: boolean): WorkflowDisplayState {
+export function displayState(entry: WorkflowAgentEntry, runStatus: WorkflowRunStatus): WorkflowDisplayState {
   if (entry.state === "done") return "done";
   if (entry.state === "error") {
     if (entry.skipped) return "skipped";
     if (entry.blocked) return "blocked";
     return "failed";
   }
-  if (!workflowActive) return "interrupted";
+  if (runStatus !== "running" && runStatus !== "paused") return "interrupted";
+  // A parked run keeps its children alive, and holds not-yet-launched ones
+  // behind its gate; every row it owns that has not settled reads paused,
+  // whichever side of the launch gate it sits on.
+  if (runStatus === "paused") return "paused";
   // Queued means accepted but never given a slot. An entry with no queuedAt at
   // all predates the semaphore and is treated as running.
   return entry.queuedAt != null && entry.startedAt == null ? "queued" : "running";
@@ -529,7 +537,7 @@ export function runIdentity(input: {
   const subtext =
     groups.length === 0 ? state
     : !active ? `${groups.length} phase${groups.length === 1 ? "" : "s"} · ${state}`
-    : runPhaseSubtext(groups);
+    : runPhaseSubtext(groups, input.status);
   return {
     name: input.name,
     details: `workflow · ${input.doneCount}/${input.totalCount} agents · ${formatDuration(input.elapsedMs)} (${state})`,
@@ -538,12 +546,17 @@ export function runIdentity(input: {
 }
 
 /** `phase 2 of 4 — migrate · 2 agents in flight`, a live run's `↳` line. */
-function runPhaseSubtext(groups: readonly PhaseGroup[]): string {
+function runPhaseSubtext(groups: readonly PhaseGroup[], runStatus: WorkflowRunStatus): string {
   const current = currentPhaseIndex(groups);
-  const flight = groups.reduce(
-    (count, group) => count + group.agents.filter(entry => displayState(entry, true) === "running").length,
-    0,
-  );
+  const flight = groups.reduce((count, group) => {
+    return (
+      count +
+      group.agents.filter(entry => {
+        const state = displayState(entry, runStatus);
+        return state === "running" || state === "paused";
+      }).length
+    );
+  }, 0);
   const parts = [`phase ${current + 1} of ${groups.length} — ${groups[current].title}`];
   if (flight > 0) parts.push(`${flight} agent${flight === 1 ? "" : "s"} in flight`);
   return parts.join(" · ");

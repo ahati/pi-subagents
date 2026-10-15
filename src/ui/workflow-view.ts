@@ -13,9 +13,10 @@
  * same rows the inspector's panes drew, so the hub does not re-derive them.
  *
  * **The glyphs are not the card's glyphs.** `workflow-card.ts` keys off the raw
- * entry `state`; these rows key off the *derived* `displayState(entry, active)`
+ * entry `state`; these rows key off the *derived* `displayState(entry, runStatus)`
  * and split cases the card cannot see — skipped, blocked, queued and
- * interrupted all render as a plain `✗` or `⟳` inline but are distinct here.
+ * interrupted all render as a plain `✗` or `⟳` inline but are distinct here,
+ * and a row of a parked run reads `‖` where the card draws a live spinner.
  * `◌` (U+25CC) appears only in this file, and a running row animates a spinner
  * where the card draws a static `⟳`.
  */
@@ -29,6 +30,7 @@ import {
   type WorkflowAgentEntry,
   type WorkflowDisplayState,
   type WorkflowEntry,
+  type WorkflowRunStatus,
 } from "../workflow/progress.js";
 import { SPINNER } from "./agent-widget.js";
 import { windowRange } from "./window-frame.js";
@@ -61,6 +63,8 @@ export interface WorkflowDialogGlyphs {
   cross: string;
   /** `◌` — queued or interrupted. The card has no row that draws this. */
   queued: string;
+  /** `‖` — a live row of a parked run, the roster's pause mark. */
+  paused: string;
   /** `figures.pointer` — the selected row in either pane. */
   pointer: string;
   /** Running rows cycle these. */
@@ -69,11 +73,13 @@ export interface WorkflowDialogGlyphs {
 
 export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   // The tick and the cross are the hub roster's `✓`/`✗` — one lifecycle
-  // vocabulary across the pages. The spinner and `◌` stay this module's: a
-  // running row animates here and the hub has no roster row that draws `◌`.
+  // vocabulary across the pages; the pause mark is the roster's `‖` for the
+  // same reason. The spinner and `◌` stay this module's: a running row
+  // animates here and the hub has no roster row that draws `◌`.
   tick: "✓",
   cross: "✗",
   queued: "◌",
+  paused: "‖",
   pointer: "❯",
   spinner: SPINNER,
 };
@@ -101,6 +107,8 @@ export function dialogRowGlyph(
     case "queued":
     case "interrupted":
       return { text: glyphs.queued, color: "dim" };
+    case "paused":
+      return { text: glyphs.paused, color: "dim" };
     case "running":
       return { text: glyphs.spinner[spinnerFrame % glyphs.spinner.length], color: "dim" };
   }
@@ -130,7 +138,12 @@ export function subStatusAnnotations(
     parts.push(entry.lastAttemptReason === "user-retry" ? "user retry" : entry.lastAttemptReason);
   }
   if (entry.attempt != null && entry.attempt > 1) parts.push(`attempt ${entry.attempt}`);
-  if (state === "queued" && entry.queuedAt != null) {
+  if (state === "paused") parts.push("run paused");
+  if (
+    (state === "queued" || state === "paused") &&
+    entry.queuedAt != null &&
+    entry.startedAt == null
+  ) {
     parts.push(`waiting ${formatDuration(Math.max(0, now - entry.queuedAt))}`);
   }
   return parts;
@@ -207,17 +220,19 @@ export function phaseListRows(options: {
  * Which of the per-agent actions the selected row can currently take.
  *
  * The window for both is the one in which the agent's `agent()` call is still
- * unanswered. Skip covers that whole window; retry needs a child to stop and
- * start again, so it begins only once one exists. Once the call has settled its
- * value is already the script's, and there is nothing either key could change.
+ * unanswered — through a park too: the run holds new launches behind its gate
+ * but leaves running children alive, and both keys stay meaningful on a live
+ * child. Skip covers that whole window; retry needs a child to stop and start
+ * again, so it begins only once one exists — a queued row has none. Once the
+ * call has settled its value is already the script's, and there is nothing
+ * either key could change.
  */
-export function agentActions(
-  entry: WorkflowAgentEntry | undefined,
-  workflowActive: boolean,
-): { skip: boolean; retry: boolean } {
-  if (entry === undefined || !workflowActive) return { skip: false, retry: false };
-  const state = displayState(entry, workflowActive);
-  return { skip: state === "queued" || state === "running", retry: state === "running" };
+export function agentActions(entry: WorkflowAgentEntry | undefined, runStatus: WorkflowRunStatus): { skip: boolean; retry: boolean } {
+  if (entry === undefined || (runStatus !== "running" && runStatus !== "paused")) {
+    return { skip: false, retry: false };
+  }
+  if (entry.state === "done" || entry.state === "error") return { skip: false, retry: false };
+  return { skip: true, retry: entry.startedAt != null || entry.queuedAt === undefined };
 }
 
 /** The row for one agent, as it appears in whichever pane is listing agents. */
@@ -227,14 +242,14 @@ export function agentRow(options: {
   compact: boolean;
   width: number;
   glyphs: WorkflowDialogGlyphs;
-  workflowActive: boolean;
+  runStatus: WorkflowRunStatus;
   spinnerFrame: number;
   now: number;
   /** Live facts for a running agent with a record: shown on the wide panes. */
   live?: { turns?: number; tokens?: number; tail?: string };
 }): WorkflowCardLine[] {
   const { entry, selected, glyphs, width } = options;
-  const display = displayState(entry, options.workflowActive);
+  const display = displayState(entry, options.runStatus);
   const head: WorkflowCardLine = [
     { text: " " },
     { text: selected ? glyphs.pointer : " ", color: "accent" },

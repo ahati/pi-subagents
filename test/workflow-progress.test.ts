@@ -15,6 +15,7 @@ import {
   stats,
   type WorkflowAgentEntry,
   type WorkflowEntry,
+  type WorkflowRunStatus,
 } from "../src/workflow/progress.js";
 
 /**
@@ -72,30 +73,38 @@ describe("collapse", () => {
 });
 
 describe("displayState", () => {
-  const cases: [string, Partial<WorkflowAgentEntry>, boolean, string][] = [
-    ["done wins outright", { state: "done" }, true, "done"],
-    ["error + skipped", { state: "error", skipped: true }, true, "skipped"],
-    ["error + blocked", { state: "error", blocked: true }, true, "blocked"],
-    ["bare error", { state: "error" }, true, "failed"],
-    ["live but run stopped", { state: "progress" }, false, "interrupted"],
-    ["queued with no start", { state: "start", queuedAt: 5 }, true, "queued"],
-    ["queued then started", { state: "start", queuedAt: 5, startedAt: 6 }, true, "running"],
-    ["no queuedAt at all", { state: "progress" }, true, "running"],
+  const cases: [string, Partial<WorkflowAgentEntry>, WorkflowRunStatus, string][] = [
+    ["done wins outright", { state: "done" }, "running", "done"],
+    ["error + skipped", { state: "error", skipped: true }, "running", "skipped"],
+    ["error + blocked", { state: "error", blocked: true }, "running", "blocked"],
+    ["bare error", { state: "error" }, "running", "failed"],
+    ["live but run stopped", { state: "progress" }, "completed", "interrupted"],
+    ["live but run killed", { state: "progress" }, "killed", "interrupted"],
+    ["queued with no start", { state: "start", queuedAt: 5 }, "running", "queued"],
+    ["queued then started", { state: "start", queuedAt: 5, startedAt: 6 }, "running", "running"],
+    ["no queuedAt at all", { state: "progress" }, "running", "running"],
+    ["parked run: a started row reads paused", { state: "progress", queuedAt: 5, startedAt: 6 }, "paused", "paused"],
+    ["parked run: a row that never started reads paused too", { state: "start", queuedAt: 5 }, "paused", "paused"],
   ];
 
-  for (const [name, partial, active, expected] of cases) {
+  for (const [name, partial, runStatus, expected] of cases) {
     it(name, () => {
-      expect(displayState(agentEntry({ index: 0, ...partial }), active)).toBe(expected);
+      expect(displayState(agentEntry({ index: 0, ...partial }), runStatus)).toBe(expected);
     });
   }
 
   it("prefers skipped over blocked when both are set", () => {
     const entry = agentEntry({ index: 0, state: "error", skipped: true, blocked: true });
-    expect(displayState(entry, true)).toBe("skipped");
+    expect(displayState(entry, "running")).toBe("skipped");
   });
 
   it("reports done even after the run stops", () => {
-    expect(displayState(agentEntry({ index: 0, state: "done" }), false)).toBe("done");
+    expect(displayState(agentEntry({ index: 0, state: "done" }), "completed")).toBe("done");
+  });
+
+  it("a parked run's settled rows keep their outcome", () => {
+    expect(displayState(agentEntry({ index: 0, state: "done" }), "paused")).toBe("done");
+    expect(displayState(agentEntry({ index: 0, state: "error" }), "paused")).toBe("failed");
   });
 });
 

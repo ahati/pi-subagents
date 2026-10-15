@@ -37,6 +37,7 @@ import {
   runStatusMark,
   runStatusWord,
   type WorkflowAgentEntry,
+  type WorkflowRunStatus,
 } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
@@ -1010,8 +1011,7 @@ export class AgentHub implements Component {
     const run = this.currentRun();
     if (!run || !this.deps.workflowControls?.(run.id)) return { skip: false, retry: false };
     const entry = this.runAgents()[this.clampRunAgentIndex()];
-    const active = run.status === "running" || run.status === "paused";
-    return agentActions(entry, active);
+    return agentActions(entry, run.status);
   }
 
   /** The run controls for the page's run, when the extension wired any. */
@@ -1636,10 +1636,10 @@ export class AgentHub implements Component {
           compact: false,
           width,
           glyphs,
-          workflowActive: source.task.status === "running" || source.task.status === "paused",
+          runStatus: source.task.status,
           spinnerFrame: 0,
           now: Date.now(),
-          live: this.runAgentLive(entries[i]),
+          live: this.runAgentLive(entries[i], source.task.status),
         }),
       );
     }
@@ -1653,10 +1653,16 @@ export class AgentHub implements Component {
 
   /**
    * A running run agent's live facts: turn count and tokens from its record
-   * and activity, and its last output line. Only a running agent has them.
+   * and activity, and its last output line. Only a live agent has them — and a
+   * parked run's children are live, so their tail keeps streaming too.
    */
-  private runAgentLive(entry: WorkflowAgentEntry): { turns?: number; tokens?: number; tail?: string } | undefined {
-    if (entry.recordId === undefined || displayState(entry, true) !== "running") return undefined;
+  private runAgentLive(
+    entry: WorkflowAgentEntry,
+    runStatus: WorkflowRunStatus,
+  ): { turns?: number; tokens?: number; tail?: string } | undefined {
+    if (entry.recordId === undefined) return undefined;
+    const state = displayState(entry, runStatus);
+    if (state !== "running" && state !== "paused") return undefined;
     const record = this.deps.manager.listAgents().find(a => a.id === entry.recordId);
     const activity = this.deps.agentActivity.get(entry.recordId);
     if (record === undefined && activity === undefined) return undefined;
@@ -1738,7 +1744,7 @@ export class AgentHub implements Component {
             compact: this.page !== "L",
             width,
             glyphs,
-            workflowActive: source.task.status === "running" || source.task.status === "paused",
+            runStatus: source.task.status,
             spinnerFrame: 0,
             now: Date.now(),
             // No live tail here: the 18-column master clamps it to noise —
@@ -1765,11 +1771,12 @@ export class AgentHub implements Component {
       clampLine([{ text: `${stamp(run.startedAt)} run start: ${run.totalCount} agent${run.totalCount === 1 ? "" : "s"}`, color: "muted" }], width),
     ];
     for (const entry of flattenRunAgents(source.progress, source.meta?.phases)) {
-      const state = displayState(entry, active);
+      const state = displayState(entry, source.task.status);
       if (entry.startedAt != null) {
         lines.push(clampLine([{ text: `${stamp(entry.startedAt)} ${entry.label} spawned${entry.phaseTitle ? ` (${entry.phaseTitle})` : ""}`, color: "dim" }], width));
       }
       if (state === "running") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} still running`, color: "dim" }], width));
+      if (state === "paused") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} still running (run paused)`, color: "dim" }], width));
       if (state === "done") {
         const at = entry.startedAt != null && entry.durationMs != null ? entry.startedAt + entry.durationMs : Date.now();
         lines.push(clampLine([{ text: `${stamp(at)} ${entry.label} done${entry.resultPreview ? ` — ${entry.resultPreview}` : ""}`, color: "success" }], width));
@@ -2100,7 +2107,10 @@ export class AgentHub implements Component {
     // copy and pause keys act on (nothing here is a page's own identity).
     const source = this.runSource() ?? EMPTY_RUN_SOURCE;
     const entries = flattenRunAgents(source.progress, source.meta?.phases);
-    const live = entries.filter(e => displayState(e, true) === "running");
+    const live = entries.filter(e => {
+      const state = displayState(e, source.task.status);
+      return state === "running" || state === "paused";
+    });
     return fresh((live.at(-1) ?? entries.at(-1))?.recordId);
   }
 

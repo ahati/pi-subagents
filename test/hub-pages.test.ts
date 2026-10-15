@@ -1026,7 +1026,7 @@ describe("P8 — the glyph set", () => {
     }
   });
 
-  it("renders `‖` on a parked run row only; its owned agents keep their own states", () => {
+  it("renders `‖` on a parked run row and on the agents it owns", () => {
     const paused: FleetWorkflow[] = [{
       id: "wf_1", name: "migrate-v2", status: "paused", doneCount: 1, totalCount: 2,
       startedAt: Date.now() - 60_000, tokens: 500,
@@ -1044,10 +1044,10 @@ describe("P8 — the glyph set", () => {
     h.open();
     h.press(DOWN); // the parked run row
     expect(h.frame().join("\n")).toContain("‖ migrate-v2");
-    h.press("\r"); // W — the run's agent list keeps its own state mark
+    h.press("\r"); // W — the run's owned agent says why it looks alive
     const pane = h.frame().filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER).map(rightCell).join("\n");
-    expect(pane).toContain("m-1");
-    expect(pane).not.toContain("‖ m-1");
+    expect(pane).toContain("‖ m-1");
+    expect(pane).toContain("run paused");
   });
 });
 
