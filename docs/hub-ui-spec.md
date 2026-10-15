@@ -5,28 +5,65 @@ shows subagents and workflow runs together, grouped, rendered entirely through
 the shared window-layout module. Audience: contributors changing
 `src/ui/agent-hub.ts`, `src/ui/workflow-dialog.ts`, or `src/ui/window-frame.ts`.
 
-Status: **spec**. The implementation may land in phases (common layout → grouped
-roster → unified window); where code and this spec disagree, either the code is
-behind (keep working) or a deliberate deviation was accepted (update this file
-in the same change). All frames are drawn at 120 columns; `f` maximized twins
-redraw the same pages at terminal size.
+Status: **spec**. The visual language is the one the hub's popup chat pane
+established — narrow master list, detail pane opening with a two-line header
+block, transcript blocks in the shared viewer's grammar, one full-width footer
+band. The implementation may land in phases (narrow master → header blocks → footer band → strip
+removal → test repins); where code and this spec
+disagree, either the code is behind (keep working) or a deliberate deviation
+was accepted (update this file in the same change). All frames are drawn at 120
+columns; `f` twins redraw the same pages at terminal size.
 
-**Implementation status.** Landed: the shared window component
-(`src/ui/window-frame.ts`, plus `hubPaneGeometry` for the hub's half-width
-master pane); the grouped-page **R** roster (`src/ui/agent-hub.ts` —
-`SUBAGENTS` by lifecycle, then `WORKFLOWS` with run-state glyphs and
-`done/total agents`, headers non-selectable); right-pane routing for every
-page (**T**, **SL**, **W**, **WA**, **SAL**, **L**) through a per-instance page
-enum, with `enterPage`/`popPage` implementing the transition map and the
-breadcrumb trail; the transcript pages through the shared `ConversationViewer`
-(the block grammar, with `o`/`ctrl+o` an in-place view state, never a page);
-the status strip; the 40×10 refusal, 40–59 stacked and 60–99 two-pane ladder;
-per-row key dispatch (`p`/`c`/`x`/`k` on subagent rows, `⏎`/`s`/`c` on
-workflow rows); and `AgentHubInitial.runId` for focusing a run on open.
-Handed off: rewiring `/agents → Workflows` and `openWorkflowFromFleet` onto
-`ctx.ui` + the hub deps (the legacy inspector remains the adapter those entry
-points use), and the per-tool-call expand state surviving a page round-trip
-(it survives resizes; rebuilding the viewer for a page resets it).
+**Implementation status.** The page model is landed and stays: the page enum
+**R · T · SL · W · WA · SAL · L** (`enterPage`/`popPage`, `PAGE_PARENT`), the
+pane invariant, the shared `ConversationViewer` behind **T**/**WA**, the 40×10
+refusal and the 40–59 stacked / ≥ 60 two-pane ladder, and per-row key dispatch
+(`test/hub-pages.test.ts`). Landed in the previous style and restyled by this
+rewrite: the half-width roster (`hubPaneGeometry`, description/stats columns)
+becomes the narrow 18-column master (`paneGeometry`); the window-title
+breadcrumb is dropped (the title cell is 20 columns) — the header block names
+the item, and on run-agent pages the run name rides the `↳` line; the roster's
+transcript preview becomes the agent-log preview; the `❞` status strip is
+removed (activity = header stats, the log's trailing line, the `▍` live
+tail); the single-list `hintLine` footer becomes the two-slot band; `▸` becomes `❯`; the
+`⋯` queued glyph becomes `○`; evicted `◌ ⇋` roster rows are dropped (revival
+flows through mentions and `/agents revive`). The `●`/`├`/`└` diff chrome
+tracks pi's tool renderers (`resolveRenderers`) — the text fallback must stay
+readable. Expand state is viewer-wide (`o`/`ctrl+o`), not per tool-call. Still
+handed off: `/agents → Workflows` rewiring onto this window (`WorkflowDialog`
+remains that path's adapter), a dedicated event stream behind the log pages
+(they render from run/record progress), `AgentHubInitial.runId` for opening a
+run pre-focused, and the activity view's (`2`) restyle.
+
+## The window style (the chat-pane grammar)
+
+One window, drawn by `renderWindow` (`src/ui/window-frame.ts`): it owns every
+edge, bar, rule and the footer band; a surface contributes rows — groups,
+pane bodies, header blocks, key lists — and nothing else. Acceptance rule: no
+layout arithmetic in a surface module.
+
+- **The split** — the master cell holds `MASTER_LIST_WIDTH` (18) content
+  columns via `paneGeometry`, fixed at every two-pane size. The master is
+  identity (cursor, state glyph, name); the detail pane owns the width. At 120
+  columns a split row is `│ <18> │ <95> │`. `hubPaneGeometry` (the half split)
+  is retired — it existed to fit the description/stats columns the narrow
+  roster no longer carries.
+- **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
+  names both kinds and exactly fills the master cell, and the `┬` is where the
+  divider lands. The bottom edge mirrors it with `┴`.
+- **Three rules, three jobs**:
+  1. the **quiet rule** `───` — exactly three dashes, dim, between transcript
+     blocks; content-level, never spanning a cell;
+  2. the **header rule** — a full-cell rule directly under the right pane's
+     header block (the cell's pad columns are the inset), separating identity
+     from body;
+  3. the **band rule** — a full-width rule above the footer. The panes end at
+     it; the footer row beneath spans the window. The divider column continues
+     down to the bottom edge's `┴`.
+- **Twins** — `f` swaps the popup twin (90 % viewport) and the fullscreen twin
+  (100 %); twins differ only in frame size, never in content or page. The
+  footer names the twin you would get: `f full` in the popup, `f popup` in
+  fullscreen. Frames in this document show the popup twin.
 
 ## Pane invariant (the one rule that decides every layout)
 
@@ -34,396 +71,443 @@ points use), and the per-tool-call expand state surviving a page round-trip
 selected item's detail.** The more detailed a view is — transcript, diff,
 event log — the further right it lives. Navigating deeper never moves detail
 to the left; it changes what the right pane shows and demotes the previous
-view into the left pane (it becomes the parent context). Concretely:
+view into the left pane.
 
 | Page | Left pane (parent level) | Right pane (detail) |
 |---|---|---|
-| **R** — roster | grouped roster (subagents + workflows) | selected item's live preview |
-| **T** — subagent transcript | grouped roster, selection pinned | full conversation (user / thinking / assistant / tool-calls / diffs) |
+| **R** — roster | grouped roster (subagents + runs) | selected item's live preview |
+| **T** — subagent transcript | grouped roster, selection pinned | full conversation |
 | **SL** — subagent log | grouped roster, selection pinned | the subagent's event log |
 | **W** — workflow run | grouped roster, selection pinned | the run's phases + agents |
-| **WA** — a workflow's agent | the run's agent list (+ phases) | that agent's full conversation |
-| **SAL** — workflow-agent log | the run's agent list | that agent's event log |
+| **WA** — a run's agent | the run's agent list (+ phases) | that agent's full conversation |
+| **SAL** — run-agent log | the run's agent list (+ phases) | that agent's event log |
 | **L** — run log | the run's phases + agents | the run's event log |
-
-`window-frame.ts` owns every layout mechanic (box glyphs, edges and tees, pane
-split arithmetic, row/column formatting, list centering and clamping,
-selection drawing, the status strip, footer assembly). Surfaces contribute
-only groups, rows, pane bodies, key tables, and callbacks. Acceptance rule: no
-layout arithmetic in a surface module — a surface needing new layout behavior
-extends the shared module.
 
 ## The window has pages, not windows
 
 There is exactly one window. What used to be separate popups (agent roster,
-workflow inspector, transcript, log) are **pages** inside it. A page =
-(left pane = parent level, right pane = detail, breadcrumb title, status
-strip, bottom controls). `⏎` descends, `esc` ascends exactly one level. Every
-page has a maximized twin (`f`) that differs only in frame size.
+workflow inspector, transcript, log) are **pages** inside it. A page = (left
+pane = parent level, right pane = detail, footer band). `⏎`
+descends, `esc` ascends exactly one level, `o`/`ctrl+o` expands in place —
+never a page. Every page has a twin (`f`).
 
-| Page | Reached by | Bottom controls |
-|---|---|---|
-| **R** — roster, subagent selected | hub open; `esc` from T | `↑↓ select · ⇥ pane · ⏎ transcript · l log · p pause · c copy · f full · esc close` |
-| **R** — roster, workflow selected | `↑↓` onto a workflow row | `↑↓ select · ⇥ pane · ⏎ open run · s stop run · c copy · f full · esc close` |
-| **T** — subagent transcript | `⏎` on a subagent row | `↑↓ scroll · o expand · l log · p pause · r resume · c copy · k stop · f full · esc roster` |
-| **TD** — expanded tool-call | `o` / `ctrl+o` on a tool-call in T or WA | as T, with `o collapse` and `c copy diff` |
-| **SL** — subagent log | `l` in T — or `l` straight on a subagent row in R | `↑↓ scroll · c copy tail · p pause agent · f full · esc back` |
-| **W** — workflow run | `⏎` on a workflow row | `↑↓ item · ⏎ agent · l run log · s stop run · f full · esc roster` |
-| **WA** — agent inside a workflow | `⏎` on an agent row in W (nested) | `p pause · r resume · o expand · c copy · l log · k stop · f full · esc back` |
-| **SAL** — workflow-agent log | `l` in WA (nested, level 3) | `↑↓ scroll · c copy tail · p pause agent · f full · esc back` |
-| **L** — run log | `l` in W | `↑↓ scroll · c copy tail · s stop run · f full · esc back` |
+The footer band holds two slots (the grammar is in
+[The footer band](#the-footer-band)); the tables below list each page's slots
+in full — the fitter may drop hints at narrower widths.
 
-## Transcript block grammar (right pane of T and WA; collapsed preview in R)
+| Page | Reached by | Footer left slot | Footer right slot |
+|---|---|---|---|
+| **R** — roster, subagent selected | hub open; `esc` from T | `⏎ transcript · l log · p pause · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
+| **R** — roster, run selected | `↑↓` onto a run row | `⏎ open run · s stop run · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
+| **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
+| **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, plus `c copy diff · o collapse` | as the page it sits in |
+| **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · Enter steer · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
+| **W** — workflow run | `⏎` on a run row | `<done>/<total> agents · phase <n> of <m>` | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
+| **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back` |
+| **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · Enter steer · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
+| **L** — run log | `l` in W | `<N> lines · <P>% · s stop run` | `↑↓ scroll · c copy tail · f full · Esc back` |
+
+**TD** is a view state of the page it sits in, not a nesting level. The
+activity view (`2`, `⇥`) stays a single-pane legacy table with its own
+one-list footer (`↑↓ select · Enter open · x stop · p pause · f popup ·
+q close`); restyling it to the header-block grammar is a follow-up.
+
+## The right pane opens with a header block
+
+Every right pane begins with identity — the same block on a page and in its
+roster preview — and identity is exactly **three rows**: the header line, the
+`↳` line, the header rule. The rule sits directly under the `↳` line —
+never a blank row between identity and body — and everything below it is
+body: the item's transcript or event log, taking every remaining row. The
+left pane's rows continue beside the body; the panes flow independently, so a
+tall roster never pushes the right pane's content down. The 20-column title
+cell never carries a breadcrumb; the header block is the identity.
+
+The agent header (R preview, **T**, **SL**):
+
+```text
+● <name>[(twin)]  <description> · <N> tools · <elapsed> (<state>) · <tokens> token (<ctx>%)
+  ↳ <provider/model> · thinking: <level> · worktree · isolated · background · max turns: <N>
+```
+
+`(twin)` marks append prompt mode; invocation tags list only what applies. The
+run header (R preview, **W**, **L**):
+
+```text
+● <name>  workflow · <done>/<total> agents · <elapsed> (<state>)
+  ↳ phase <n> of <m> — <current phase> · <k> agents in flight
+```
+
+A settled run freezes its clock and reads `↳ <m> phases · <state word>`. The
+run-agent header (**WA**, **SAL**) is the agent header with the run name
+leading the `↳` line: `↳ migrate-v2 · <provider/model> · worktree`.
+
+## Transcript block grammar (right pane of T and WA)
 
 | Block | Marker | Rendering |
 |---|---|---|
-| user message | `user` | the prompt / steering text, wrapped at the pane width |
-| thinking | `▝` | dim; collapsed to 2 lines with `…` unless focused |
-| assistant | `●` | normal text; wrapped |
-| tool-call | `⚙` | one collapsed line: tool, subject, result summary (`→ 42 lines`, `+9 −4`, `12 passing`); `⊕` marks rich output available |
-| diff view | `┌── diff` | expanded edit/write: `@@` hunk header plus `−`/`+` lines, boxed; opened by `o`/`ctrl+o` (the existing `app.tools.expand`) |
-| streaming | `▍` | the in-flight call's live tail |
+| user message | `[User]` | accent label; body wrapped at the pane width, no indent |
+| thinking | `✻ thinking` | muted label; body indented two, dim, capped at six preview lines; overflow `… +N lines` |
+| assistant | `[Assistant]` | bold label; wrapped body indented two; a streaming assistant with nothing legible yet renders `  ✻ thinking…` |
+| tool-call | `● <Tool> <subject>` | one header line — `● Bash pnpm vitest run …`, `● Edit src/db.ts` — from pi's tool renderers |
+| collapse bars | `├` / `└` | `+a −b [━━━━━━━━━━] at line N` opens a rich block, `… • <H> hunk(s) at line M` closes it; the bar fills with progress |
+| diff body | `│ ▌N− │` | boxed: inner rules top and bottom, gutter `▌N− │` removed / `▌N+ │` added / ` N  │` context |
+| plain results | `└ <summary>` | `└ 12 passing, 3 unstable • ctrl+o to toggle`; empty output renders `✓ (no output)` |
+| in-flight | `○ awaiting result` | dim; partial output streams as `… N earlier lines` plus the last four |
+| streaming tail | `▍` | `▍ <describeActivity>` — the focused item's live activity, the last content row |
+| content separator | `───` | the quiet rule, between blocks only |
 
-Expand state is per tool-call and persists while the page is open; a settled
-agent's transcript renders the same blocks frozen.
+The tool-call chrome (`●`, `├`/`└`, `[━━━]`, the `▌` gutter) is owned by pi's
+tool renderers, reached through `resolveRenderers`; this extension pins where
+the blocks sit (the detail pane, wrapped at its width), not their bytes, and
+the text fallback (`⏺ name(args)` with `  ✓`/`  ✗` result lines) must stay
+readable when no renderer exists. `o`/`ctrl+o` toggles rich-output expansion
+for the whole embedded viewer — viewer-wide state, kept in the viewer's cache
+key, reset when a page rebuilds its viewer. A settled agent's transcript
+renders the same blocks frozen, without the `▍` tail.
 
-## Page R — roster (both selection types, all row types)
+## The footer band
 
-### R1 — subagent selected (live transcript preview, collapsed grammar)
+One row, full window width, under the band rule — never a split row, never
+two stacked rows:
 
+- **left slot** — the readout and live actions: `<N> lines · <P>%` then
+  `Enter steer · x stop · m md` on pages embedding a live conversation or log;
+  on **R** the selected row's action keys; on **W** the run counters;
+- **right slot** — navigation, then the page's keys, then the escape anchor
+  and the twin toggle: `PgUp/PgDn · j/k scroll · <page keys> · Esc <target> ·
+  f <twin>`.
+
+The slots keep at least two columns between them and the right slot is flush
+to the band's right edge. When the pair overflows, whole hints drop in this
+order: (1) the readout; (2) left actions right-to-left — `m md` first,
+`Enter steer` last; (3) right hints right-to-left — the `f` twin first — with
+the `Esc …` anchor pinned. Hints are never cut mid-hint. `x` is armed on
+first press (`x again to STOP`); `k` aliases `x` on roster and transcript
+pages. The transcript pages are the widest bands: at 120 columns **T** and
+**WA** have already dropped `c copy · f full`, and **TD** `p pause · f full` —
+the frames show the fitter's honest output; wider terminals restore them.
+
+## Page R — roster
+
+### R1 — subagent selected (live agent-log preview)
+
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │ 12:01:02 spawn  explore · opencode-go/deepseek-v4.1-flash · background                          │
+│   ✓ docs-gen       │ 12:01:03 turn   1 start                                                                         │
+│   ✗ crawl-old      │ 12:01:04 tool   read README.md → 42 lines                                                       │
+│ WORKFLOWS          │ 12:01:06 tool   bash: grep -rn flaky test/ → 3 hits                                             │
+│   ● migrate-v2 3/5 │ 12:01:21 note   steering: focus on test/e2e                                                     │
+│   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
+│                    │ 12:01:41 still running — 3 unstable detected                                                    │
+│                    │ (⏎ opens the full transcript)                                                                   │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ⏎ transcript · l log · p pause · c copy                                ↑↓ select · ⇥ activity · f full · Esc close   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
-╭─ Agents & Workflows ────────────────────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │ @explore                                                   │
-│  ❯ ● explore    Find flaky tests              12s       │ ● running · 12s · turn 2                                   │
-│    ● audit      Audit the auth flow           48s       │────────────────────────────────────────────────            │
-│    ⋯ web-crawl  Crawl the release notes         —       │ user  Find and fix the flaky tests in test/.               │
-│    ‖ refactor   Refactor the parser        parked       │ ▝ thinking  Failures vanish in isolation…                  │
-│    ✓ docs-gen   Draft the README           done 2m      │ ● assistant  The e2e helpers reuse one temp root.          │
-│    ✗ crawl-old  Crawl legacy notes          failed      │ ⚙ bash  pnpm vitest run test/e2e -t flaky                  │
-│  ◌ old-explorer (evicted — ⇋ revive)            —       │   ▍12 passing, 3 unstable                                  │
-│ WORKFLOWS                                               │ ⚙ read  test/e2e/helpers/boot.ts → 88 lines                │
-│    ● migrate-v2  3/5 agents · phase 2           1m      │ ⚙ edit  test/e2e/helpers/boot.ts  +9 −4     ⊕              │
-│    ‖ nightly     paused at phase 1          parked      │ ▍bash  pnpm vitest run test/e2e (verifying…)               │
-│    ✓ batch-docs  completed · 12 agents          14m     │ (live tail — ⏎ opens the full transcript)                  │
-│    ✗ old-migrate failed at phase 3            failed    │                                                            │
-│❞ bash: pnpm vitest run test/x — 12 passing, 3 unstable  │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ select · ⇥ pane · ⏎ transcript · l log · p pause · c copy│
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+
+### R2 — run selected (run overview preview)
+
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● migrate-v2  workflow · 3/5 agents · 1m12s (running)                                           │
+│   ● explore        │   ↳ phase 2 of 4 — migrate · 2 agents in flight                                                 │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │ PHASES                                                                                          │
+│   ✓ docs-gen       │ ✓ discover                                                                                  3/3 │
+│   ✗ crawl-old      │ ❯ 2 migrate                                                                                 1/2 │
+│ WORKFLOWS          │ 3 verify                                                                                      — │
+│ ❯ ● migrate-v2 3/5 │ 4 report                                                                                      — │
+│   ✓ batch-d… 12/12 │ (⏎ opens the run page)                                                                          │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ⏎ open run · s stop run · c copy                                       ↑↓ select · ⇥ activity · f full · Esc close   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-Row types: running (`●`), queued (`⋯`), paused (`‖`), completed (`✓`),
-failed (`✗`), evicted (`◌`, `⇋` revive). Workflow rows reuse the same glyph set
-for the run state. The cursor `❯` crosses group headers seamlessly; the roster
-window centers on the cursor and clamps at both ends.
+Row grammar: the master holds group headers — `SUBAGENTS`, then `WORKFLOWS`,
+dim and bold, non-selectable, omitted when the group is empty — and rows
+`❯ ● name` selected, `  ○ name` not. The cursor `❯` crosses group headers
+seamlessly; the list windows through `windowRange` (centered on the cursor,
+clamped at both ends). Run rows append their `<done>/<total>` counter flush
+right; the name truncates first, the counter survives. Glyphs: `●` running,
+`○` queued, `‖` paused, `✓` completed, `✗` failed, `·` stopped; runs reuse
+`● ‖ ✓ ✗`. `/` filters the roster; the wheel scrolls it.
 
-### R2 — workflow selected (run overview in the right pane)
-
-```
-╭─ Agents & Workflows ────────────────────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │ migrate-v2                                                 │
-│  ❯ ● explore    Find flaky tests              12s       │ ● running · 1m · phase 2 of 4                              │
-│    ● audit      Audit the auth flow           48s       │ ▰▰▰▰▰▰▱▱▱▱ 3/5 agents                                      │
-│    ⋯ web-crawl  Crawl the release notes         —       │────────────────────────────────────────────────            │
-│    ‖ refactor   Refactor the parser        parked       │ PHASES                                                     │
-│    ✓ docs-gen   Draft the README           done 2m      │ ✓ discover   3 agents · done                               │
-│    ✗ crawl-old  Crawl legacy notes          failed      │ ❯ migrate    2 agents · running                            │
-│  ◌ old-explorer (evicted — ⇋ revive)            —       │   verify     —  · waiting                                  │
-│ WORKFLOWS                                               │   report     —  · waiting                                  │
-│    ● migrate-v2  3/5 agents · phase 2           1m      │ (⏎ opens the run page)                                     │
-│    ‖ nightly     paused at phase 1          parked      │                                                            │
-│    ✓ batch-docs  completed · 12 agents          14m     │                                                            │
-│    ✗ old-migrate failed at phase 3            failed    │                                                            │
-│❞ m-2: editing api.ts, reading schema.sql…               │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ select · ⇥ pane · ⏎ open run · s stop run · c copy · f fu│
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
-```
+The preview pane is the item's **agent log** — the same event grammar as
+**SL** — closed by the `(⏎ opens the full transcript)` hint. It is the
+compact answer to "what is this agent doing": the trailing line is the live
+activity (`describeActivity` in `src/ui/agent-widget.ts`), which is where the
+removed `❞` strip's information went. A selected run previews its overview
+instead: header block, phases (the current phase carries the `❯`), and the
+`(⏎ opens the run page)` hint.
 
 ## Page T — subagent transcript (nested level 1)
 
-Left: the roster stays, selection pinned. Right: the full conversation in the
-block grammar above.
+Left: the roster stays, selection pinned. Right: the header block, then the
+full conversation. **TD** is this page with one rich block expanded.
 
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │ [User]                                                                                          │
+│   ✓ docs-gen       │ Find and fix the flaky tests in test/. Start from test/e2e and verify with pnpm.                │
+│   ✗ crawl-old      │ ───                                                                                             │
+│ WORKFLOWS          │ ✻ thinking                                                                                      │
+│   ● migrate-v2 3/5 │   Three tests share one temp dir — the failures vanish in isolation. Confirm                    │
+│   ✓ batch-d… 12/12 │   with a solo run, then scope the temp dir per worker.                                          │
+│                    │   … +2 lines                                                                                    │
+│                    │ ───                                                                                             │
+│                    │ [Assistant]                                                                                     │
+│                    │   The e2e helpers reuse one mkdtemp root. I'll prove it with a solo run,                        │
+│                    │   then scope the temp dir per worker.                                                           │
+│                    │ ───                                                                                             │
+│                    │ ● Edit test/e2e/helpers/boot.ts                                                                 │
+│                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
+│                    │ ▍ running tests…                                                                                │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 705 lines · 100% · Enter steer · x stop · m md    PgUp/PgDn · j/k scroll · o expand · l log · p pause · Esc roster   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
-╭─ Agents & Workflows › explore ──────────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │ user  Find and fix the flaky tests in test/. Start         │
-│  ❯ ● explore    Find flaky tests              12s       │       from test/e2e and verify with pnpm.                  │
-│    ● audit      Audit the auth flow           48s       │ ▝ thinking  Three tests share one temp dir — the           │
-│    ⋯ web-crawl  Crawl the release notes         —       │ ▝           failures vanish in isolation. Confirm          │
-│    ‖ refactor   Refactor the parser        parked       │ ▝           with a solo run, then fix the fixture.         │
-│    ✓ docs-gen   Draft the README           done 2m      │ ● assistant  The e2e helpers reuse one mkdtemp root.       │
-│    ✗ crawl-old  Crawl legacy notes          failed      │   I'll prove it with a solo run, then scope the            │
-│  ◌ old-explorer (evicted — ⇋ revive)            —       │   temp dir per worker.                                     │
-│ WORKFLOWS                                               │ ⚙ bash  pnpm vitest run test/e2e -t flaky                  │
-│    ● migrate-v2  3/5 agents · phase 2           1m      │   ▍12 passing, 3 unstable — reruns confirm                 │
-│    ‖ nightly     paused at phase 1          parked      │ ⚙ read  test/e2e/helpers/boot.ts → 88 lines                │
-│    ✓ batch-docs  completed · 12 agents          14m     │ ⚙ edit  test/e2e/helpers/boot.ts  +9 −4        ⊕           │
-│    ✗ old-migrate failed at phase 3            failed    │       − const dir = mkdtempSync(tmpdir())                  │
-│                                                         │       + const dir = mkdtempSync(join(tmp, name))           │
-│                                                         │       + process.env.VITEST_WORKER = name                   │
-│                                                         │ ▍bash  pnpm vitest run test/e2e  (verifying…)              │
-│❞ bash: pnpm vitest run test/x — 12 passing, 3 unstable  │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ scroll · o expand · l log · p pause · r resume · c copy ·│
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
-```
 
-## Page TD — expanded tool-call (diff view)
+## Page TD — expanded tool-call (in-place view state)
 
-`o`/`ctrl+o` on the `edit` tool-call opens its full diff in the right pane; the
-left roster does not move.
+`o`/`ctrl+o` on the `Edit` call expands its diff in place; the roster does not
+move, no nesting level is added.
 
-```
-╭─ Agents & Workflows › explore ──────────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │   (earlier blocks scroll up — identical)                   │
-│  ❯ ● explore    Find flaky tests              12s       │ ⚙ edit  test/e2e/helpers/boot.ts  +9 −4   expanded         │
-│    ● audit      Audit the auth flow           48s       │ ┌── diff ─────────────────────────────────                 │
-│    ⋯ web-crawl  Crawl the release notes         —       │ │ @@ -12,7 +12,10 @@ export function boot()                │
-│    ‖ refactor   Refactor the parser        parked       │ │− const root = mkdtempSync(tmpdir())                      │
-│    ✓ docs-gen   Draft the README           done 2m      │ │− const cwd  = join(root, "proj")                         │
-│    ✗ crawl-old  Crawl legacy notes          failed      │ │+ const root = mkdtempSync(join(tmpdir(), name))          │
-│  ◌ old-explorer (evicted — ⇋ revive)            —       │ │+ process.env.VITEST_WORKER = name                        │
-│ WORKFLOWS                                               │ │+ return { root, cwd }                                    │
-│    ● migrate-v2  3/5 agents · phase 2           1m      │ └─────────────────────────────────────────                 │
-│    ‖ nightly     paused at phase 1          parked      │ ▍bash  pnpm vitest run test/e2e  (verifying…)              │
-│    ✓ batch-docs  completed · 12 agents          14m     │                                                            │
-│    ✗ old-migrate failed at phase 3            failed    │                                                            │
-│❞ bash: pnpm vitest run test/x — 12 passing, 3 unstable  │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ scroll · o collapse · l log · p pause · r resume · c copy│
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │   (earlier blocks scroll up — identical)                                                        │
+│   ✓ docs-gen       │ ───                                                                                             │
+│   ✗ crawl-old      │ ● Edit test/e2e/helpers/boot.ts                                                                 │
+│ WORKFLOWS          │   ├ +9 −4 [━━━━━━━━━━] at line 12                                                               │
+│   ● migrate-v2 3/5 │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
+│   ✓ batch-d… 12/12 │   │  10  │ export function boot() {                                                             │
+│                    │   │ ▌12- │   const root = mkdtempSync(tmpdir())                                                 │
+│                    │   │ ▌12+ │   const root = mkdtempSync(join(tmpdir(), name))                                     │
+│                    │   │ ▌13+ │   process.env.VITEST_WORKER = name                                                   │
+│                    │   │  15  │   return { root, cwd }                                                               │
+│                    │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
+│                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
+│                    │ ▍ running tests…                                                                                │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 701 lines · 100% · Enter steer · x stop · c copy diff · o collapse     PgUp/PgDn · j/k scroll · l log · Esc roster   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page SL — subagent log (nested level 2)
 
-`l` from T — or `l` directly on a roster subagent row (skipping T). The event
-log is the compact, timestamped companion to the transcript: spawns, turn
-starts, tool results, steering notes, completion with tokens/cost.
+`l` from **T** — or `l` directly on a roster subagent row (skipping **T**).
+The event log is the compact, timestamped companion to the transcript:
+spawns, turn starts, tool results, steering notes, completion with
+tokens/cost.
 
-```
-╭─ Agents & Workflows › explore › log ────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │ 12:01:02 spawn  explore · model haiku · background         │
-│  ❯ ● explore    Find flaky tests              12s       │ 12:01:03 turn 1 start                                      │
-│    ● audit      Audit the auth flow           48s       │ 12:01:04 tool   read README.md → 42 lines                  │
-│    ⋯ web-crawl  Crawl the release notes         —       │ 12:01:06 tool   bash: grep -rn flaky test/ → 3 hits        │
-│    ‖ refactor   Refactor the parser        parked       │ 12:01:20 turn 2 start                                      │
-│    ✓ docs-gen   Draft the README           done 2m      │ 12:01:21 note   steering: focus on test/e2e                │
-│    ✗ crawl-old  Crawl legacy notes          failed      │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 pass     │
-│  ◌ old-explorer (evicted — ⇋ revive)            —       │ 12:01:41 still running — 3 unstable detected               │
-│ WORKFLOWS                                               │ (filter: all · wheel scrolls · /text filters)              │
-│    ● migrate-v2  3/5 agents · phase 2           1m      │                                                            │
-│    ‖ nightly     paused at phase 1          parked      │                                                            │
-│    ✓ batch-docs  completed · 12 agents          14m     │                                                            │
-│    ✗ old-migrate failed at phase 3            failed    │                                                            │
-│❞ bash: pnpm vitest run test/x — 12 passing, 3 unstable  │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ scroll · c copy tail · p pause agent · f full · esc back │
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● explore  Find and fix the flaky tests · 3 tools · 12s (running) · 41.2k token (12%)           │
+│ ❯ ● explore        │   ↳ opencode-go/deepseek-v4.1-flash · thinking: max · background                                │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │ 12:01:02 spawn  explore · opencode-go/deepseek-v4.1-flash · background                          │
+│   ✓ docs-gen       │ 12:01:03 turn   1 start                                                                         │
+│   ✗ crawl-old      │ 12:01:04 tool   read README.md → 42 lines                                                       │
+│ WORKFLOWS          │ 12:01:06 tool   bash: grep -rn flaky test/ → 3 hits                                             │
+│   ● migrate-v2 3/5 │ 12:01:21 note   steering: focus on test/e2e                                                     │
+│   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
+│                    │ 12:01:41 still running — 3 unstable detected                                                    │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 42 lines · 100% · Enter steer · x stop                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page W — workflow run (nested level 1)
 
-Left: the roster, selection pinned to the run. Right: phases and the run's
-agents — the level the next `⏎` descends into.
+Left: the roster, selection pinned to the run. Right: the run header, phases
+and the run's agents — the level the next `⏎` descends into.
+`↑↓` moves the `❯` across phases and run agents alike; it starts on the
+current phase.
 
-```
-╭─ Agents & Workflows › migrate-v2 ───────────────────────┬────────────────────────────────────────────────────────────╮
-│ SUBAGENTS                                               │ PHASES                                                     │
-│  ● explore    Find flaky tests              12s         │ ✓ discover   3 agents · done                               │
-│  ● audit      Audit the auth flow           48s         │ ❯ migrate    2 agents · running                            │
-│  ⋯ web-crawl  Crawl the release notes         —         │   verify     —  · waiting                                  │
-│  ‖ refactor   Refactor the parser        parked         │   report     —  · waiting                                  │
-│  ✓ docs-gen   Draft the README           done 2m        │────────────────────────────────────────────────            │
-│ WORKFLOWS                                               │ RUN AGENTS                                                 │
-│  ❯ ● migrate-v2  3/5 agents · phase 2         1m        │ ❯ ● m-1   schema tables             40s                    │
-│    ‖ nightly     paused at phase 1        parked        │   ● m-2   api endpoints             32s                    │
-│    ✓ batch-docs  completed · 12 agents       14m        │   ✓ m-3   seed data                done                    │
-│                                                         │   ⋯ m-4   verify queries           queued                  │
-│ (roster stays — the run opens at the right)             │   ⋯ m-5   write report             queued                  │
-│                                                         │ (⏎ on an agent opens its transcript at the right)          │
-│❞ m-2: editing api.ts, reading schema.sql…               │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ item · ⏎ agent · l run log · s stop run · f full · esc ro│
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
-```
-
-## Page WA — a workflow's agent (nested level 2)
-
-Left: the run's agent list (now the parent level). Right: that agent's full
-conversation. `↑↓` in the left list switches agents in place.
-
-```
-╭─ Agents & Workflows › migrate-v2 › m-1 ─────────────────┬────────────────────────────────────────────────────────────╮
-│ migrate-v2 · run agents                                 │ user  Migrate the schema in db.ts to the v2                │
-│ ❯ ● m-1   schema tables             40s                 │       format. Keep the public API stable.                  │
-│   ● m-2   api endpoints             32s                 │ ▝ thinking  The v1 tables are created in init();           │
-│   ✓ m-3   seed data                done                 │ ▝           migrate needs a dual-write shim.               │
-│   ⋯ m-4   verify queries           queued               │ ● assistant  Adding a dual-write shim around init().       │
-│   ⋯ m-5   write report             queued               │ ⚙ edit  src/db.ts  +42 −6                      ⊕           │
-│                                                         │       − db.createTable("v1_rows")                          │
-│ PHASES                                                  │       + db.createTable("v2_rows", { ifNotExists: true })   │
-│ ✓ discover   done                                       │       + db.onWrite("v1_rows", mirrorToV2)                  │
-│ ❯ migrate    running                                    │ ⚙ bash  pnpm test db                                       │
-│                                                         │   ▍12 passing                                              │
-│ (parent level — esc returns to the run page;            │                                                            │
-│  ↑↓ switches agents in place)                           │                                                            │
-│❞ bash: pnpm test — 12 passing                           │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │p pause · r resume · o expand · c copy · l log · k stop · f │
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ SUBAGENTS          │ ● migrate-v2  workflow · 3/5 agents · 1m12s (running)                                           │
+│   ● explore        │   ↳ phase 2 of 4 — migrate · 2 agents in flight                                                 │
+│   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ‖ refactor       │ PHASES                                                                                          │
+│   ✓ docs-gen       │ ✓ discover                                                                                  3/3 │
+│   ✗ crawl-old      │ ❯ 2 migrate                                                                                 1/2 │
+│ WORKFLOWS          │ 3 verify                                                                                      — │
+│ ❯ ● migrate-v2 3/5 │ 4 report                                                                                      — │
+│   ✓ batch-d… 12/12 │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│                    │ RUN AGENTS                                                                                      │
+│                    │ ❯ ● m-1   schema tables                                                                     40s │
+│                    │ ● m-2   api endpoints                                                                       32s │
+│                    │ ✓ m-3   seed data                                                                          done │
+│                    │ ○ m-4   verify queries                                                                   queued │
+│                    │ ○ m-5   write report                                                                     queued │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 3/5 agents · phase 2 of 4                         ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## Page SAL — a workflow agent's log (nested level 3)
+## Page WA — a run's agent (nested level 2)
 
+Left: the run's agent list — now the parent level — with the phases beneath.
+Right: that agent's full conversation, same grammar as **T**. `↑↓` in the
+left list switches agents in place.
+
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ migrate-v2         │ ● m-1 (twin)  Migrate the schema in db.ts to v2 · 5 tools · 40s (running) · 88.3k token (9%)    │
+│ ❯ ● m-1            │   ↳ migrate-v2 · opencode-go/deepseek-v4.1-flash · worktree                                     │
+│   ● m-2            │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ✓ m-3            │ [User]                                                                                          │
+│   ○ m-4            │ Migrate the schema in db.ts to the v2 format. Keep the public API stable.                       │
+│   ○ m-5            │ ───                                                                                             │
+│ PHASES             │ ✻ thinking                                                                                      │
+│ ✓ discover         │   The v1 tables are created in init(); migrate needs a dual-write shim.                         │
+│ ❯ 2 migrate        │ ───                                                                                             │
+│                    │ [Assistant]                                                                                     │
+│                    │   Adding a dual-write shim around init().                                                       │
+│                    │ ───                                                                                             │
+│                    │ ● Edit src/db.ts                                                                                │
+│                    │   ├ +42 −6 [━━━━━━━━━━] at line 88                                                              │
+│                    │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
+│                    │   │ ▌88- │ db.createTable("v1_rows")                                                            │
+│                    │   │ ▌88+ │ db.createTable("v2_rows", { ifNotExists: true })                                     │
+│                    │   │ ▌89+ │ db.onWrite("v1_rows", mirrorToV2)                                                    │
+│                    │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
+│                    │   └ +42 −6 [━━━━━━━━━━] • 1 hunk at line 88                                                     │
+│                    │ ▍ editing 2 files…                                                                              │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 701 lines · 100% · Enter steer · x stop · m md    PgUp/PgDn · j/k scroll · o collapse · l log · p pause · Esc back   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
-╭─ Agents & Workflows › migrate-v2 › m-1 › log ───────────┬────────────────────────────────────────────────────────────╮
-│ migrate-v2 · run agents                                 │ 12:02:11 spawn  m-1 (migrate) · parent run migrate-v2      │
-│ ❯ ● m-1   schema tables             40s                 │ 12:02:12 turn 1 start                                      │
-│   ● m-2   api endpoints             32s                 │ 12:02:13 tool   read schema.sql → 88 lines                 │
-│   ✓ m-3   seed data                done                 │ 12:02:30 tool   edit db.ts +42 −6                          │
-│   ⋯ m-4   verify queries           queued               │ 12:02:44 turn 2 start                                      │
-│   ⋯ m-5   write report             queued               │ 12:02:45 tool   bash: pnpm test → 12 passing               │
-│                                                         │ 12:02:46 still running                                     │
-│ PHASES                                                  │ (filter: all)                                              │
-│ ✓ discover   done                                       │                                                            │
-│ ❯ migrate    running                                    │                                                            │
-│                                                         │                                                            │
-│ (parent level — esc returns to the run page;            │                                                            │
-│  ↑↓ switches agents in place)                           │                                                            │
-│❞ bash: pnpm test — 12 passing                           │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ scroll · c copy tail · p pause agent · f full · esc back │
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+
+## Page SAL — a run agent's log (nested level 3)
+
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ migrate-v2         │ ● m-1 (twin)  Migrate the schema in db.ts to v2 · 5 tools · 40s (running) · 88.3k token (9%)    │
+│ ❯ ● m-1            │   ↳ migrate-v2 · opencode-go/deepseek-v4.1-flash · worktree                                     │
+│   ● m-2            │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│   ✓ m-3            │ 12:02:11 spawn  m-1 (migrate) · parent run migrate-v2                                           │
+│   ○ m-4            │ 12:02:12 turn   1 start                                                                         │
+│   ○ m-5            │ 12:02:13 tool   read schema.sql → 88 lines                                                      │
+│ PHASES             │ 12:02:30 tool   edit db.ts +42 −6                                                               │
+│ ✓ discover         │ 12:02:44 turn   2 start                                                                         │
+│ ❯ 2 migrate        │ 12:02:45 tool   bash: pnpm test → 12 passing                                                    │
+│                    │ 12:02:46 still running                                                                          │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 7 lines · 100% · Enter steer · x stop                  ↑↓ scroll · c copy tail · p pause agent · f full · Esc back   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page L — run log (nested level 2 from W)
 
-Left: the run's phases + agents. Right: the run's event log.
+Left: the run's phases + agents. Right: the run's event log — the run's own
+events interleaved with its agents' spawns, edits and completions.
 
-```
-╭─ Agents & Workflows › migrate-v2 › log ─────────────────┬────────────────────────────────────────────────────────────╮
-│ migrate-v2 · phases & agents                            │ 12:01:18 run start: 5 agents, 4 phases                     │
-│ ✓ discover   3 agents · done                            │ 12:01:19 m-1 spawned (discover)                            │
-│ ❯ migrate    2 agents · running                         │ 12:01:33 m-1 done — 3 tables found                         │
-│   verify     —  · waiting                               │ 12:01:34 m-2 spawned (migrate)                             │
-│   report     —  · waiting                               │ 12:02:02 m-2: edit api.ts +120 −14                         │
-│                                                         │ 12:02:10 m-3 done — seeds applied                          │
-│ ❯ ● m-1   schema tables       40s                       │ 12:02:11 phase 2 still running — 2 agents in flight        │
-│   ● m-2   api endpoints       32s                       │ (filter: all)                                              │
-│   ✓ m-3   seed data          done                       │                                                            │
-│   ⋯ m-4   verify queries   queued                       │                                                            │
-│   ⋯ m-5   write report     queued                       │                                                            │
-│                                                         │                                                            │
-│ (parent level — esc returns to the run page)            │                                                            │
-│❞ m-2: editing api.ts, reading schema.sql…               │                                                            │
-│                                                         │                                                            │
-├─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┤
-│                                                         │↑↓ scroll · c copy tail · s stop run · f full · esc back    │
-╰─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────╯
+```text
+╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ migrate-v2         │ ● migrate-v2  workflow · 3/5 agents · 1m12s (running)                                           │
+│ PHASES             │   ↳ phase 2 of 4 — migrate · 2 agents in flight                                                 │
+│ ✓ discover         │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ❯ 2 migrate        │ 12:01:18 run start: 5 agents, 4 phases                                                          │
+│ 3 verify           │ 12:01:19 m-1 spawned (discover)                                                                 │
+│ 4 report           │ 12:01:33 m-1 done — 3 tables found                                                              │
+│ RUN AGENTS         │ 12:01:34 m-2 spawned (migrate)                                                                  │
+│ ❯ ● m-1            │ 12:02:02 m-2: edit api.ts +120 −14                                                              │
+│   ● m-2            │ 12:02:10 m-3 done — seeds applied                                                               │
+│   ✓ m-3            │ 12:02:11 phase 2 still running — 2 agents in flight                                             │
+│   ○ m-4            │                                                                                                 │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 11 lines · 64% · s stop run                                            ↑↓ scroll · c copy tail · f full · Esc back   │
+╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Transition map
 
-```
+```text
  R (subagent sel) ──⏎──> T ──o──> TD (in place) ──o──> T ──l──> SL ──esc──> T ──esc──> R
  R (subagent sel) ──l──────────────> SL (skips T) ──esc──> R
- R (workflow sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
+ R (run sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
                 W ──l──> L ──esc──> W
- any page ──f──> maximized twin ──f──> back        (frame size only)
- any page ──⇥──> roster ⇄ right-pane focus
- roster ──↑/↓──> cursor crosses group headers; right pane + status strip follow
+ R ──⇥ / 2──> A (activity view) ──1 / ⇥──> R
+ any page ──f──> twin (popup ⇄ fullscreen; frame size only)
+ roster ──↑/↓──> cursor crosses group headers; right pane + footer follow
  /agents menu ── "Agent hub" ──> R
- SubagentWorkflow tool ── open ──> R, cursor on that run's row
+ SubagentWorkflow tool ── open ──> R, cursor on that run's row (AgentHubInitial.runId)
  legacy workflow-dialog entry points ──> same window, focused (adapter)
 ```
 
-`esc` always ascends exactly one nesting level; the breadcrumb title shows the
-trail (`Agents & Workflows › migrate-v2 › m-1 › log`). Maximum nesting depth is
-3 (roster → run → agent → log). `o`/`ctrl+o` expands in place — it never
-creates a page.
-
-## The status strip (last agent output)
-
-The full-width row directly above the footer separator shows — for the focused
-item — the SAME string the extension already renders as the agent widget's
-activity subtext (`describeActivity` in `src/ui/agent-widget.ts`):
-
-1. active tools, grouped — `editing 2 files, searching…`
-2. else the latest streamed response line, truncated
-3. else `thinking…`
-
-prefixed with `❞`, truncated with `…` at the window edge, refreshed on the same
-tick as the roster. On workflow pages it follows the run's most recently active
-agent. It exists on every page and is the first thing dropped when height is
-scarce.
-
-## Minimum parent window size
-
-The parent terminal gates the window before it opens. The existing
-`TWO_PANE_MIN_WIDTH` (60) stays the two-pane gate.
-
-| Terminal | Behavior |
-|---|---|
-| ≥ 100 cols · ≥ 16 rows | Full spec layout: two panes, status strip, full footer |
-| 60–99 cols | Two panes survive; roster summaries, transcript wraps, and the status strip truncate with `…` first, then age columns drop; footer fitter drops whole hints from the right |
-| 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` pushes the right pane's content as a full-width page (breadcrumb + `esc` pops). Status strip hidden; diffs wrap at the pane edge |
-| < 40 cols or < 10 rows | The window refuses to open: `ctx.ui.notify("Agent hub needs a terminal ≥ 40×10")` — no partial frame is drawn |
-| height 10–15 (any width) | Status strip hidden first, then the blank separator row; group headers collapse to inline rules; expanded diffs keep their box, older hunks scroll |
-| height ≥ 16 | Status strip always rendered |
-
-Degradation is by section, in this order: status strip → blank row → roster
-summary column → age column → two-pane (→ stacked). Escalation back up is
-automatic on resize; selection, scroll, page, and per-tool-call expand state
-are preserved through every resize.
-
-## Bottom controls per page and popup size
-
-Bottom controls belong to the PAGE, not to the popup size: restored and
-maximized (`f`) twins show the identical footer at their respective widths.
-The per-page footers are the ones in the page table and frames above; the
-shared fitter drops whole hints from the right when the width cannot fit them
-(never clamping mid-hint), so the `f`/`c`/`esc` anchors survive first.
+`esc` always ascends exactly one nesting level; the footer's `Esc <target>`
+names where it lands. Maximum nesting depth is 3 (roster → run → agent → log).
 
 ## Live regrouping
 
-- A subagent settles → its row regroups in place (`● running` → `✓ done`).
-- A workflow parks (global `/pause`) → its row renders `‖` in `WORKFLOWS`; the
-  agents it owns render `‖` in `SUBAGENTS` (and as `‖` rows inside W).
-- A workflow completes → `✓ name · completed · N agents`.
-- Revive/resume moves rows back exactly as the lifecycle grouping dictates.
-  Nothing in the roster is hand-sorted; grouping is derived.
+- A subagent settles → its glyph flips in place (`●` → `✓`), nothing moves.
+- A workflow parks (global `/pause`) → its row renders `‖` in `WORKFLOWS` and
+  the agents it owns render `‖` in `SUBAGENTS` (and as `‖` rows inside **W**).
+- A workflow completes → `✓` and its counters freeze.
+- Resume moves rows back exactly as the lifecycle glyphs dictate. Nothing in
+  the roster is hand-sorted; grouping is derived.
+
+## Minimum window size
+
+The parent terminal gates the window before it opens. `TWO_PANE_MIN_WIDTH`
+(60) stays the two-pane gate; the master keeps its 18 columns at every
+two-pane size and the detail pane takes the rest.
+
+| Terminal | Behavior |
+|---|---|
+| ≥ 60 cols · ≥ 16 rows | Full layout: narrow master + detail, header blocks, footer band |
+| 60–99 cols | Same grammar; detail wraps at its width; footer degrades by the fitter |
+| 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` pushes the right pane's content as a full-width page (header block + `esc` pops) |
+| < 40 cols or < 10 rows | The window refuses to open: `ctx.ui.notify("Agent hub needs a terminal ≥ 40×10")` — no partial frame is drawn |
+| height 10–15 (any width) | Body floors at six rows; diff boxes keep their shape, older hunks scroll |
+
+Escalation back up is automatic on resize; selection, scroll, page and expand
+state are preserved through every resize.
 
 ## Refusal rules (unchanged)
 
 Foreground agents a caller blocks on, worktree-isolated runs, and agents owned
 by another agent or a workflow refuse to pause; workflow rows expose only
-actions safe for their run state. Labels and available actions may differ per
-row type — the window may not.
+actions safe for their run state (`s` stops a run; it does nothing on an
+agent row). Labels and available actions may differ per row type — the window
+may not.
 
 ## Tests that hold this together
 
-- Byte pins: the shared chrome (top/bottom bars, pane-split columns, status
-  strip, footer row shape) renders identically for the hub and the dialog at
-  equal widths — parity tests fail if a surface drifts.
-- Pane invariant: every page's left pane shows the parent level and its right
-  pane shows the detail — pinned per page; a detail view on the left fails.
-- Page invariants: every page renders its stated footer and status strip; `esc`
-  pops exactly one nesting level; the breadcrumb title matches the page trail.
-- Transcript grammar: T and WA render the same block set (user / thinking /
-  assistant / tool-call / diff / streaming) from the same renderer; collapsed
-  vs expanded (`o`) states are pinned per tool-call.
-- Size ladder: two-pane/stacked/refuse boundaries trigger exactly at the table
-  above; resize up restores the hidden sections in reverse order.
-- Surface purity: no layout arithmetic in surface modules (enforced by review;
-  the pins make silent duplication visible).
-- All prior capability: subagent pause/resume/revive/copy, workflow log keys
-  (wheel, f, c, p), filters, resize levels.
+- **Chrome parity**: the shared chrome (edges, tees, rules, band, footer row
+  shape) renders identically for the hub and the workflow inspector at equal
+  widths — `renderWindow` owns it; parity pins fail if a surface drifts.
+- **Pane invariant**: every page's left pane shows the parent level and its
+  right pane the detail — pinned per page in `test/hub-pages.test.ts`.
+- **Header block**: every right pane opens with the same three identity rows —
+  header line, `↳` line, rule — before any body row; run-agent pages lead the
+  `↳` line with the run name.
+- **Footer band**: each page renders its two slots; the fitter's drop order
+  (readout → left actions → right hints, `Esc` pinned, never mid-hint) is
+  pinned.
+- **Transcript grammar**: T and WA render the same block set from the same
+  `ConversationViewer` (`[User]` / `[Assistant]` / `✻` / `───` / `▍` pinned;
+  renderer-owned chrome pinned by shape, not bytes).
+- **Roster**: windowing, counter truncation, the glyph set, and live
+  regrouping pins.
+- **Preview**: R's right pane renders the selected subagent's log in the SL
+  grammar (a run row renders its overview), closed by the `⏎` hint.
+- **Size ladder**: the 40×10 refusal, 40–59 stacked and ≥ 60 two-pane
+  boundaries trigger exactly at the table above; resize up restores in
+  reverse order with state preserved.
+- **Per-row keys**: `p`/`c`/`x`/`l`/`⏎` dispatch per row kind; `s` only on
+  run rows; `x` is armed two-press.
+- **All prior capability**: subagent pause/resume/copy, workflow log keys,
+  filters, resize levels.
