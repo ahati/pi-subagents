@@ -56,8 +56,8 @@ vi.mock("../src/ui/fleet-list.js", async () => {
        * `b` through the same background-action factory the extension handed
        * the real FleetView.
        */
-      openHub = vi.fn(async (agentId: string, uiOverride?: any) => {
-        const record = registry()?.getRecord(agentId);
+      openHub = vi.fn(async (initial: { agentId?: string; runId?: string }, uiOverride?: any) => {
+        const record = initial.agentId === undefined ? undefined : registry()?.getRecord(initial.agentId);
         if (!record?.session || !uiOverride) return undefined;
         return uiOverride.custom(
           (tui: any, theme: any, _keys: unknown, done: () => void) =>

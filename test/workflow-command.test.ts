@@ -151,7 +151,7 @@ describe("/agents → Workflows", () => {
       return booted;
     }
 
-    it("opens the dialog directly when exactly one run exists", async () => {
+    it("opens the run's page directly when exactly one run exists", async () => {
       const { command } = await withRuns(1);
       const ui = commandCtx();
       await command.handler("", ui.context);
@@ -174,13 +174,13 @@ describe("/agents → Workflows", () => {
       expect(ui.built).toHaveLength(0);
     });
 
-    it("actually aborts the run when stopped from the dialog", async () => {
+    it("actually aborts the run when stopped from the run's page", async () => {
       // The consequential action: it must abort, not merely look like it did.
       const { command } = await withRuns(1);
       const ui = commandCtx();
       await command.handler("", ui.context);
-      const dialog = ui.built[0] as { handleInput(data: string): void };
-      dialog.handleInput("x");
+      const runPage = ui.built[0] as { handleInput(data: string): void };
+      runPage.handleInput("s");
       expect(ui.notes.map(n => n.text).join("\n")).toMatch(/Stopped workflow "wf-0"/);
     });
 
@@ -188,9 +188,9 @@ describe("/agents → Workflows", () => {
       const { command } = await withRuns(1);
       const ui = commandCtx();
       await command.handler("", ui.context);
-      const dialog = ui.built[0] as { handleInput(data: string): void };
-      dialog.handleInput("x");
-      dialog.handleInput("x");
+      const runPage = ui.built[0] as { handleInput(data: string): void };
+      runPage.handleInput("s");
+      runPage.handleInput("s");
       const stops = ui.notes.filter(n => /Stopped workflow/.test(n.text));
       expect(stops).toHaveLength(1);
     });
@@ -219,24 +219,24 @@ describe("/agents → Workflows", () => {
       expect(ui.built).toHaveLength(1);
     });
 
-    it("pauses and resumes the run from the dialog", async () => {
+    it("pauses and resumes the run from its page", async () => {
       // The whole path: the key reaches the task, the task reaches the run's
       // control surface, and the run's new state comes back out in the footer.
       const { command } = await withRuns(1);
       const ui = commandCtx();
       await command.handler("", ui.context);
-      const dialog = ui.built[0] as { handleInput(d: string): void; render(w: number): string[] };
-      expect(dialog.render(100).at(-2)).toContain("p pause");
+      const runPage = ui.built[0] as { handleInput(d: string): void; render(w: number): string[] };
+      expect(runPage.render(100).at(-2)).toContain("p pause run");
 
-      dialog.handleInput("p");
+      runPage.handleInput("p");
       // Said plainly: "paused" on a run whose agents are still finishing
       // promises more than it delivers.
       expect(ui.notes.at(-1)?.text).toMatch(/Paused — running agents finish/);
-      expect(dialog.render(100).at(-2)).toContain("p resume");
+      expect(runPage.render(100).at(-2)).toContain("p resume run");
 
-      dialog.handleInput("p");
+      runPage.handleInput("p");
       expect(ui.notes.at(-1)?.text).toMatch(/Resumed/);
-      expect(dialog.render(100).at(-2)).toContain("p pause");
+      expect(runPage.render(100).at(-2)).toContain("p pause run");
     });
 
     it("opens as a centered overlay, like the conversation viewer beside it", async () => {

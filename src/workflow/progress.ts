@@ -66,7 +66,7 @@ export interface WorkflowAgentEntry {
    * The manager's `AgentRecord` id, once the child has one.
    *
    * Distinct from {@link agentId}, which is the run's own `wf-agent-N` handle
-   * and means nothing outside the runtime. This is what the inspector's `c`
+   * and means nothing outside the runtime. This is what the hub's run-agent
    * key opens a conversation viewer on, so it is reported the moment the
    * manager issues it rather than with the effective model — a child that dies
    * before its session resolves still has a conversation worth reading.
@@ -319,8 +319,7 @@ export function buildPhaseGroups(
  *
  * The whole list a run page walks, as opposed to one group's slice: the hub's
  * run pages (W/WA/SAL/L) walk the run's agents in script order, however the
- * phases grouped them. The inspector builds the same list from its already-
- * resolved groups.
+ * phases grouped them.
  */
 export function flattenRunAgents(
   progress: readonly WorkflowEntry[],
@@ -511,8 +510,8 @@ export interface RunIdentity {
 
 /**
  * Compose the run identity block's text — the header line's tail and the `↳`
- * line — so the hub's run pages (R2/W/L) and the inspector's detail cell draw
- * the same block from the same derivation instead of two drifting copies.
+ * line — so the hub's run pages (R2/W/L) draw the same block from the same
+ * derivation instead of two drifting copies.
  */
 export function runIdentity(input: {
   name: string;

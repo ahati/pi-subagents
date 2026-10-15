@@ -1,18 +1,16 @@
 /**
- * The window frame the agent hub and the workflow inspector share.
+ * The window frame the agent hub draws through.
  *
- * Both surfaces draw one window — `╭───╮` edges, padded `│ content │` rows, a
- * two-pane split whose three bars partition the width exactly, a footer that
- * drops its least useful hints rather than cutting one in half, and a body
- * height derived from the overlay's share of the terminal. `window-frame.ts`
- * is that geometry once; these tests pin the primitives and pin that the two
- * components actually render through them, so a third hand-rolled copy cannot
- * grow back unnoticed.
+ * One surface — `╭───╮` edges, padded `│ content │` rows, a two-pane split
+ * whose three bars partition the width exactly, a footer that drops its least
+ * useful hints rather than cutting one in half, and a body height derived from
+ * the overlay's share of the terminal. `window-frame.ts` is that geometry
+ * once; these tests pin the primitives and pin that the hub actually renders
+ * through them, so a hand-rolled copy cannot grow back unnoticed.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it, vi } from "vitest";
-import type { AgentRecord } from "../src/types.js";
+import { describe, expect, it } from "vitest";
 import {
   ASCII_PANE_BOX,
   type FooterHint,
@@ -34,12 +32,7 @@ import {
   WINDOW_CHROME_ROWS,
 } from "../src/ui/window-frame.js";
 import type { WorkflowCardLine } from "../src/ui/workflow-card.js";
-import type { WorkflowDialogLogDeps } from "../src/ui/workflow-dialog.js";
-import { WorkflowDialog } from "../src/ui/workflow-dialog.js";
 
-const START = 1_700_000_000_000;
-/** A passthrough theme, so `visibleWidth` sees the layout's true geometry. */
-const theme = { bold: (s: string) => s, fg: (_c: string, s: string) => s } as never;
 
 describe("pane geometry", () => {
   it("partitions the width between the three bars and both cells", () => {
@@ -297,80 +290,6 @@ describe("body height basis", () => {
   });
 });
 
-/** The hints each level can advertise, for the whole-fragment check below. */
-const DETAIL_HINTS = new Set([
-  "↑↓ agent", "e prompt", "⏎ log", "s skip", "r retry", "p pause", "p resume", "x stop", "esc back", "f expand", "c convo",
-]);
-const LOG_HINTS = new Set(["↑↓ agent", "p pause", "p resume", "x stop", "esc back", "c copy", "f expand"]);
-
-/**
- * The hint fragments a rendered footer holds, bars and padding stripped. The
- * band's two slots are separated by padding rather than a joiner, so a run of
- * two or more spaces splits as well as the `·`.
- */
-function footerFragments(line: string): string[] {
-  const inner = line.replace(/^\S\s/, "").replace(/\s\S$/, "").trim();
-  return inner === "" ? [] : inner.split(" · ").flatMap(slot => slot.split(/\s{2,}/));
-}
-
-/** A dialog whose footer has every hint live: all actions, a long prompt, a record. */
-function bootEveryHint(rows: number) {
-  const log: WorkflowDialogLogDeps = {
-    getRecord: id => (id === "rec-1" ? makeRecord() : undefined),
-    manager: { abort: vi.fn(() => true), steer: vi.fn(() => true) },
-    agentActivity: new Map(),
-    showCost: () => false,
-    pauseAgent: () => undefined,
-    resumeAgent: () => true,
-  };
-  return new WorkflowDialog(
-    { requestRender: vi.fn(), terminal: { rows } } as unknown as never,
-    () => ({
-      progress: [
-        { type: "workflow_phase", index: 0, title: "Verify" },
-        {
-          type: "workflow_agent", index: 0, label: "row-one", phaseIndex: 0, state: "progress", startedAt: START,
-          recordId: "rec-1",
-          promptPreview: Array.from({ length: 6 }, (_, i) => `line ${i}`).join("\n"),
-        },
-      ],
-      task: { status: "running" as const, workflowName: "wf", startTime: START },
-    }),
-    theme,
-    () => {},
-    {
-      onKill: () => {}, onPause: () => {}, onResume: () => {},
-      onSkipAgent: () => {}, onRetryAgent: () => {}, onOpenAgent: () => {},
-    },
-    0,
-    log,
-  );
-}
-
-describe("footers stay whole when the window is too narrow for every hint", () => {
-  it("drops hints rather than clamping one in half, at every level", () => {
-    // The clamp cut wherever the line ran out, leaving a fragment like `es` and
-    // a dead separator where the escape hatch should have been: at some width in
-    // this range the truncation lands mid-hint.
-    for (const width of [66, 67, 68, 70, 72, 76, 90]) {
-      const detail = bootEveryHint(40);
-      detail.handleInput("\r");
-      const detailFooter = footerFragments(detail.render(width).at(-2) ?? "");
-      expect(detailFooter.length, `detail w=${width}`).toBeGreaterThan(0);
-      for (const part of detailFooter) expect(DETAIL_HINTS.has(part), `detail w=${width}: ${JSON.stringify(part)}`).toBe(true);
-      detail.dispose();
-
-      const log = bootEveryHint(40);
-      log.handleInput("\r");
-      log.handleInput("\r"); // descend to the log level
-      const logFooter = footerFragments(log.render(width).at(-2) ?? "");
-      expect(logFooter.length, `log w=${width}`).toBeGreaterThan(0);
-      for (const part of logFooter) expect(LOG_HINTS.has(part), `log w=${width}: ${JSON.stringify(part)}`).toBe(true);
-      log.dispose();
-    }
-  });
-});
-
 describe("the footer band", () => {
   const readout = (text: string): FooterHint => ({ text, group: "readout" });
   const action = (text: string): FooterHint => ({ text, group: "action" });
@@ -435,8 +354,8 @@ describe("the spec's frames' footer bands", () => {
     ["T", "Enter steer · x stop · m md         PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
     ["TD", "Enter steer · x stop · c copy diff             PgUp/PgDn · j scroll · l log · p pause · c copy · f full · Esc roster", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("c copy diff"), action("o collapse") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc roster", true) ]],
     ["SL", "42 lines · 100% · x stop                                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("42 lines · 100%"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
-    ["W", "3/5 agents · phase 2 of 4                           ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster", [ readout("3/5 agents · phase 2 of 4") ], [ hint("↑↓ item"), hint("⏎ agent"), hint("l run log"), hint("s stop run"), hint("f full"), hint("Esc roster", true) ]],
-    ["WA", "Enter steer · x stop · m md           PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back", [ readout("701 lines · 100%"), action("Enter steer"), action("x stop"), action("m md") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc back", true) ]],
+    ["W", "3/5 agents · phase 2 of 4 · p pause run             ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster", [ readout("3/5 agents · phase 2 of 4"), action("p pause run") ], [ hint("↑↓ item"), hint("⏎ agent"), hint("l run log"), hint("s stop run"), hint("f full"), hint("Esc roster", true) ]],
+    ["WA", "Enter steer · x stop · m md · s skip  PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back", [ readout("705 lines · 100%"), action("Enter steer"), action("x stop"), action("m md"), action("s skip"), action("r retry") ], [ hint("PgUp/PgDn"), hint("j scroll"), hint("o expand"), hint("l log"), hint("p pause"), hint("c copy"), hint("f full"), hint("Esc back", true) ]],
     ["SAL", "7 lines · 100% · x stop                                  ↑↓ scroll · c copy tail · p pause agent · f full · Esc back", [ readout("7 lines · 100%"), action("x stop") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("p pause agent"), hint("f full"), hint("Esc back", true) ]],
     ["L", "11 lines · 64% · s stop run                                              ↑↓ scroll · c copy tail · f full · Esc back", [ readout("11 lines · 64%"), action("s stop run") ], [ hint("↑↓ scroll"), hint("c copy tail"), hint("f full"), hint("Esc back", true) ]],
   ];
@@ -446,92 +365,5 @@ describe("the spec's frames' footer bands", () => {
       expect(footerBand({ width: 116, left, right }), name).toBe(expected);
       expect(visibleWidth(expected), name).toBe(116);
     }
-  });
-});
-
-/* ------------------------------------------------------------------------- *
- * The dialog renders through those primitives
- * ------------------------------------------------------------------------- */
-
-function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
-  return {
-    id: "rec-1",
-    type: "general-purpose",
-    description: "verify:auth.ts",
-    status: "running",
-    toolUses: 0,
-    startedAt: START,
-    session: { subscribe: () => () => {}, messages: [] },
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
-    compactionCount: 0,
-    ...over,
-  } as AgentRecord;
-}
-
-function boot(rows: number | undefined) {
-  const tui = { requestRender: vi.fn(), terminal: rows === undefined ? undefined : { rows } } as unknown as never;
-  const log: WorkflowDialogLogDeps = {
-    getRecord: id => (id === "rec-1" ? makeRecord() : undefined),
-    manager: { abort: vi.fn(() => true), steer: vi.fn(() => true) },
-    agentActivity: new Map(),
-    showCost: () => false,
-  };
-  const instance = new WorkflowDialog(
-    tui,
-    () => ({
-      progress: [
-        { type: "workflow_phase", index: 0, title: "Verify" },
-        { type: "workflow_agent", index: 0, label: "row-one", phaseIndex: 0, state: "progress", startedAt: START, recordId: "rec-1" },
-      ],
-      task: { status: "running" as const, workflowName: "wf", startTime: START },
-    }),
-    theme,
-    () => {},
-    {},
-    0,
-    log,
-  );
-  return instance;
-}
-
-const visibleLength = (s: string) => [...s].length;
-
-describe("the inspector draws through the shared frame", () => {
-  it("uses the shared edges and row shape at the overview level", () => {
-    const instance = boot(40);
-    const lines = instance.render(100);
-    // The window is the hub's: a split, titled top edge — the master pane named
-    // in it — and the matching split bottom edge, from the shared geometry.
-    const panes = paneGeometry(100);
-    expect(lines[0]).toBe(splitEdge(100, panes.leftCellWidth, UNICODE_PANE_BOX, "top", " Phases "));
-    // The divider ends at the band rule's `┴`; below it the bottom edge is
-    // plain, since a split one would hang a second tee under the first.
-    expect(lines.at(-1)).toBe(frameEdge(100, UNICODE_PANE_BOX, "bottom"));
-    const band = lines.find(line => line.startsWith("│ ─"));
-    expect(band?.indexOf("┴")).toBe(panes.leftCellWidth + 1);
-    for (const line of lines) expect(visibleLength(line)).toBe(100);
-    instance.dispose();
-  });
-
-  it("keeps the level's own footer whole instead of clamping a hint in half", () => {
-    const instance = boot(40);
-    instance.handleInput("\r"); // detail level: the footer carries the most hints
-    const footer = instance.render(70).at(-2) ?? "";
-    expect(footer).not.toContain("· │");
-    expect(footer.endsWith("·")).toBe(false);
-    instance.dispose();
-  });
-
-  it("sizes the log level and the levels above it on one basis", () => {
-    // Same terminal on both paths, so the body — and with it the whole window —
-    // cannot change height when Enter descends to the log.
-    const instance = boot(20);
-    instance.handleInput("\r");
-    const detail = instance.render(100).length;
-    instance.handleInput("\r"); // descend to the log
-    const log = instance.render(100);
-    expect(log.length).toBeGreaterThan(0);
-    expect(log.length).toBe(detail);
-    instance.dispose();
   });
 });

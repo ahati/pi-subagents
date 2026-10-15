@@ -59,11 +59,12 @@ import {
 import type { WorkflowCardLine } from "./workflow-card.js";
 import { clampLine } from "./workflow-card.js";
 import {
+  agentActions,
   agentRow,
   phaseListRows,
   UNICODE_DIALOG_GLYPHS,
   type WorkflowDialogSource,
-} from "./workflow-dialog.js";
+} from "./workflow-view.js";
 
 /** How long a settled workflow run lingers in the roster (matches the fleet list). */
 const FINISHED_LINGER_MS = 4000;
@@ -235,6 +236,17 @@ export type HubUICtx = {
   ): Promise<T>;
 };
 
+/** Run controls the hub's run pages own, by run id. `pause`/`resume` report
+ *  whether they landed; `skip`/`retry` report whether the agent could take the
+ *  action — one notification site, and no hint without a wire. */
+export interface WorkflowRunControls {
+  pause(): boolean;
+  resume(): boolean;
+  /** `index` is the entry's stable `index`, not its row position. */
+  skip(index: number): boolean;
+  retry(index: number): boolean;
+}
+
 /** Everything the hub renders from — the same sources the fleet list uses. */
 export interface AgentHubDeps {
   manager: Pick<AgentManager, "listAgents" | "abort" | "steer">;
@@ -248,15 +260,23 @@ export interface AgentHubDeps {
   /** Workflow runs, on the same terms as the fleet list. */
   workflows?: () => readonly FleetWorkflow[];
   /**
-   * The run's detail for the hub's run pages (**W**, **WA**, **L**): the same
-   * source the workflow inspector reads. Omitted → the run pages have no pane
-   * content and say so; the roster still shows the run.
+   * The run's detail for the hub's run pages (**W**, **WA**, **L**). Omitted →
+   * the run pages have no pane content and say so; the roster still shows the
+   * run.
    */
   workflowRun?: (id: string) => WorkflowDialogSource | undefined;
-  /** Open the workflow inspector for a run id. The legacy adapter entry point. */
-  openWorkflow?: (id: string) => Promise<void> | void;
-  /** `s` on a workflow row: stop the run. Omitted → `s` does nothing. */
-  stopWorkflow?: (id: string) => void;
+  /**
+   * `s` on a workflow row or page: stop the run. Returns whether it aborted
+   * (false when the run was already aborted), and the row/page reports it —
+   * one notification site. Omitted → `s` does nothing.
+   */
+  stopWorkflow?: (id: string) => boolean | undefined;
+  /**
+   * The run's `p` (pause/resume) and its agents' `s`/`r` (skip/retry), keyed
+   * by run id. Omitted → those keys do nothing and the band advertises none of
+   * them.
+   */
+  workflowControls?: (id: string) => WorkflowRunControls | undefined;
   /** Surface stop confirmations. Omitted → silent. */
   notify?: (message: string, type?: "info" | "warning" | "error") => void;
   /**
@@ -448,9 +468,16 @@ export interface AgentHubInitial {
   /** Start on this agent's transcript page (the fleet Enter-on-agent flow). */
   agentId?: string;
   /**
+   * Start on this run's page (**W**) with the run selected on the roster (the
+   * fleet Enter-on-run and `/agents → Workflows` flow). A run that settled and
+   * was swept falls back to the roster, like a stale `agentId`.
+   */
+  runId?: string;
+  /**
    * Start in the popup twin's frame (90 % × 70 %). Defaults to true when
-   * `agentId` is given, else false. The frame size is all it decides — the
-   * pages, their keys and their content are the same in both twins.
+   * `agentId` or `runId` is given, else false. The frame size is all it
+   * decides — the pages, their keys and their content are the same in both
+   * twins.
    */
   popup?: boolean;
 }
@@ -468,19 +495,27 @@ export interface AgentHubInitial {
  */
 export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: AgentHubInitial): Promise<undefined> {
   const target = initial?.agentId;
+  const runTarget = initial?.runId;
   // Any record the manager knows can be the page's subject — the run-owned
-  // children the inspector opens are not roster rows, but they have a
-  // transcript. A stale id falls back to the roster, which is always drawable.
+  // children the fleet opens are not roster rows, but they have a transcript.
+  // A stale id falls back to the roster, which is always drawable.
   const known = target != null && deps.manager.listAgents().some(a => a.id === target);
+  // A run still on the roster (or lingering in it) is openable; a swept one is
+  // not, and the window falls back to the roster rather than drawing a run
+  // page whose detail source is gone.
+  const run = runTarget != null ? hubWorkflows(deps).find(w => w.id === runTarget) : undefined;
   const resume: HubResumeState = {
     view: "table",
-    selected: Math.max(0, known ? hubEntryIndex(deps, target) : 0),
+    selected: Math.max(0, known ? hubEntryIndex(deps, target) : run ? hubRunIndex(deps, run.id) : 0),
     filterText: "",
-    // The popup opens on the agent's transcript page.
-    page: known ? "T" : "R",
+    // The popup opens on the agent's transcript page or the run's page.
+    page: known ? "T" : run ? "W" : "R",
     focusId: known ? target : undefined,
+    runId: run?.id,
+    // D8: the item cursor starts where the run is, on the current phase row.
+    runItemSel: run ? currentPhaseIndex(hubRunGroups(deps, run.id)) : undefined,
   };
-  let popup = initial?.popup ?? target != null;
+  let popup = initial?.popup ?? (target != null || runTarget != null);
   for (;;) {
     const result = await ui.custom<HubResult>(
       (tui, theme, keybindings, done) =>
@@ -503,6 +538,24 @@ function hubEntryIndex(deps: AgentHubDeps, agentId: string): number {
     ...hubWorkflows(deps).map(workflow => ({ kind: "workflow" as const, workflow })),
   ];
   return entries.findIndex(e => e.kind === "agent" && e.record.id === agentId);
+}
+
+/**
+ * The roster index of `runId` in the same order — the subagents section first,
+ * then the runs. `-1` when the run has no roster row.
+ */
+function hubRunIndex(deps: AgentHubDeps, runId: string): number {
+  const entries: HubEntry[] = [
+    ...hubAgents(deps).map(record => ({ kind: "agent" as const, record })),
+    ...hubWorkflows(deps).map(workflow => ({ kind: "workflow" as const, workflow })),
+  ];
+  return entries.findIndex(e => e.kind === "workflow" && e.workflow.id === runId);
+}
+
+/** The phase groups of a run whose row the window is opening on. */
+function hubRunGroups(deps: AgentHubDeps, runId: string): PhaseGroup[] {
+  const source = deps.workflowRun?.(runId);
+  return source ? buildPhaseGroups(source.progress, source.meta?.phases) : [];
 }
 
 export class AgentHub implements Component {
@@ -759,6 +812,10 @@ export class AgentHub implements Component {
         this.popPage();
         return;
       }
+      // A run agent whose record has no viewer left still takes the page's
+      // run-agent keys, exactly as the roster does without a session.
+      if (this.page === "WA" && matchesKey(data, "s")) { this.skipRunAgent(); return; }
+      if (this.page === "WA" && matchesKey(data, "r")) { this.retryRunAgent(); return; }
     }
 
     // The log pages (SL/SAL/L): scroll, copy, pause, stop, back.
@@ -772,6 +829,7 @@ export class AgentHub implements Component {
       if (matchesKey(data, "enter")) { this.enterPage(this.entries()); return; }
       if (matchesKey(data, "l")) { this.pushLogPage(); return; }
       if (matchesKey(data, "s")) { this.stopRun(); return; }
+      if (matchesKey(data, "p")) { this.pauseResumeRun(); return; }
       if (matchesKey(data, "c")) { this.copyFocusedResult(); return; }
       if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.popPage(); return; }
       if (matchesKey(data, "f")) { this.requestToggle(); return; }
@@ -851,6 +909,69 @@ export class AgentHub implements Component {
 
     // Any other key disarms a pending stop.
     if (this.stopArmed) this.stopArmed = false;
+    this.requestRender();
+  }
+
+  /**
+   * The skip/retry availability of **WA**'s current agent — `agentActions`,
+   * the inspector's gate, against the run's live status. Both keys are absent
+   * from the band when the extension wired no controls for the run.
+   */
+  private runAgentActionKeys(): { skip: boolean; retry: boolean } {
+    const run = this.currentRun();
+    if (!run || !this.deps.workflowControls?.(run.id)) return { skip: false, retry: false };
+    const entry = this.runAgents()[this.clampRunAgentIndex()];
+    const active = run.status === "running" || run.status === "paused";
+    return agentActions(entry, active);
+  }
+
+  /** The run controls for the page's run, when the extension wired any. */
+  private pageControls(): WorkflowRunControls | undefined {
+    const run = this.currentRun();
+    return run === undefined ? undefined : this.deps.workflowControls?.(run.id);
+  }
+
+  /**
+   * `p` on **W**: pause the run if it is running, resume it if parked — the
+   * inspector's pause/resume pair, one key, toggled by the run's status (D4's
+   * `‖` already renders the parked state on the roster row). Running agents
+   * finish; no new ones start.
+   */
+  private pauseResumeRun(): void {
+    const run = this.currentRun();
+    const controls = this.pageControls();
+    if (!run || !controls) return;
+    if (run.status === "paused") {
+      if (controls.resume()) this.deps.notify?.("Resumed.", "info");
+    } else if (run.status === "running") {
+      // Named rather than implied: "paused" on a run whose agents are still
+      // finishing reads as a stronger promise than it is.
+      if (controls.pause()) this.deps.notify?.("Paused — running agents finish, no new ones start.", "info");
+    }
+    this.requestRender();
+  }
+
+  /** `s` on **WA**: skip the current run agent, if its `agent()` call is live. */
+  private skipRunAgent(): void {
+    const controls = this.pageControls();
+    const entry = this.runAgents()[this.clampRunAgentIndex()];
+    if (!controls || !entry) return;
+    if (!controls.skip(entry.index)) {
+      this.deps.notify?.("Nothing to skip — that agent has already finished.", "info");
+    }
+    this.requestRender();
+  }
+
+  /** `r` on **WA**: retry the current run agent, while it is running. */
+  private retryRunAgent(): void {
+    const controls = this.pageControls();
+    const entry = this.runAgents()[this.clampRunAgentIndex()];
+    if (!controls || !entry) return;
+    if (!controls.retry(entry.index)) {
+      // The window is exactly "while it is running": before that there is
+      // nothing to stop, after it the script has its answer.
+      this.deps.notify?.("Only a running agent can be retried.", "info");
+    }
     this.requestRender();
   }
 
@@ -1099,6 +1220,22 @@ export class AgentHub implements Component {
     const actions = expanded
       ? [...keys.actions.filter(action => action !== TD_REPLACED_ACTION), ...TD_ACTIONS]
       : [...keys.actions];
+    // The inspector's run controls, migrated onto the pages that own their
+    // subjects: `p` toggles the run on **W**, `s`/`r` act on **WA**'s agent —
+    // and neither is advertised when the extension wired no controls for the
+    // run.
+    if (this.page === "W") {
+      const run = this.currentRun();
+      if (run && this.deps.workflowControls?.(run.id)) {
+        if (run.status === "paused") actions.push("p resume run");
+        else if (run.status === "running") actions.push("p pause run");
+      }
+    }
+    if (this.page === "WA") {
+      const { skip, retry } = this.runAgentActionKeys();
+      if (skip) actions.push("s skip");
+      if (retry) actions.push("r retry");
+    }
     const hints = expanded ? keys.hints.filter(hint => hint !== TD_DROPPED_HINT) : [...keys.hints];
     const armed = this.stopArmed || (viewer?.stopArmed ?? false);
 
@@ -1628,8 +1765,19 @@ export class AgentHub implements Component {
     if (matchesKey(data, "f")) { this.requestToggle(); return true; }
     if (matchesKey(data, "c")) { this.copyFocusedResult(); return true; }
     if (matchesKey(data, "p")) { this.pauseResumeFocused(); return true; }
+    if (this.page === "WA" && matchesKey(data, "s")) { this.runAgentKey("skip"); return true; }
+    if (this.page === "WA" && matchesKey(data, "r")) { this.runAgentKey("retry"); return true; }
     if (matchesKey(data, "k") || matchesKey(data, "x")) { this.stopFocused(); return true; }
     return false;
+  }
+
+  /** A run-agent key, gated the way the inspector gated skip/retry. */
+  private runAgentKey(kind: "skip" | "retry"): void {
+    const actions = this.runAgentActionKeys();
+    if (kind === "skip" ? actions.skip : actions.retry) {
+      if (kind === "skip") this.skipRunAgent();
+      else this.retryRunAgent();
+    }
   }
 
   /** One step in the run's agent list — `WA`'s left pane. */
@@ -1668,7 +1816,9 @@ export class AgentHub implements Component {
     const run = this.page === "W" || this.page === "L" ? this.currentRun() : this.entries()[this.selected]?.kind === "workflow" ? (this.entries()[this.selected] as { workflow: FleetWorkflow }).workflow : undefined;
     if (!run || (run.status !== "running" && run.status !== "paused")) return;
     this.runId = run.id;
-    this.deps.stopWorkflow?.(run.id);
+    if (this.deps.stopWorkflow?.(run.id)) {
+      this.deps.notify?.(`Stopped workflow "${run.name}".`, "info");
+    }
     this.requestRender();
   }
 

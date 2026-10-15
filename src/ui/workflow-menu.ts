@@ -1,12 +1,16 @@
 /**
- * workflow-menu.ts — `/agents → Workflows`, and the run inspector behind it.
+ * workflow-menu.ts — `/agents → Workflows`, and the run opener behind it.
  *
  * The same shape `schedule-menu.ts` has for `/agents → Scheduled jobs`: the
- * submenu and the overlay it opens live here, and everything they need arrives
- * as {@link WorkflowMenuDeps} rather than through a closure. The inspector is
- * reached from two places — this menu and a `workflow` row in the fleet list —
- * and both go through `showWorkflowDialog`, so the two entry points cannot
- * drift apart on what the keys do.
+ * submenu lives here and everything it needs arrives as {@link WorkflowMenuDeps}
+ * rather than through a closure. Reached from two places — this menu and a
+ * `workflow` row in the fleet list — and both go through the same opener, so
+ * the two entry points cannot drift apart.
+ *
+ * Both land in the agent hub, on the run's page (**W**): the inspector window
+ * this file used to open is retired, and the hub already draws the run's
+ * phases, its agents and their conversations. Choosing among several runs is
+ * still a pi `select` picker — it picks a run, it does not show one.
  *
  * Lives in the agents menu rather than as a top-level `/workflows` command: it
  * is one more view of the same fleet, and a second command name would only add
@@ -15,21 +19,9 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { AgentRecord } from "../types.js";
-import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
-import { VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
-import {
-  WorkflowDialog,
-  type WorkflowDialogLogDeps,
-  type WorkflowDialogResumeState,
-} from "./workflow-dialog.js";
+import type { WorkflowTask } from "../workflow/task.js";
 
-/** Overlay geometry for the windowed inspector — the hub popup's size. */
-const POPUP_OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` } as const;
-/** Overlay geometry for the full-screen inspector (`f` expands to it). */
-const FULLSCREEN_OVERLAY_OPTIONS = { anchor: "center", width: "100%", maxHeight: "100%" } as const;
-
-/** Everything the menu and the inspector need from the extension around them. */
+/** Everything the menu needs from the extension around it. */
 export interface WorkflowMenuDeps {
   /**
    * Live runs by id, read on every use rather than snapshotted: a run that
@@ -37,10 +29,6 @@ export interface WorkflowMenuDeps {
    * crash.
    */
   tasks: ReadonlyMap<string, WorkflowTask>;
-  /** The record behind an agent id, or undefined once it has been swept. */
-  getRecord(id: string): AgentRecord | undefined;
-  /** The conversation overlay `c` opens on an agent row. */
-  viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord): Promise<void>;
   /**
    * The session context, for the fleet-list entry point — that one is a
    * keypress in a list that holds no `ctx` of its own. Undefined between
@@ -48,137 +36,12 @@ export interface WorkflowMenuDeps {
    */
   getCtx(): ExtensionCommandContext | undefined;
   /**
-   * What the inspector's third level needs to embed an agent's live
-   * conversation — the same viewer knobs the agent hub gets. Omitted, the
-   * level does not exist: Enter on an agent row stops at the detail pane.
+   * Open the hub on this run's page (`W`), with the run selected. Injected by
+   * the extension because the fleet list owns the window and its lifecycle;
+   * `ctx` is the invoking command's, so the panel notifies through it when the
+   * fleet has not bound a session's UI yet.
    */
-  embeddedLog?: WorkflowDialogLogDeps;
-}
-
-/**
- * Open the inspector for a workflow run.
- *
- * All seven controls are wired: `onKill` aborts the run's controller, while
- * pause/resume and per-agent skip/retry go through `task.control`, the handle
- * `runWorkflow` hands back. `onOpenAgent` is the odd one out — it opens the
- * child's conversation rather than changing the run. `f` at the detail or log
- * level is the seventh: it resolves the overlay with `"toggle"` and the loop
- * below reopens the window full-screen (or windowed again). The dialog derives
- * its key hints from the actions it is handed, so the footer advertises
- * exactly what works — see `WorkflowDialogActions`.
- */
-export async function showWorkflowDialog(
-  ctx: ExtensionCommandContext,
-  task: WorkflowTask,
-  deps: WorkflowMenuDeps,
-): Promise<void> {
-  // Overlaid on the same terms as the conversation viewer, because they are
-  // reached the same way: both are rows of the fleet list, and opening one
-  // must not behave unlike opening the other. Inline, the frame would render
-  // into the conversation and stay in the scrollback after it closed.
-  //
-  // This dialog's own overlay handle, so `c` can hide it while the hub's
-  // conversation panel is up. Overlays stack, so the panel would render *over*
-  // it either way — but the two frames size themselves to different content,
-  // and the taller one's edges show around the shorter. Hidden, there is
-  // nothing to peek out, and un-hiding puts the focus back on the dialog when
-  // the panel closes.
-  let overlay: { setHidden(hidden: boolean): void } | undefined;
-  // Windowed by default; `f` flips to the full-screen window and back — the
-  // agent hub's popup ↔ full-screen toggle. pi resolves an overlay's geometry
-  // once, at creation, so the toggle closes the overlay and this loop reopens
-  // it in the other mode, carrying the drill-down state through the shared
-  // resume object the dialog writes at toggle time.
-  let popup = true;
-  const resume: WorkflowDialogResumeState = {};
-  for (;;) {
-    const result = await ctx.ui.custom<"toggle" | undefined>(
-      (tui, theme, _keybindings, done) =>
-        new WorkflowDialog(
-          tui,
-          // Re-read on every render: the run is in the background, so the
-          // dialog has to follow it rather than snapshot it at open time.
-          () => ({
-            progress: task.workflowProgress,
-            task: {
-              status: task.status,
-              workflowName: task.workflowName,
-              startTime: task.startTime,
-              endTime: task.endTime,
-              totalPausedMs: task.totalPausedMs,
-            },
-            meta: task.meta,
-            agentCount: task.agentCount,
-          }),
-          theme,
-          done,
-          {
-            onKill: () => {
-              if (task.abortController.signal.aborted) return;
-              task.abortController.abort();
-              ctx.ui.notify(`Stopped workflow "${task.meta?.name ?? task.id}".`, "info");
-            },
-            onPause: () => {
-              if (pauseWorkflowTask(task)) {
-                // Named rather than implied: "paused" on a run whose agents are
-                // still finishing reads as a stronger promise than it is.
-                ctx.ui.notify("Paused — running agents finish, no new ones start.", "info");
-              }
-            },
-            onResume: () => {
-              if (resumeWorkflowTask(task)) ctx.ui.notify("Resumed.", "info");
-            },
-            onSkipAgent: index => {
-              if (task.control?.skip(index) !== true) {
-                ctx.ui.notify("Nothing to skip — that agent has already finished.", "info");
-              }
-            },
-            onRetryAgent: index => {
-              if (task.control?.retry(index) !== true) {
-                // The window is exactly "while it is running": before that
-                // there is nothing to stop, after it the script has its answer.
-                ctx.ui.notify("Only a running agent can be retried.", "info");
-              }
-            },
-            onOpenAgent: recordId => {
-              const record = deps.getRecord(recordId);
-              // A run's children are records like any other, so they are swept
-              // ten minutes after they finish — the row outlives the
-              // conversation it points at, and saying why beats an overlay that
-              // opens empty.
-              if (record === undefined) {
-                ctx.ui.notify("No conversation left — agent records are dropped ten minutes after they finish.", "info");
-                return;
-              }
-              overlay?.setHidden(true);
-              // Caught before the `finally`, so a viewer that fails to open
-              // still un-hides the dialog and cannot surface as an unhandled
-              // rejection out of a detached promise.
-              void deps.viewAgentConversation(ctx, record)
-                .catch(err => ctx.ui.notify(
-                  `Could not open the conversation: ${err instanceof Error ? err.message : String(err)}`,
-                  "warning",
-                ))
-                .finally(() => overlay?.setHidden(false));
-            },
-          },
-          // The third level: the same viewer knobs the hub gets, so the
-          // embedded log steers, aborts and copies like the hub's chat pane.
-          0,
-          deps.embeddedLog,
-          { popup, resume },
-        ),
-      {
-        overlay: true,
-        overlayOptions: popup ? POPUP_OVERLAY_OPTIONS : FULLSCREEN_OVERLAY_OPTIONS,
-        onHandle: handle => {
-          overlay = handle;
-        },
-      },
-    );
-    if (result !== "toggle") return;
-    popup = !popup;
-  }
+  openRunInHub(runId: string, ctx?: ExtensionCommandContext): Promise<void> | void;
 }
 
 /**
@@ -186,15 +49,17 @@ export async function showWorkflowDialog(
  *
  * The list hands back an id rather than a task, so a run that settled and was
  * swept between render and keypress is a no-op instead of a crash. `esc` in the
- * dialog closes it and control returns to the list — which is why the promise
- * is handed back: the list puts the cursor back on the run rather than dropping
+ * hub closes it and control returns to the list — which is why the promise is
+ * handed back: the list puts the cursor back on the run rather than dropping
  * the reader at `main`.
  */
 export function openWorkflowFromFleet(id: string, deps: WorkflowMenuDeps): Promise<void> | void {
-  const task = deps.tasks.get(id);
   const ctx = deps.getCtx();
-  if (task === undefined || ctx === undefined) return;
-  return showWorkflowDialog(ctx, task, deps);
+  if (deps.tasks.get(id) === undefined) {
+    ctx?.ui.notify("That run is gone from this session.", "info");
+    return;
+  }
+  return deps.openRunInHub(id, ctx);
 }
 
 /** `/agents → Workflows` — list this session's runs, open one. */
@@ -207,8 +72,9 @@ export async function showWorkflowsMenu(
     ctx.ui.notify("No workflows in this session.", "info");
     return;
   }
+  // One run: no picker to show — the shortcut goes straight to its page.
   if (tasks.length === 1) {
-    await showWorkflowDialog(ctx, tasks[0], deps);
+    await deps.openRunInHub(tasks[0].id, ctx);
     return;
   }
   // More than one: pick first. Newest at the top, since that is almost
@@ -223,5 +89,5 @@ export async function showWorkflowsMenu(
   );
   const picked = await ctx.ui.select("Workflows", labels);
   const index = picked !== undefined ? labels.indexOf(picked) : -1;
-  if (index >= 0) await showWorkflowDialog(ctx, tasks[index], deps);
+  if (index >= 0) await deps.openRunInHub(tasks[index].id, ctx);
 }

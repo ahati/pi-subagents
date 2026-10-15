@@ -77,7 +77,7 @@ import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/met
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, pauseWorkflowTask, resolveResumeTarget, resumeWorkflowTask, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -4610,7 +4610,7 @@ Terse command-style prompts produce shallow, generic work.
     // settings wiring — the old inline viewer construction drifted once.
     // Awaited: callers re-show their menus on return, and a dialog opened
     // while the panel is still up would steal its keyboard.
-    await fleet.openHub(record.id, ctx.ui as never);
+    await fleet.openHub({ agentId: record.id }, ctx.ui as never);
   }
 
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
@@ -5626,47 +5626,25 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
   /**
    * What `/agents → Workflows` and the fleet list's `workflow` rows need from
-   * here. One object, built once: both entry points open the same inspector,
+   * here. One object, built once: both entry points open the same hub page,
    * and handing them different views of the session would let the two drift.
    */
   const workflowMenuDeps: WorkflowMenuDeps = {
     tasks: workflowTasks,
-    getRecord: id => manager.getRecord(id),
-    viewAgentConversation,
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
-    // The inspector's log level: the same viewer knobs the hub's chat pane
-    // gets, so an agent's live conversation steers, aborts and renders
-    // identically inside the workflow window.
-    embeddedLog: {
-      getRecord: id => manager.getRecord(id),
-      manager,
-      agentActivity,
-      showCost: isShowCostEnabled,
-      viewerMarkdown: getViewerMarkdown,
-      onViewerMarkdown: mode => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-      scrollbarMode: getFullscreenScrollbar,
-      // The log level's `p`, on the same funnel the fleet list's `p` rides —
-      // one place emits `subagents:paused` and decides refusals.
-      pauseAgent: id => {
-        const record = manager.getRecord(id);
-        return record ? pauseAgentRecord(record) : "no such agent";
-      },
-      resumeAgent: id => {
-        const record = manager.getRecord(id);
-        const sessionCtx = currentCtx;
-        if (!record || !sessionCtx) return false;
-        void resumeAgentById(sessionCtx, record);
-        return true;
-      },
-    },
+    // Every path lands in the hub on the run's page — the same window the
+    // roster's Enter-on-run flow opens, so there is one surface, not two. The
+    // command's own ctx rides along so the panel notifies through the UI that
+    // invoked it, before the fleet has bound a session's.
+    openRunInHub: (id, ctx) => fleet.openHub({ runId: id }, ctx?.ui as never),
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
-  // The hub's run pages (W/WA/L) read the same run task the inspector does;
-  // its `s` stops the run through the same abort controller. One source, so
-  // the hub and the legacy inspector cannot disagree about a run.
+  // The hub's run pages (W/WA/L) read the run's task; its `s` stops the run
+  // through the same abort controller, and its `p`/`s`/`r` ride the run's own
+  // controls — pause/resume in one place, skip/retry on its children.
   fleet.setWorkflowRunSource(
     id => {
       const task = workflowTasks.get(id);
@@ -5687,9 +5665,22 @@ Write the file using the write tool. Only write the file, nothing else.`;
     },
     id => {
       const task = workflowTasks.get(id);
-      if (task === undefined || task.abortController.signal.aborted) return;
+      if (task === undefined || task.abortController.signal.aborted) return false;
       task.abortController.abort();
-      currentCtx?.ui.notify(`Stopped workflow "${task.meta?.name ?? task.id}".`, "info");
+      return true;
+    },
+    id => {
+      const task = workflowTasks.get(id);
+      if (task === undefined || task.control === undefined) return undefined;
+      const control = task.control;
+      // State only: the hub owns the toasts, so every entry point announces
+      // the same thing once — including the refusal messages.
+      return {
+        pause: () => pauseWorkflowTask(task),
+        resume: () => resumeWorkflowTask(task),
+        skip: index => control.skip(index) === true,
+        retry: index => control.retry(index) === true,
+      };
     },
   );
 }
