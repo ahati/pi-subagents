@@ -5,7 +5,11 @@ shows subagents and workflow runs together, grouped, rendered entirely through
 the shared window-layout module. Audience: contributors changing
 `src/ui/agent-hub.ts`, `src/ui/workflow-dialog.ts`, or `src/ui/window-frame.ts`.
 
-Status: **spec**. The visual language is the one the hub's popup chat pane
+Status: **spec**. This spec covers the hub window and its `f` twins — the same
+pages at either frame size. The popup chat twin (`renderChat`) is a separate
+window, not an `f` twin: it keeps its own ACTIVE/COMPLETED/FAILED grouping and
+its own frame, and is restyled separately. The visual language is the one the
+hub's popup chat pane
 established — narrow master list, detail pane opening with a two-line header
 block, transcript blocks in the shared viewer's grammar, one full-width footer
 band. The implementation may land in phases (narrow master → header blocks → footer band → strip
@@ -471,8 +475,11 @@ names where it lands. Maximum nesting depth is 3 (roster → run → agent → l
 ## Live regrouping
 
 - A subagent settles → its glyph flips in place (`●` → `✓`), nothing moves.
-- A workflow parks (global `/pause`) → its row renders `‖` in `WORKFLOWS` and
-  the agents it owns render `‖` in `SUBAGENTS` (and as `‖` rows inside **W**).
+- A workflow parks (global `/pause`) → its row renders `‖` in `WORKFLOWS`. The
+  `‖` mark is for run rows and for paused top-level subagents; agents owned by a
+  parked run are not roster rows, and inside **W** they keep their own states in
+  the run's agent list (propagating the parked state to them is a separate
+  product decision — see upstream issue #393).
 - A workflow completes → `✓` and its counters freeze.
 - Resume moves rows back exactly as the lifecycle glyphs dictate. Nothing in
   the roster is hand-sorted; grouping is derived.
