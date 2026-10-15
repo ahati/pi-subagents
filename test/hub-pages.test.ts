@@ -1,3 +1,4 @@
+import * as piHost from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
@@ -488,20 +489,56 @@ describe("size ladder", () => {
     expect(h.frame(50).join("\n")).toContain("SUBAGENTS");
   });
 
-  it("60–99 cols keep both panes; the status strip survives from 16 rows", () => {
+  it("60–99 cols keep both panes", () => {
     const h = harness([makeRecord({ id: "a1" })], {}, { cols: 60, rows: 16 });
     h.open();
     const frame = h.frame(60);
     expect(frame[0]).toContain("┬");
-    expect(frame.join("\n")).toContain("❞");
     expect(frame.join("\n")).toContain("SUBAGENTS");
+    expect(frame.join("\n")).toContain("● Agent");
   });
 
-  it("hides the status strip below 16 rows and restores it on resize", () => {
-    const h = harness([makeRecord({ id: "a1" })], {}, { cols: 120, rows: 15 });
+  it("fills the terminal exactly: chrome is the two edges, the band rule and the footer", () => {
+    for (const rows of [10, 12, 15, 16, 24, 40]) {
+      for (const cols of [60, 120]) {
+        const h = harness([makeRecord({ id: "a1" })], {}, { cols, rows });
+        h.open();
+        const frame = h.frame(cols);
+        expect(frame.length, `${cols}x${rows}`).toBe(rows);
+        // The `❞` strip is gone: nothing sits between the body and the band rule.
+        expect(frame.join("\n"), `${cols}x${rows}`).not.toContain("❞");
+      }
+    }
+  });
+
+  it("floors the body at six rows at ten rows — the floor is the arithmetic, not a clamp", () => {
+    const h = harness([makeRecord({ id: "a1" })], {}, { cols: 120, rows: 10 });
     h.open();
-    expect(h.frame(120).join("\n")).not.toContain("❞");
-    expect(h.frame(120).join("\n")).toContain("SUBAGENTS");
+    const frame = h.frame(120);
+    // Top edge, six split body rows, band rule, footer, bottom edge.
+    const body = frame.slice(1, -3);
+    expect(body).toHaveLength(6);
+    expect(body.every(l => l.indexOf("│", 1) === DIVIDER)).toBe(true);
+    expect(frame.at(-3)).toContain("┴");
+    expect(frame.at(-1)!.endsWith("╯")).toBe(true);
+  });
+
+  it("the filter row is full width directly under the top edge and costs the body a row", () => {
+    const h = harness([makeRecord({ id: "a1" })], {}, { cols: 120, rows: 10 });
+    h.open();
+    h.press("/");
+    h.press("a");
+    const frame = h.frame(120);
+    expect(frame.length).toBe(10);
+    // Row 1 is the filter input: full width — the two edge bars and no pane
+    // divider — above the body.
+    expect(frame[1]).toContain("> a");
+    expect([...frame[1]].filter(ch => ch === "│")).toHaveLength(2);
+    expect(frame[1][DIVIDER]).not.toBe("│");
+    // The body gives up the row the filter takes: five, not six.
+    const body = frame.slice(2, -3);
+    expect(body).toHaveLength(5);
+    expect(body.every(l => l.indexOf("│", 1) === DIVIDER)).toBe(true);
   });
 });
 
@@ -544,5 +581,24 @@ describe("per-row keys", () => {
     h.press("k"); // scroll-up on the log pages (D7), never a stop
     expect(stopWorkflow).not.toHaveBeenCalled();
     expect(h.frame().join("\n")).not.toContain("x again to STOP");
+  });
+
+  it("c on the run log page still has a subject: the run's most recently active agent", async () => {
+    // The reason the W/L branch of `focusedRecord()` survives the status
+    // strip: the log page's advertised `c copy tail` copies that agent's
+    // result, and `p` pauses it.
+    const copy = vi.spyOn(piHost, "copyToClipboard").mockResolvedValue(undefined);
+    const h = harness(
+      [makeRecord({ id: "r1", description: "schema tables", status: "completed", result: "the final answer" })],
+      { workflows, workflowRun: () => runSource() },
+    );
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("l"); // L
+    h.press("c");
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    expect(copy).toHaveBeenCalledWith("the final answer");
+    copy.mockRestore();
   });
 });
