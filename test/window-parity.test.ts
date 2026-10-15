@@ -169,6 +169,13 @@ describe("one window for both surfaces", () => {
     });
   }
 
+  it("keeps the 18-column master at the 60-column two-pane floor", () => {
+    // The one width where the hub's fixed master and the inspector's
+    // proportional `paneGeometry` disagree: 21 vs 20. A regression that swaps
+    // `renderHubPage` back to `paneGeometry` fails here and nowhere else.
+    expect(barColumns(hubFrames(60, false))).toEqual([0, 21, 59]);
+  });
+
   it("names the master pane in the top edge on both surfaces", () => {
     // The hub names its agent list, the inspector names whichever list it is
     // showing; both sit in the top edge, before the first column of rule.

@@ -650,6 +650,22 @@ describe("agent hub roster", () => {
     expect(row!.slice(1, 21)).toBe(" ❯ ● migrate-v… 3/5 ");
   });
 
+  it("a wide done/total counter still survives — the prefix and name give way", () => {
+    const h = harness([makeRecord({ id: "a1" })], {
+      workflows: () => [{
+        id: "wf_1", name: "migrate-v2-schema-rewrite", status: "running", doneCount: 1234, totalCount: 9999,
+        startedAt: Date.now() - 1000, tokens: 0,
+      }],
+    });
+    h.open();
+    h.press("\u001b[B"); // onto the run row
+    const row = h.frame().filter(l => l.startsWith("│")).find(l => l.slice(1, 21).includes("1234/9999"));
+    expect(row).toBeDefined();
+    // `1234/9999` is 9 columns: the name truncates to fit, the counter is
+    // whole, and the row still fills exactly the 18-column cell.
+    expect(row!.slice(1, 21)).toBe(" ❯ ● mig… 1234/9999 ");
+  });
+
   it("Enter on a workflow row opens the run inspector and the hub stays up", async () => {
     const openWorkflow = vi.fn();
     const h = harness([makeRecord({ id: "a1" })], {

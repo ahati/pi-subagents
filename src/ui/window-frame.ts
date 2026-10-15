@@ -328,7 +328,8 @@ export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad =
  * The roster is identity — cursor, state glyph, name — so its cell is exactly
  * the 18 columns the spec gives it and the detail pane takes every column left
  * over. {@link paneGeometry}'s third-of-the-cells cap would shave the master to
- * 17 below ~66 columns, moving the divider on resize; that proportional policy
+ * 17 at 60 columns — the two-pane floor — before the two agree again from 61
+ * up; that proportional policy
  * stays where its bytes are pinned — the inspector and the popup chat twin.
  */
 export function masterPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {

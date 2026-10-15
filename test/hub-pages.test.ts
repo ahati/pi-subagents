@@ -127,10 +127,10 @@ describe("hub pane invariant — detail is always on the right", () => {
     }
     const split = body.filter(l => l.indexOf("│", 1) === DIVIDER);
     expect(split.length).toBeGreaterThan(5);
-    for (const line of split) {
-      expect(leftCell(line)).toHaveLength(MASTER_LIST_WIDTH + 2 * PANE_PADDING);
-      expect(rightCell(line).slice(1, 1 + 95)).toHaveLength(95);
-    }
+    // Teeth: the master cell's content is exactly the section header — a torn
+    // or mis-measured frame fails this, not just the width checks above.
+    expect(split.some(l => leftCell(l).trimEnd() === " SUBAGENTS")).toBe(true);
+    expect(split.every(l => leftCell(l).length === MASTER_LIST_WIDTH + 2 * PANE_PADDING)).toBe(true);
   });
 
   it("R: the grouped roster sits left, the selected agent's transcript right", () => {

@@ -4,9 +4,9 @@
  * One full-terminal overlay (`ctx.ui.custom` with `width: "100%"`,
  * `maxHeight: "100%"`), three views:
  *
- * - Table view: every top-level agent of this session plus workflow runs, as a
- *   roster table — status glyph, name, task, live activity, tools/tokens/cost/
- *   elapsed stats flush right. `/` filters, `x` stops (two-press), `Enter`
+ * - Table view: every top-level agent of this session plus workflow runs, as
+ *   an identity-only roster — cursor, state glyph, name — with a run row's
+ *   `done/total` counter flush right. `/` filters, `x` stops (two-press), `Enter`
  *   opens the agent's conversation or the workflow inspector, `1`/`2`/Tab
  *   switch views, `q`/Esc closes the hub.
  * - Activity view: one line per agent describing what it is doing right now.
@@ -546,7 +546,8 @@ export class AgentHub implements Component {
 
   /**
    * The roster's display rows: the `SUBAGENTS` section first, its agents in
-   * lifecycle order, then the `WORKFLOWS` section. Headers are drawn but never
+   * stable launch order (a settling agent never reshuffles the list under the
+   * cursor), then the `WORKFLOWS` section. Headers are drawn but never
    * selected — the cursor crosses them seamlessly, which is why the selection
    * index counts entries, not rows.
    */
@@ -1718,13 +1719,14 @@ export class AgentHub implements Component {
       const wf = entry.workflow;
       const glyph = workflowStatusGlyph(wf.status, th);
       const name = selected ? th.fg("text", wf.name) : th.fg("muted", wf.name);
-      // The counter is the run row's one datum and survives; the name truncates
-      // first. Its space is the row's floor, so the counter is never the tail
-      // that gets cut.
+      // The counter is the run row's one datum: it is measured first and the
+      // name truncates into the columns left of it, so the counter is never
+      // the side that gets cut.
       const counter = `${wf.doneCount}/${wf.totalCount}`;
+      const prefix = `${marker} ${glyph} `;
       return finishRow(
-        `${marker} ${glyph} ${name}`,
-        visibleWidth(counter) + 1,
+        `${prefix}${name}`,
+        visibleWidth(prefix),
         selected ? th.fg("text", counter) : th.fg("dim", counter),
         width,
       );
@@ -1740,7 +1742,13 @@ export class AgentHub implements Component {
   private renderActivity(bodyRows: number): WindowRow[] {
     const th = this.theme;
     const lines: WindowRow[] = [];
-    const items = this.entries();
+    // This view keeps its legacy lifecycle order (active → completed →
+    // failed); the roster itself is launch-stable, so re-rank agents here only.
+    const items = [...this.entries()].sort((a, b) => {
+      if (a.kind !== "agent" || b.kind !== "agent") return 0;
+      return chatGroupRank(a.record.status) - chatGroupRank(b.record.status)
+        || a.record.startedAt - b.record.startedAt;
+    });
     if (items.length === 0) {
       lines.push(fullRow(th.fg("dim", "(nothing running)")));
       return lines;
