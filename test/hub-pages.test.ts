@@ -233,7 +233,6 @@ describe("the header block every right pane opens with", () => {
   const PAGES: Array<{ page: string; to: (press: (key: string) => void) => void }> = [
     { page: "R (agent)", to: () => {} },
     { page: "R (run)", to: p => p(DOWN) },
-    { page: "T", to: p => p("\r") },
     { page: "SL", to: p => p("l") },
     { page: "W", to: p => { p(DOWN); p("\r"); } },
     { page: "WA", to: p => { p(DOWN); p("\r"); p("\r"); } },
@@ -257,9 +256,9 @@ describe("the header block every right pane opens with", () => {
   it("leads a run-agent's `↳` line with the run name, and only there", () => {
     const h = pageHarness();
     h.open();
-    h.press("\r"); // T — the roster's preview of the same agent
+    // The roster page's pane is the agent's conversation, and its `↳` line
+    // carries the model alone (there is no parent run on the roster).
     expect(identity(h.frame())[1].trimEnd()).toBe("  ↳ anthropic/claude-sonnet-4-6 · worktree");
-    h.press(ESC);
     h.press(DOWN);
     h.press("\r"); // W
     h.press("\r"); // WA — one level inside the run
@@ -284,9 +283,9 @@ describe("the header block every right pane opens with", () => {
     expect(rows[3].trim()).not.toBe("");
   });
 
-  it("T/WA: the embedded viewer contributes no header, rule or footer of its own", () => {
+  it("R (agent) / WA: the embedded viewer contributes no header, rule or footer of its own", () => {
     const pages: Array<{ page: string; to: (press: (key: string) => void) => void }> = [
-      { page: "T", to: p => p("\r") },
+      { page: "R (agent)", to: () => {} },
       { page: "WA", to: p => { p(DOWN); p("\r"); p("\r"); } },
     ];
     for (const { page, to } of pages) {
@@ -491,15 +490,20 @@ describe("page footers, headers and esc", () => {
     startedAt: Date.now() - 60_000, tokens: 500,
   }];
 
-  it("R's footer names the subagent keys; the run row's footer names the run's", () => {
+  it("R's footer carries the transcript's keys; the run row's footer names the run's", () => {
     const h = harness([makeRecord({ id: "a1" })], { workflows });
     h.open();
-    expect(h.frame().join("\n")).toContain("⏎ transcript");
+    const agentFooter = h.frame().join("\n");
+    expect(agentFooter).toContain("x stop");
+    expect(agentFooter).toContain("m md");
+    expect(agentFooter).toContain("Esc close");
+    // The conversation is already the pane: there is no descent to advertise.
+    expect(agentFooter).not.toContain("⏎ transcript");
     h.press(DOWN);
     const runFooter = h.frame().join("\n");
     expect(runFooter).toContain("⏎ open run");
     expect(runFooter).toContain("s stop run");
-    expect(runFooter).not.toContain("⏎ transcript");
+    expect(runFooter).not.toContain("x stop");
   });
 
   it("W's footer advertises the run page's keys", () => {
@@ -555,14 +559,15 @@ describe("page footers, headers and esc", () => {
     expect(h.settled()).toBe(true);
   });
 
-  it("esc from a subscriber's transcript returns to the roster, not out of the hub", () => {
+  it("esc on the roster's transcript closes the hub — R is the top page", () => {
     const h = harness([makeRecord({ id: "a1" })]);
     h.open();
-    h.press("\r"); // T
-    expect(h.frame().join("\n")).toContain("Esc roster");
-    h.press(ESC);
+    // The roster page's pane is the conversation, and `Esc close` is the
+    // anchor: there is no transcript page above the roster to ascend from.
+    expect(h.frame().join("\n")).toContain("waiting for first message");
     expect(h.frame().join("\n")).toContain("Esc close");
-    expect(h.settled()).toBe(false);
+    h.press(ESC);
+    expect(h.settled()).toBe(true);
   });
 
   it("l straight on a subagent row opens the log page and esc returns to the roster", () => {
@@ -597,7 +602,7 @@ describe("the footer band", () => {
     return { left: content.slice(0, at), gap: end - at, right: content.slice(end) };
   };
 
-  it("R: the roster's actions left, navigation and the twin right, flush to the edge", () => {
+  it("R: the transcript's actions left, navigation and the twin right, flush to the edge", () => {
     const h = harness([makeRecord({ id: "a1" })], { workflows });
     h.open();
     const frame = h.frame();
@@ -606,10 +611,12 @@ describe("the footer band", () => {
     expect(frame.at(-3)!.indexOf("┴")).toBe(DIVIDER);
     expect(frame.at(-1)!.endsWith("╯")).toBe(true);
     const { left, gap, right } = slots(bandOf(frame));
-    expect(left).toBe("⏎ transcript · l log · p pause · c copy");
+    // The roster page's pane is the conversation, so the band is the
+    // transcript's — with `Esc close`, because R is the window's top page.
+    expect(left).toBe("Enter steer · x stop · m md");
     expect(gap).toBeGreaterThanOrEqual(2);
     // The full-screen twin would give the popup, so that is the twin it names.
-    expect(right).toBe("↑↓ select · ⇥ activity · f popup · Esc close");
+    expect(right).toBe("PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f popup · Esc close");
     expect(bandOf(frame).length).toBe(116);
   });
 
@@ -620,19 +627,18 @@ describe("the footer band", () => {
     expect(slots(bandOf(h.frame())).left).toBe("⏎ open run · s stop run · c copy");
   });
 
-  it("T: the readout drops first and the page's hints and escape anchor survive", () => {
+  it("R (agent): the transcript's actions ride the left slot, the page's keys the right", () => {
     const h = harness([makeRecord({ id: "a1" })], { workflows });
     h.open();
-    h.press("\r"); // T
     const { left, right } = slots(bandOf(h.frame()));
+    // The readout drops first, exactly as it does on the run-agent page.
     expect(left).toBe("Enter steer · x stop · m md");
-    expect(right).toBe("PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f popup · Esc roster");
+    expect(right).toBe("PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f popup · Esc close");
   });
 
   it("TD: the expanded call swaps `m md` for `c copy diff` and drops `o expand`", () => {
     const h = harness([makeRecord({ id: "a1" })], { workflows });
-    h.open();
-    h.press("\r"); // T
+    h.open(); // R — its pane is the transcript
     h.frame(); // the viewer builds on the first render
     expect(slots(bandOf(h.frame())).right).toContain("o expand");
     h.press("\x0f"); // ctrl+o — expand in place, no new page
@@ -646,12 +652,10 @@ describe("the footer band", () => {
 
   it("TD: plain `o` is the advertised alias of the same expand toggle", () => {
     const viaO = harness([makeRecord({ id: "a1" })], { workflows });
-    viaO.open();
-    viaO.press("\r"); // T
+    viaO.open(); // R
     viaO.frame(); // the viewer builds on the first render
     const viaCtrlO = harness([makeRecord({ id: "a1" })], { workflows });
     viaCtrlO.open();
-    viaCtrlO.press("\r");
     viaCtrlO.frame();
     viaCtrlO.press("\x0f"); // ctrl+o — the resolved binding
     viaO.press("o"); // the band's advertised alias
@@ -985,8 +989,8 @@ describe("P8 — the glyph set", () => {
   });
 });
 
-describe("P8 — the R preview", () => {
-  it("renders the SL event grammar, never transcript blocks, and closes with the hint", () => {
+describe("P8 — the R pane", () => {
+  it("renders the selected agent's conversation, never the SL event grammar", () => {
     const h = harness(
       [makeRecord({
         id: "a1",
@@ -996,15 +1000,16 @@ describe("P8 — the R preview", () => {
       { agentActivity: new Map([["a1", { turnCount: 2, activeTools: [], responseText: "3 unstable detected" } as never]]) },
     );
     h.open();
-    const rows = detailRows(h.frame());
-    const pane = rows.join("\n");
-    expect(pane).toContain("spawn");
-    expect(pane).toContain("still running");
-    // The compact preview never renders the transcript's blocks or its `▍` tail.
-    expect(pane).not.toContain("[User]");
-    expect(pane).not.toContain("[Assistant]");
-    expect(pane).not.toContain("▍");
-    expect(rows.filter(r => r.trim() !== "").at(-1)!.trimEnd()).toBe("(⏎ opens the full transcript)");
+    const pane = detailRows(h.frame()).join("\n");
+    // The roster page's pane is the transcript itself: the same blocks the
+    // embedded viewer draws everywhere, with the live `▍` tail.
+    expect(pane).toContain("[User]");
+    expect(pane).toContain("Find and fix the flaky tests");
+    expect(pane).toContain("▍ 3 unstable detected");
+    // The compact event log is the SL page's grammar, not the pane's.
+    expect(pane).not.toContain("spawn");
+    // And there is no descent left to advertise.
+    expect(pane).not.toContain("(⏎ opens the full transcript)");
   });
 
   it("previews a selected run with its header block and the current phase's `❯`", () => {
@@ -1047,8 +1052,8 @@ describe("P8 — the footer band", () => {
     while (content[end] === " ") end++;
     return { left: content.slice(0, at), gap: end - at, right: content.slice(end) };
   };
-  const R_LEFT = ["⏎ transcript", "l log", "p pause", "c copy"];
-  const R_RIGHT = ["↑↓ select", "⇥ activity", "f popup", "Esc close"];
+  const R_LEFT = ["Enter steer", "x stop", "m md"];
+  const R_RIGHT = ["PgUp/PgDn", "j scroll", "o expand", "l log", "p pause", "c copy", "f popup", "Esc close"];
 
   it("drops whole hints only, in the spec's order, as the band narrows", () => {
     for (const cols of [64, 72, 80, 100, 120]) {
@@ -1056,17 +1061,19 @@ describe("P8 — the footer band", () => {
       h.open();
       const { left, gap, right } = slots(bandOf(h.frame(cols), cols));
       expect(gap, `${cols}: at least two columns between the slots`).toBeGreaterThanOrEqual(2);
+      // The readout is the first thing the band gives up; the actions follow
+      // right-to-left, so a surviving left slot never splits one in half.
       for (const hint of left ? left.split(" · ") : []) expect(R_LEFT, `${cols}: ${hint}`).toContain(hint);
       for (const hint of right ? right.split(" · ") : []) expect(R_RIGHT, `${cols}: ${hint}`).toContain(hint);
       // The escape anchor is the last thing to go.
       expect(right, `${cols}: Esc pinned`).toContain("Esc close");
       if (cols === 120) expect(left).toBe(R_LEFT.join(" · "));
-      // Order, pinned at the narrowest width: the readout-less left slot
-      // keeps its most important action, whole hints survive in the spec's
-      // order, and the pinned anchor closes the right slot.
+      // Order, pinned at the narrowest width: the readout and every action are
+      // gone, whole hints survive in the spec's order, and the pinned anchor
+      // closes the right slot.
       if (cols === 64) {
-        expect(left ?? "").toBe("⏎ transcript");
-        expect(right ?? "").toBe("↑↓ select · ⇥ activity · f popup · Esc close");
+        expect(left ?? "").toBe("");
+        expect(right ?? "").toBe("PgUp/PgDn · j scroll · o expand · l log · Esc close");
       }
     }
   });
@@ -1118,12 +1125,13 @@ describe("P8 — transcript grammar parity and refusal behavior", () => {
     expect(embedded).toContain("[Assistant]");
     expect(embedded).toContain("✻ thinking");
     expect(embedded).toContain("───");
-    // The same agent on T has no parent run; on WA the run name leads the line.
+    // The same agent on the roster page has no parent run; on WA the run name
+    // leads the line.
     expect(transcript).toContain("  ↳ —");
     expect(embedded).toContain("  ↳ migrate-v2");
   });
 
-  it("a live agent's transcript carries the `▍` tail on T and on WA", () => {
+  it("a live agent's transcript carries the `▍` tail on R and on WA", () => {
     const h = harness(
       [makeRecord({
         id: "r1",
@@ -1140,9 +1148,7 @@ describe("P8 — transcript grammar parity and refusal behavior", () => {
       },
     );
     h.open();
-    h.press("\r"); // T
     expect(detailRows(h.frame()).join("\n")).toContain("▍");
-    h.press(ESC);
     h.press(DOWN);
     h.press("\r"); // W
     h.press("\r"); // WA

@@ -134,41 +134,57 @@ describe("agent hub mouse wheel", () => {
     return { h, component };
   }
 
-  it("moves the roster selection after an f toggle and esc back — a page viewer must not eat the wheel", async () => {
+  it("keeps the conversation in the pane across an f toggle, and the wheel scrolls it", async () => {
+    const messages = Array.from({ length: 40 }, (_, i) => ({ role: "user", content: `message number ${i}` }));
     const h = harness([
-      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000, session: { subscribe: () => () => {}, messages } }),
       makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
     ]);
     h.open({ agentId: "a1" });
+    expect(h.frame().join("\n")).toContain("message number 39"); // the tail
     h.press("f");
     await h.flush();
-    h.press("\u001b"); // esc: T back to the roster
+    // The popup and the full-screen twin are the same roster page, and the
+    // page's pane is the conversation in both.
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
+    expect(h.frame().join("\n")).toContain("message number 39");
     const component = h.components.at(-1)! as unknown as {
       handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
     };
-    expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
-    // The wheel moves the roster selection, not an invisible transcript.
-    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
+    expect(component.handleMouse({ type: "wheel", wheelDelta: -5 })).toEqual({ handled: true });
+    // The wheel scrolled the transcript; the roster selection did not move.
+    expect(h.frame().join("\n")).not.toContain("message number 39");
+    expect(h.frame(240).join("\n")).toContain("❯ ● alpha");
   });
 
-  it("moves the roster selection and consumes the event", () => {
-    const { h, component } = wheelHub([
-      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
-      makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
-      makeRecord({ id: "a3", alias: "gamma", description: "gamma task" }),
-    ]);
+  it("moves the roster selection on a run row — the run preview owns no scroll — and consumes the event", () => {
+    const h = harness(
+      [makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 })],
+      {
+        workflows: () => [
+          { id: "wf_1", name: "audit", status: "running", doneCount: 0, totalCount: 1, startedAt: Date.now() - 1000, tokens: 0 },
+          { id: "wf_2", name: "migrate", status: "running", doneCount: 0, totalCount: 1, startedAt: Date.now() - 500, tokens: 0 },
+        ],
+      },
+    );
+    h.open();
+    h.frame(); // the first render builds the viewer the wheel dispatches to
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    // The agent row's wheel belongs to its conversation, not the list.
     expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
-    // The roster is identity-only, so the pointer and the name are what move.
-    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
+    expect(h.frame(240).join("\n")).toContain("❯ ● alpha");
+    h.press("\x1b[B"); // onto the first run row
+    expect(h.frame(240).join("\n")).toContain("❯ ● audit");
     component.handleMouse({ type: "wheel", wheelDelta: 1 });
-    expect(h.frame(240).join("\n")).toContain("❯ ● gamma");
+    expect(h.frame(240).join("\n")).toContain("❯ ● migrate");
     // Clamps at the end instead of wrapping.
     component.handleMouse({ type: "wheel", wheelDelta: 5 });
-    expect(h.frame(240).join("\n")).toContain("❯ ● gamma");
+    expect(h.frame(240).join("\n")).toContain("❯ ● migrate");
     // Wheel up.
     component.handleMouse({ type: "wheel", wheelDelta: -1 });
-    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
+    expect(h.frame(240).join("\n")).toContain("❯ ● audit");
   });
 
   it("ignores non-wheel events and empty deltas", () => {
@@ -178,7 +194,7 @@ describe("agent hub mouse wheel", () => {
     expect(component.handleMouse({ type: "wheel" })).toBeUndefined();
   });
 
-  it("scrolls the transcript on page T", () => {
+  it("scrolls the transcript on the roster page (the agent's pane)", () => {
     const messages = Array.from({ length: 40 }, (_, i) => ({
       role: "user",
       content: `message number ${i}`,
@@ -263,7 +279,7 @@ describe("agent hub mouse in regular TUI mode", () => {
   });
 });
 
-describe("agent hub page T — the roster beside the transcript", () => {
+describe("agent hub page R — the roster beside the transcript", () => {
   const DOWN = "\x1b[B";
   const UP = "\x1b[A";
 
@@ -332,17 +348,43 @@ describe("agent hub page T — the roster beside the transcript", () => {
     expect(out).not.toContain("ALPHA-BODY");
   });
 
-  it("the steering composer owns ↑/↓ while it is open — the roster must not move under the writer", async () => {
-    const h = harness([
-      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
-      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
-    ]);
-    h.open({ agentId: "a1" });
+  it("the steering composer owns ↑/↓ while it is open — the run's agent list must not move under the writer", async () => {
+    const h = harness(
+      [
+        makeRecord({ id: "r1", description: "schema tables", startedAt: Date.now() - 5000 }),
+        makeRecord({ id: "r2", description: "api endpoints", startedAt: Date.now() - 2000 }),
+      ],
+      {
+        workflows: () => [{
+          id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+          startedAt: Date.now() - 60_000, tokens: 500,
+        }],
+        workflowRun: () => ({
+          progress: [
+            { type: "workflow_agent", index: 0, label: "m-1", state: "running", recordId: "r1" } as never,
+            { type: "workflow_agent", index: 1, label: "m-2", state: "running", recordId: "r2" } as never,
+          ],
+          task: { status: "running", workflowName: "migrate-v2", startTime: Date.now() - 60_000 },
+        }),
+      },
+    );
+    h.open({ runId: "wf_1" }); // W
+    h.press("\r"); // WA — the run's agent cursor
+    h.frame(); // the viewer builds on the first render
+    const leftPane = () => h.frame()
+      .filter(l => l.startsWith("│") && l.indexOf("│", 1) === 21)
+      .map(l => l.slice(1, 21))
+      .join("\n");
+    expect(leftPane()).toMatch(/❯ . m-1/);
     h.press("\r"); // open the composer
-    h.press(DOWN); // an edit key for the message, not a selection move
-    const out = h.frame().join("\n");
-    expect(out).toContain("alpha task");
-    expect(out).not.toContain("❯ ● beta");
+    const viewer = (h.components.at(-1) as unknown as { viewer?: { composing: boolean } }).viewer;
+    expect(viewer?.composing).toBe(true);
+    h.press("\x1b[B"); // an edit key for the message, not a selection move
+    expect(viewer?.composing).toBe(true);
+    expect(leftPane()).toMatch(/❯ . m-1/);
+    h.press(ESC); // cancel the composer — ↓ is a selection move again
+    h.press("\x1b[B");
+    expect(leftPane()).toMatch(/❯ . m-2/);
   });
 
   it("↓ walks off the last agent onto the run rows — arrows jump between agents and workflows", async () => {
@@ -359,7 +401,7 @@ describe("agent hub page T — the roster beside the transcript", () => {
         }),
       },
     );
-    h.open({ agentId: "a1" }); // the popup twin, on T
+    h.open({ agentId: "a1" }); // the popup twin, the roster page with the agent selected
     h.press(DOWN); // off the last agent, across the WORKFLOWS header
     const roster = h.frame().join("\n");
     // The page became the roster with the RUN selected: its overview preview
@@ -423,7 +465,7 @@ describe("agent hub page T — the roster beside the transcript", () => {
     h.open({ agentId: "a1" });
     h.frame(); // the page builds its viewer on the first render
     const viewer = (h.components.at(-1) as any)?.viewer as { expanded: boolean } | undefined;
-    expect(viewer, "page T entered — the embedded viewer exists").toBeDefined();
+    expect(viewer, "the roster page's pane — the embedded viewer exists").toBeDefined();
     expect(viewer!.expanded).toBe(false);
 
     h.press("\x0f"); // legacy ctrl+o
@@ -466,13 +508,13 @@ describe("agent hub page T — the roster beside the transcript", () => {
     expect(popup).toContain("l log");
     expect(popup).toContain("c copy");
     expect(popup).toContain("f full"); // the popup would give the fullscreen twin
-    expect(popup).toContain("Esc roster");
+    expect(popup).toContain("Esc close"); // R is the top page
     expect(popup).not.toContain("←→ agent");
     h.press("f");
     await h.flush();
     const wide = h.frame(200).join("\n");
     expect(wide).toContain("f popup"); // ...and back
-    expect(wide).toContain("Esc roster");
+    expect(wide).toContain("Esc close");
   });
 
   it("c copies a completed agent's response to the clipboard", async () => {
@@ -571,15 +613,15 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(h.frame().join("\n")).toContain("waiting for first message");
   });
 
-  it("Esc on page T returns to the roster; Esc there closes", async () => {
+  it("Esc on R closes the hub — there is no transcript page to ascend from", async () => {
     const h = harness([makeRecord({ id: "a1" })]);
     const opened = h.open({ agentId: "a1" });
     h.press("f");
     await h.flush();
-    h.press(ESC); // T → roster
-    expect(h.frame().join("\n")).toContain("Agents & Workflows");
-    expect(h.settled()).toBe(false);
-    h.press(ESC); // roster → close
+    // The roster page's pane is the conversation, so Esc is the window's own
+    // close rather than a descent.
+    expect(h.frame().join("\n")).toContain("waiting for first message");
+    h.press(ESC);
     await h.flush();
     expect(h.settled()).toBe(true);
     expect(await opened.promise).toBeUndefined();
@@ -597,25 +639,26 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(h.frame().at(-1)).toMatch(/^╰/);
   });
 
-  it("f from the roster is a frame-size change only — the roster page stays up", async () => {
+  it("f from the roster is a frame-size change only — the same page and its conversation stay up", async () => {
     const h = harness([makeRecord({ id: "a1", description: "the one" })]);
     h.open(); // full-screen roster
     h.press("f");
     await h.flush();
     expect(h.optionSets[1]?.overlayOptions).toMatchObject({ width: "90%", maxHeight: "70%" });
     const frame = h.frame().join("\n");
-    // Same page in the popup frame: the roster master and its agent-log
-    // preview, not a transcript the user did not ask for.
+    // Same page in the popup frame: the roster master beside the selected
+    // agent's conversation.
     expect(frame).toContain("SUBAGENTS");
-    expect(frame).toContain("(⏎ opens the full transcript)");
-    expect(frame).not.toContain("waiting for first message");
+    expect(frame).toContain("the one");
+    expect(frame).toContain("waiting for first message");
+    expect(frame).not.toContain("(⏎ opens the full transcript)");
   });
 
-  it("page T's keys are the page's, in the popup twin too — l, c, p and x all land", () => {
+  it("the roster page's keys are the page's, in the popup twin too — l, c, p and x all land", () => {
     const pauseAgent = vi.fn(() => undefined);
     const notify = vi.fn();
     const h = harness([makeRecord({ id: "a1", status: "running" })], { pauseAgent, notify });
-    h.open({ agentId: "a1" }); // the popup twin, on T
+    h.open({ agentId: "a1" }); // the popup twin, the roster page with the agent selected
     h.press("l"); // the page's log key, not the viewer's
     expect(h.frame().join("\n")).toContain("Esc back");
     h.press(ESC); // back to T
@@ -630,15 +673,15 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(h.manager.abort).toHaveBeenCalledWith("a1");
   });
 
-  it("f from page T keeps the page — popup and fullscreen show the same transcript", async () => {
+  it("f on the roster's transcript keeps the page — popup and fullscreen show the same conversation", async () => {
     const h = harness([makeRecord({ id: "a1" })]);
-    h.open({ agentId: "a1" }); // popup on T
+    h.open({ agentId: "a1" }); // popup, R with the agent selected
     h.press("f");
     await h.flush();
     expect(h.optionSets[1]?.overlayOptions).toMatchObject({ width: "100%", maxHeight: "100%" });
     const wide = h.frame().join("\n");
     expect(wide).toContain("waiting for first message");
-    expect(wide).toContain("Esc roster");
+    expect(wide).toContain("Esc close");
     h.press("f");
     await h.flush();
     expect(h.frame().join("\n")).toContain("waiting for first message");
@@ -647,14 +690,15 @@ describe("agent hub popup ↔ full-screen toggle", () => {
   it("a log page opened from the roster pops back to the roster after an f toggle", async () => {
     const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
     h.open(); // full-screen roster
-    h.press("l"); // `l` on a roster row skips T: SL with logBack = R
+    h.press("l"); // `l` on a roster row: SL, whose parent is the roster
     expect(h.frame().join("\n")).toContain("Esc back");
-    h.press("f"); // frame-size change mid-log — logBack must survive the reopen
+    h.press("f"); // frame-size change mid-log — the log page must survive the reopen
     await h.flush();
-    h.press(ESC); // SL pops to the roster, not to T
+    h.press(ESC); // SL pops back to the roster, whose pane is the transcript
     const out = h.frame().join("\n");
-    expect(out).toContain("(⏎ opens the full transcript)");
-    expect(out).not.toContain("[User]");
+    expect(out).toContain("waiting for first message");
+    expect(out).toContain("Esc close");
+    expect(out).not.toContain("spawn");
   });
 
   it("carries selection and filter across the toggle", async () => {
@@ -873,8 +917,7 @@ describe("hub page keys through the band", () => {
 
   it("x on a transcript page arms first, stops on the second press", () => {
     const h = rosterHub();
-    h.press("\r"); // T — the embedded viewer is up
-    h.frame();
+    h.frame(); // the roster page's pane builds its viewer on the first render
     expect(h.frame().join("\n")).toContain("x stop");
     h.press("x");
     expect(h.manager.abort).not.toHaveBeenCalled();
@@ -885,8 +928,7 @@ describe("hub page keys through the band", () => {
 
   it("another key disarms the transcript page's stop", () => {
     const h = rosterHub();
-    h.press("\r"); // T
-    h.frame();
+    h.frame(); // the roster page's pane builds its viewer
     h.press("x");
     expect(h.frame().join("\n")).toContain("x again to STOP");
     h.press("j"); // the viewer's own scroll key — it disarms before scrolling
@@ -903,7 +945,6 @@ describe("hub page keys through the band", () => {
     expect(h.manager.abort).not.toHaveBeenCalled();
     expect(h.frame().join("\n")).not.toContain("x again to STOP");
     h.press(ESC); // back to the roster
-    h.press("\r"); // T
     h.frame();
     h.press("k");
     expect(h.frame().join("\n")).toContain("x again to STOP");
@@ -911,15 +952,18 @@ describe("hub page keys through the band", () => {
     expect(h.manager.abort).toHaveBeenCalledWith("a1");
   });
 
-  it("esc on a transcript page pops one level even when no viewer is up", () => {
-    // Resumed on T with the agent's session gone: the page is still a level
-    // above the roster, so the quit keys pop it rather than closing the hub.
+  it("an agent without a session draws its identity block and the honest note", () => {
+    // Opened by id with the session gone: no roster row addresses the record,
+    // so the page's pin is what the pane shows — and it never crashes.
     const h = harness([makeRecord({ id: "a1", session: undefined })]);
     h.open({ agentId: "a1", popup: false });
-    expect(h.frame().join("\n")).toContain("transcript unavailable");
+    const out = h.frame().join("\n");
+    expect(out).toContain("Sleep then report 1");
+    expect(out).toContain("  ↳ —");
+    expect(out).toContain("transcript unavailable — agent is running");
+    expect(out).toContain("Esc close");
     h.press(ESC);
-    expect(h.settled()).toBe(false);
-    expect(h.frame().join("\n")).toContain("Esc close");
+    expect(h.settled()).toBe(true);
   });
 });
 
@@ -942,7 +986,7 @@ describe("P8 — the escalation resize keeps state", () => {
     h.press("\x1b[B"); // select beta
     expect(h.frame(120).join("\n")).toContain("❯ ● beta");
 
-    h.press("\r"); // T — the selected agent's transcript
+    // The roster page's pane is the selected agent's transcript — no descent.
     h.frame(120);
     // Scroll the viewer and expand in place, at a width that can show both.
     h.press("\x1b[5~"); // PgUp
@@ -961,12 +1005,15 @@ describe("P8 — the escalation resize keeps state", () => {
     h.tui.terminal.rows = 15;
     const stacked = h.frame(59);
     expect(stacked[0]).not.toContain("┬");
-    expect(stacked.join("\n")).toContain("Esc roster"); // still page T
+    // The stacked twin shows the roster (R is the page, the transcript is its
+    // pane) and stays on the same page.
+    expect(stacked.join("\n")).toContain("SUBAGENTS");
+    expect(stacked.join("\n")).toContain("Esc close");
     h.tui.terminal.columns = 60;
     h.tui.terminal.rows = 16;
     const wide = h.frame(60);
     expect(wide[0]).toContain("┬");
-    expect(wide.join("\n")).toContain("Esc roster");
+    expect(wide.join("\n")).toContain("Esc close");
     // The scrolled window survived the trip: the same rows open the pane.
     expect(bodyRows(wide).slice(0, 3)).toEqual(before);
 
@@ -976,10 +1023,9 @@ describe("P8 — the escalation resize keeps state", () => {
     expect(band(h.frame(120))).toContain("c copy diff");
     expect(band(h.frame(120))).not.toContain("m md");
 
-    // The roster selection survived the whole escalation.
-    h.press(ESC);
+    // The roster selection survived the whole escalation, and the hub's tick
+    // interval does not outlive the test.
     expect(h.frame(120).join("\n")).toContain("❯ ● beta");
-    // The hub's tick interval does not outlive the test.
     h.components.at(-1)?.dispose?.();
   });
 });

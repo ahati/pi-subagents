@@ -8,9 +8,9 @@
  *
  * - Table view: the page model's window — the roster master (grouped
  *   subagents + workflow runs, identity-only rows, `/` filters, `x` stops with
- *   a two-press arm) beside the current page's detail pane (roster preview,
- *   transcript, run overview, logs). `⏎` descends, `esc` ascends, `l` opens a
- *   log, `p` pauses/resumes, `c` copies.
+ *   a two-press arm) beside the current page's detail pane (the selected
+ *   agent's conversation or the run's overview, logs). `⏎` descends, `esc`
+ *   ascends, `l` opens a log, `p` pauses/resumes, `c` copies.
  * - Activity view (`2`, `⇥`): one line per agent describing what it is doing
  *   right now.
  *
@@ -130,18 +130,19 @@ type HubView = "table" | "activity";
  * other page is a nesting level inside the same frame, reached with `⏎` and
  * left with `esc`, each with the previous view demoted into the left pane.
  *
- * `T`/`WA` show a conversation, `SL`/`SAL` an agent's event log, `W` a run's
- * phases and agents and `L` the run's event log. `TD` is deliberately absent:
- * an expanded tool-call is a view state of the page it was opened on, never a
- * page of its own.
+ * `R` carries the selected item's detail itself: the agent's full conversation
+ * when the cursor is on a subagent row, the run's overview when it is on a
+ * workflow row. `WA` shows a run agent's conversation, `SL`/`SAL` an agent's
+ * event log, `W` a run's phases and agents and `L` the run's event log. `TD` is
+ * deliberately absent: an expanded tool-call is a view state of the page it
+ * was opened on, never a page of its own.
  */
-type HubPage = "R" | "T" | "SL" | "W" | "WA" | "SAL" | "L";
+type HubPage = "R" | "SL" | "W" | "WA" | "SAL" | "L";
 
 /** `esc`'s walk back from a page: one level up, never further. */
 const PAGE_PARENT: Record<HubPage, HubPage | undefined> = {
   R: undefined,
-  T: "R",
-  SL: "T",
+  SL: "R",
   W: "R",
   WA: "W",
   SAL: "WA",
@@ -161,13 +162,16 @@ interface PageFooterKeys {
   esc: string;
 }
 
-/** The footer's slots, per page — the spec's bottom-controls table, as data. */
+/**
+ * The footer's slots, per page — the spec's bottom-controls table, as data.
+ * **R**'s agent-row slots are the transcript ones: the roster page shows the
+ * conversation itself, so it carries the conversation's keys.
+ */
 const PAGE_KEYS: Record<HubPage, PageFooterKeys> = {
-  R: { actions: ["⏎ transcript", "l log", "p pause", "c copy"], hints: ["↑↓ select", "⇥ activity"], esc: "close" },
-  T: {
+  R: {
     actions: ["Enter steer", "x stop", "m md"],
     hints: ["PgUp/PgDn", "j scroll", "o expand", "l log", "p pause", "c copy"],
-    esc: "roster",
+    esc: "close",
   },
   SL: { actions: ["x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
   W: { actions: [], hints: ["↑↓ item", "⏎ agent", "l run log", "s stop run"], esc: "roster" },
@@ -456,7 +460,7 @@ interface HubResumeState {
   filterText: string;
   /** The current page — the reopen is a frame-size change, never a page change. */
   page?: HubPage | undefined;
-  /** The page's subject record (T/SL), kept across the loop back. */
+  /** The page's subject record (R's transcript, SL), kept across the loop back. */
   focusId?: string | undefined;
   /** The run a W/WA/L page is showing; kept across the loop back. */
   runId?: string | undefined;
@@ -464,8 +468,6 @@ interface HubResumeState {
   runAgentSel?: number;
   runItemSel?: number;
   logScroll?: number;
-  /** Where an SL page pops back to — `l` from the roster skips T. */
-  logBack?: HubPage;
 }
 
 export interface AgentHubInitial {
@@ -489,8 +491,9 @@ export interface AgentHubInitial {
 /**
  * Open the agent hub. **The default surface is the full-screen twin** — the
  * window at terminal size, starting on the roster. Given an `agentId` it opens
- * the popup twin (90 % × 70 %) on that agent's transcript page instead, which
- * is the fleet list's Enter-on-agent flow.
+ * the popup twin (90 % × 70 %) on the roster with that agent selected, which
+ * is the fleet list's Enter-on-agent flow: the roster page's right pane is
+ * that agent's conversation.
  *
  * pi resolves an overlay's geometry once, at creation, so `f` closes the
  * overlay and reopens it in the other frame; this loop owns that cycle and
@@ -515,8 +518,9 @@ export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: A
     view: "table",
     selected: Math.max(0, known ? hubEntryIndex(deps, target) : run ? hubRunIndex(deps, run.id) : 0),
     filterText: "",
-    // The popup opens on the agent's transcript page or the run's page.
-    page: known ? "T" : runSource ? "W" : "R",
+    // The popup opens on the roster with the agent selected, or on the run's
+    // page; both are the same two-pane window at a different frame size.
+    page: runSource ? "W" : "R",
     focusId: known ? target : undefined,
     runId: runSource ? (run?.id ?? runTarget) : undefined,
     // D8: the item cursor starts where the run is, on the current phase row.
@@ -597,8 +601,14 @@ export class AgentHub implements Component {
    * phases followed by agents. Separate from the state mark because the two
    * answer different questions — where the run is, and what `⏎` would open. */
   private runItemSel = 0;
-  /** For a log opened straight from the roster: what `esc` returns to. */
-  private logBack: HubPage = "T";
+  /**
+   * The stacked twin's pushed detail pane (40–59 cols): the roster has the
+   * full width there, so `⏎` pushes the selected item's pane as a page-sized
+   * view. A view state, not a nesting level — it exists only while stacked.
+   */
+  private detailOpen = false;
+  /** The width of the last frame — `⏎`'s stacked-twin decision reads it. */
+  private lastWidth: number | undefined;
   /** Log pages' scroll offset, reset when none is up. */
   private logScroll = 0;
   /**
@@ -640,13 +650,12 @@ export class AgentHub implements Component {
     this.runAgentSel = this.resume.runAgentSel ?? 0;
     this.runItemSel = this.resume.runItemSel ?? 0;
     this.logScroll = this.resume.logScroll ?? 0;
-    this.logBack = this.resume.logBack ?? "T";
-    // A window resumed on page T builds its viewer now, not on the first
-    // render: the page's keys are handled by delegating to the viewer, and
-    // input can arrive before the first frame.
-    if (this.page === "T" && this.focusId !== undefined) {
+    // A window resumed with an agent in the roster page's pane builds its
+    // viewer now, not on the first render: the page's keys are handled by
+    // delegating to the viewer, and input can arrive before the first frame.
+    if (this.page === "R" && this.focusId !== undefined) {
       const record = this.deps.manager.listAgents().find(a => a.id === this.focusId);
-      if (record) this.ensureViewer(record);
+      if (record?.session) this.ensureViewer(record);
     }
     this.tick = setInterval(() => {
       if (!this.disposed) this.tui.requestRender();
@@ -686,7 +695,7 @@ export class AgentHub implements Component {
    * the transcript underneath the overlay.
    */
   private applyWheel(delta: number): void {
-    if ((this.page === "T" || this.page === "WA") && this.viewer) {
+    if (this.transcriptPage() && this.viewer) {
       this.viewer.scrollBy(delta);
       this.requestRender();
       return;
@@ -800,19 +809,18 @@ export class AgentHub implements Component {
       return;
     }
 
-    // The transcript pages own their keys through the same viewer; `esc` walks
-    // back one level via the viewer's `onBack`, and the page keys arrive
+    // The transcript pages own their keys through the same viewer: **WA**, and
+    // **R** while a subagent row is selected — the roster page's right pane is
+    // that agent's conversation. `esc` walks back one level via the viewer's
+    // `onBack` (on R that is the window's own close); the page keys arrive
     // through its `onUnhandledKey` hook. ↑/↓ belong to the pane beside the
-    // transcript — the roster on T, the run's agent list on WA — so the right
-    // pane follows the cursor instead of the viewer scrolling under it. On T
-    // the walk crosses into WORKFLOWS: a run row has no transcript, so the
-    // page becomes the roster with the run selected (its overview and keys),
-    // and ⏎ opens the run. A page
-    // with no viewer (a record whose session is gone) still pops on the quit
-    // keys — a level up, never out of the window.
-    if (this.page === "T" || this.page === "WA") {
+    // transcript — the roster on R, the run's agent list on WA — so the right
+    // pane follows the cursor instead of the viewer scrolling under it. A page
+    // with no viewer (a record whose session is gone) still closes or pops on
+    // the quit keys.
+    if (this.transcriptPage()) {
       // While a steer message is being composed the input owns every key —
-      // ↑/↓ edit it, they must not move the roster under the writer.
+      // ↑/↓ edit it, they must not move the list under the writer.
       if (this.viewer?.composing) {
         this.viewer.handleInput(data);
         this.tui.requestRender();
@@ -824,20 +832,45 @@ export class AgentHub implements Component {
         else this.moveRosterSelection(direction);
         return;
       }
+      // R is the top page, so the window's own keys stay the roster's even
+      // with a conversation in the pane: the activity view, the filter and the
+      // close all keep working. `⏎` descends nowhere on an agent row — the
+      // transcript is already the pane; the stacked twin pushes it instead.
+      if (this.page === "R") {
+        // `esc` is the stacked twin's pop when its detail pane is pushed, the
+        // window's close otherwise.
+        if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.popPage(); return; }
+        if (matchesKey(data, "1")) { this.view = "table"; this.clampSelection(); this.requestRender(); return; }
+        if (matchesKey(data, "2")) { this.view = "activity"; this.requestRender(); return; }
+        if (matchesKey(data, "tab")) {
+          this.view = this.view === "table" ? "activity" : "table";
+          this.clampSelection();
+          this.requestRender();
+          return;
+        }
+        if (matchesKey(data, "/")) { this.stopArmed = false; this.openFilter(); return; }
+        // In the two-pane twin the viewer's own Enter (the steer composer)
+        // owns the key; the stacked twin has one column, so there `⏎` pushes
+        // the pane as a full-width page instead.
+        if (matchesKey(data, "enter") && this.stackedMode()) { this.enterPage(this.entries()); return; }
+      }
       if (this.viewer) {
         this.viewer.handleInput(data);
         this.tui.requestRender();
         return;
       }
-      if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
-        this.popPage();
-        return;
+      if (this.page === "WA") {
+        if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
+          this.popPage();
+          return;
+        }
+        // A run agent whose record has no viewer left still takes the page's
+        // run-agent keys, gated exactly like the viewer-backed path — an ungated
+        // copy would let `s` skip a done agent.
+        if (matchesKey(data, "s")) { this.runAgentKey("skip"); return; }
+        if (matchesKey(data, "r")) { this.runAgentKey("retry"); return; }
       }
-      // A run agent whose record has no viewer left still takes the page's
-      // run-agent keys, gated exactly like the viewer-backed path — an ungated
-      // copy would let `s` skip a done agent.
-      if (this.page === "WA" && matchesKey(data, "s")) { this.runAgentKey("skip"); return; }
-      if (this.page === "WA" && matchesKey(data, "r")) { this.runAgentKey("retry"); return; }
+      // R without a viewer falls through to the roster's own per-row keys.
     }
 
     // The log pages (SL/SAL/L): scroll, copy, pause, stop, back.
@@ -1001,6 +1034,30 @@ export class AgentHub implements Component {
     this.tui.requestRender();
   }
 
+  /**
+   * Whether the right pane is a conversation: **WA**, or **R** whenever the
+   * cursor is not on a run row — the roster page shows the selected agent's
+   * transcript directly, so it owns the transcript's keys and its band.
+   */
+  private transcriptPage(): boolean {
+    return this.page === "WA" || (this.page === "R" && !this.runRowSelected());
+  }
+
+  /** **R**'s run-row selection: the pane is the run's overview, not a transcript. */
+  private runRowSelected(): boolean {
+    return this.page === "R" && this.entries()[this.selected]?.kind === "workflow";
+  }
+
+  /**
+   * The single-pane twin (40–59 cols): the roster has the full width, so `⏎`
+   * pushes the selected item's pane instead of showing it beside the list. The
+   * last rendered width is the frame's real one — a popup is narrower than the
+   * terminal it hangs in, so the terminal's columns alone would misjudge it.
+   */
+  private stackedMode(): boolean {
+    return (this.lastWidth ?? this.tui.terminal?.columns ?? Infinity) < TWO_PANE_MIN_WIDTH;
+  }
+
   /** Write UI state back to the shared resume object for a reopen with the other frame size. */
   private syncResume(): void {
     this.resume.view = this.view;
@@ -1012,7 +1069,6 @@ export class AgentHub implements Component {
     this.resume.runAgentSel = this.runAgentSel;
     this.resume.runItemSel = this.runItemSel;
     this.resume.logScroll = this.logScroll;
-    this.resume.logBack = this.logBack;
   }
 
   private close(): void {
@@ -1056,36 +1112,23 @@ export class AgentHub implements Component {
   }
 
   /**
-   * ↑/↓ on **T**: move the roster's selection and let the right pane follow —
-   * the old popup's `↑↓ agent` expressed in the page model. Run rows are
-   * skipped (only agents have a transcript) and the move clamps at the ends;
-   * the list is visible next to the user, so wrapping would only break the
-   * spatial model. Staying put is a no-op, so scroll position survives a
-   * stray keypress at the end of the roster.
+   * ↑/↓ on **R**: move the roster's selection and let the right pane follow —
+   * the conversation for an agent row, the run overview for a run row. The
+   * move clamps at the ends; the list is visible next to the user, so wrapping
+   * would only break the spatial model. Staying put is a no-op, so scroll
+   * position survives a stray keypress at the end of the roster.
    */
   private moveRosterSelection(direction: 1 | -1): void {
     // Steps one ROW at a time, group headers aside — the cursor crosses from
-    // SUBAGENTS into WORKFLOWS seamlessly, exactly as it does on the roster
-    // page. The caller decides what the new selection means for the page.
+    // SUBAGENTS into WORKFLOWS seamlessly. The pane follows the cursor: an
+    // agent row sets the page's subject, a run row clears it (its pane is the
+    // run's overview, and ⏎ opens it).
     const items = this.entries();
     const next = Math.min(items.length - 1, Math.max(0, this.selected + direction));
     if (next === this.selected) return;
     this.selected = next;
     const entry = items[next];
-    const agent = entry?.kind === "agent"
-      ? (this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record)
-      : undefined;
-    if (agent?.session) {
-      // A transcript subject: the right pane follows the cursor, the page
-      // stays on the conversation.
-      this.focusId = agent.id;
-    } else {
-      // A run row (or an agent with no session left) has no transcript —
-      // the roster page is what can show it, with the run's overview and
-      // its own footer keys; ⏎ descends from there.
-      this.page = "R";
-      this.focusId = undefined;
-    }
+    this.focusId = entry?.kind === "agent" ? entry.record.id : undefined;
     this.stopArmed = false;
     this.requestRender();
   }
@@ -1140,6 +1183,7 @@ export class AgentHub implements Component {
   // ---- Rendering ----
 
   render(width: number): string[] {
+    this.lastWidth = width;
     const terminalRows = this.tui.terminal?.rows ?? HUB_FALLBACK_ROWS;
     if (width < HUB_MIN_WIDTH || terminalRows < HUB_MIN_ROWS) {
       this.refuseSize();
@@ -1183,6 +1227,9 @@ export class AgentHub implements Component {
    */
   private renderHubPage(width: number, terminalRows: number): string[] {
     const twoPane = width >= TWO_PANE_MIN_WIDTH;
+    // The stacked twin's pushed pane is a view state of the roster page; the
+    // two-pane frame already shows the transcript beside the roster.
+    if (twoPane) this.detailOpen = false;
     const header: WindowRow[] = [];
     if (this.filterInput || this.filterText) {
       header.push({ kind: "full", cells: [{ text: this.filterLine(windowInnerWidth(width)) }] });
@@ -1245,9 +1292,9 @@ export class AgentHub implements Component {
    * first — so the band never cuts one in half.
    */
   private pageFooter(width: number): string {
-    const keys = this.page === "R" && this.entries()[this.selected]?.kind === "workflow" ? R_RUN_KEYS : PAGE_KEYS[this.page];
+    const keys = this.page === "R" && this.runRowSelected() ? R_RUN_KEYS : PAGE_KEYS[this.page];
     const viewer = this.viewerBand();
-    const expanded = (this.page === "T" || this.page === "WA") && (viewer?.expanded ?? false);
+    const expanded = this.transcriptPage() && (viewer?.expanded ?? false);
     const actions = expanded
       ? [...keys.actions.filter(action => action !== TD_REPLACED_ACTION), ...TD_ACTIONS]
       : [...keys.actions];
@@ -1284,7 +1331,9 @@ export class AgentHub implements Component {
     const right: FooterHint[] = [
       ...hints.map((text): FooterHint => ({ text, group: "hint" })),
       { text: `f ${this.popup ? "full" : "popup"}`, group: "hint" },
-      { text: `Esc ${keys.esc}`, group: "hint", pinned: true },
+      // The stacked twin's pushed pane is a view state above the roster, so
+      // its escape anchor names the roster it pops back to.
+      { text: `Esc ${this.detailOpen ? "roster" : keys.esc}`, group: "hint", pinned: true },
     ];
     const band = footerBand({ width, left, right });
     // The armed stop keeps the error color the old one-line footer gave it.
@@ -1293,16 +1342,18 @@ export class AgentHub implements Component {
 
   /** The embedded viewer's band state, when a page is showing one. */
   private viewerBand(): { text: string; expanded: boolean; stopArmed: boolean } | undefined {
-    return this.page === "T" || this.page === "WA" ? this.viewer?.bandReadout() : undefined;
+    return this.transcriptPage() ? this.viewer?.bandReadout() : undefined;
   }
 
   /**
-   * The band's readout — the one hint that is data, not a key. T/WA read the
-   * embedded viewer's transcript; the log pages the log they just windowed;
-   * **W** the run's counters; **R** has none (its left slot is actions).
+   * The band's readout — the one hint that is data, not a key. The pages whose
+   * pane is a transcript (R's agent selection, WA) read the embedded viewer's
+   * line count and scroll percent; the log pages the log they just windowed;
+   * **W** the run's counters. R's run-row selection has none — its left slot is
+   * actions.
    */
   private pageReadout(): string | undefined {
-    if (this.page === "T" || this.page === "WA") return this.viewer?.bandReadout().text || undefined;
+    if (this.transcriptPage()) return this.viewer?.bandReadout().text || undefined;
     if (this.page === "SL" || this.page === "SAL" || this.page === "L") {
       const log = this.logReadout;
       return log ? `${log.lines} lines · ${log.percent}%` : undefined;
@@ -1415,9 +1466,14 @@ export class AgentHub implements Component {
   /** The right pane: the selected item's detail, per page. Identity is composed in front of it. */
   private rightPaneLines(width: number, rows: number): PaneRow[] {
     switch (this.page) {
-      case "R":
-        return this.previewLines(width, rows);
-      case "T":
+      case "R": {
+        // The roster page carries its own detail: the selected agent's
+        // conversation, or the run's overview for a workflow row.
+        const entry = this.entries()[this.selected];
+        return entry?.kind === "workflow"
+          ? this.runPreviewLines(entry.workflow, width, rows)
+          : this.transcriptLines(width, rows);
+      }
       case "WA":
         return this.transcriptLines(width, rows);
       case "SL":
@@ -1428,21 +1484,6 @@ export class AgentHub implements Component {
       case "L":
         return this.runLogPageLines(width, rows);
     }
-  }
-
-  /** **R**'s detail: the agent-log preview for a subagent row, the run overview for a workflow row. */
-  private previewLines(width: number, rows: number): PaneRow[] {
-    const entry = this.entries()[this.selected];
-    if (entry?.kind === "workflow") return this.runPreviewLines(entry.workflow, width, rows);
-    const record = this.rosterRecordForCurrent();
-    if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
-    return this.identityPane(
-      this.agentIdentity(record, width),
-      // Infinity, not LOG_TAIL: the preview must never match the stored
-      // offset, so its render cannot move the log page's window.
-      this.agentLogLines(width, this.bodyRows(rows, true), Infinity),
-      this.noteLine("(⏎ opens the full transcript)", width),
-    );
   }
 
   /**
@@ -1472,16 +1513,27 @@ export class AgentHub implements Component {
   }
 
   /**
-   * The transcript pages' right pane: the selected agent's full conversation,
-   * through the same `ConversationViewer` the popup shows — user, thinking,
-   * assistant, tool-call, diff and streaming blocks, with `o`/`ctrl+o`
-   * expanding a tool-call in place (a view state, never a page).
+   * The transcript pages' right pane (**R** with a subagent row, **WA**): the
+   * selected agent's full conversation, through the same `ConversationViewer`
+   * the popup shows — user, thinking, assistant, tool-call, diff and streaming
+   * blocks, with `o`/`ctrl+o` expanding a tool-call in place (a view state,
+   * never a page). An agent whose session is gone still gets its identity
+   * block: the pane never draws the previous subject's body under the new
+   * subject's name.
    */
   private transcriptLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     if (!record.session) {
-      return [clampLine([{ text: this.theme.fg("dim", `transcript unavailable — agent is ${record.status}`) }], width)];
+      // No conversation to draw: drop a viewer built for another subject, so
+      // the band cannot report the previous agent's readout.
+      this.viewer?.dispose();
+      this.viewer = undefined;
+      this.viewerId = undefined;
+      return this.identityPane(
+        this.agentIdentity(record, width),
+        [this.noteLine(`transcript unavailable — agent is ${record.status}`, width)],
+      );
     }
     const viewer = this.ensureViewer(record);
     if (!viewer) return [];
@@ -1754,11 +1806,14 @@ export class AgentHub implements Component {
 
   /**
    * The stacked single-pane page (40–59 cols): the current page's own content
-   * at full width. `⏎` pushes the detail page, `esc` pops it — the pane model
-   * with one column.
+   * at full width. On the roster `⏎` pushes the selected item's pane (a view
+   * state of the page, not a page: `esc` pops it); the pages below the roster
+   * are their right pane by definition.
    */
   private stackedLines(width: number, rows: number): WindowRow[] {
-    const lines: PaneRow[] = this.page === "R" ? this.rosterLines(width, rows) : this.rightPaneLines(width, rows);
+    const lines: PaneRow[] = this.page === "R"
+      ? (this.detailOpen ? this.rightPaneLines(width, rows) : this.rosterLines(width, rows))
+      : this.rightPaneLines(width, rows);
     const content = lines.length > 0 ? lines : this.leftPaneLines(width, rows);
     // Fill the body like the two-pane loop does: a short pane would leave
     // stale rows visible below the bottom edge.
@@ -1897,13 +1952,12 @@ export class AgentHub implements Component {
     return false;
   }
 
-  /** `⏎` at the page level: `R` descends into the selected item, `W` into its agent. */
+  /** `⏎` at the page level: `R` opens the selected run, `W` its agent page. */
   private enterPage(items: HubEntry[]): void {
     this.stopArmed = false;
     if (this.page === "R") {
       const entry = items[this.selected];
-      if (!entry) return;
-      if (entry.kind === "workflow") {
+      if (entry?.kind === "workflow") {
         this.runId = entry.workflow.id;
         this.runAgentSel = 0;
         // D8: both marks start where the run is — the state mark on the
@@ -1913,14 +1967,13 @@ export class AgentHub implements Component {
         this.requestRender();
         return;
       }
-      const record = this.rosterRecordForCurrent();
-      if (!record?.session) {
-        this.deps.notify?.(`Agent is ${record?.status ?? "gone"} — no session available.`, "info");
-        return;
+      // An agent row descends nowhere: the roster page's pane is already the
+      // conversation. The stacked twin has one column, so there `⏎` pushes
+      // that pane as a full-width page — a view state `esc` pops.
+      if (this.stackedMode() && (entry?.kind === "agent" || this.focusedRecord())) {
+        this.detailOpen = true;
+        this.requestRender();
       }
-      this.focusId = record.id;
-      this.page = "T";
-      this.requestRender();
       return;
     }
     if (this.page === "W") {
@@ -1939,18 +1992,23 @@ export class AgentHub implements Component {
     }
   }
 
-  /** `esc`: exactly one nesting level up. */
+  /** `esc`: exactly one nesting level up — or out of the stacked twin's pushed pane. */
   private popPage(): void {
+    if (this.page === "R" && this.detailOpen) {
+      this.detailOpen = false;
+      this.stopArmed = false;
+      this.requestRender();
+      return;
+    }
     if (this.page === "R") { this.close(); return; }
     const from = this.page;
-    this.page = from === "SL" && this.logBack === "R" ? "R" : PAGE_PARENT[from]!;
+    this.page = PAGE_PARENT[from]!;
     this.logScroll = 0;
     this.stopArmed = false;
     // Back on the roster the pointer is what the right pane follows; deeper, the
     // pinned record stays the page's subject.
-    if (this.page === "R" || this.page === "T") {
-      const record = this.page === "R" ? this.rosterRecordForCurrent() : this.focusedRecord();
-      this.focusId = record?.id;
+    if (this.page === "R") {
+      this.focusId = this.rosterRecordForCurrent()?.id;
     }
     if (this.page === "W") {
       // The item cursor follows the agent WA was showing, so the ❯ the run
@@ -1963,8 +2021,15 @@ export class AgentHub implements Component {
   /** The record a page is showing — the page's focus, whatever the roster cursor does. */
   private focusedRecord(): AgentRecord | undefined {
     const fresh = (id: string | undefined) => (id === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === id));
-    if (this.page === "R") return this.rosterRecordForCurrent();
-    if (this.page === "T" || this.page === "SL") return fresh(this.focusId);
+    if (this.page === "R") {
+      // The roster cursor is the pane's subject when it addresses an agent; a
+      // swept record the window was opened on by id is all that is left when
+      // no row does.
+      const entry = this.entries()[this.selected];
+      if (entry?.kind === "agent") return fresh(entry.record.id) ?? entry.record;
+      return fresh(this.focusId);
+    }
+    if (this.page === "SL") return fresh(this.focusId);
     if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
     // W / L: the run's most recently active agent — the subject the run pages'
     // copy and pause keys act on (nothing here is a page's own identity).
@@ -2067,16 +2132,14 @@ export class AgentHub implements Component {
     return recordId === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === recordId);
   }
 
-  /** `l`: to the log page one level below the current one (R skips T). */
+  /** `l`: to the log page one level below the current one (an agent row opens SL). */
   private pushLogPage(): void {
     if (this.page === "R") {
-      const record = this.rosterRecordForCurrent();
+      // A run row has no agent log — its detail is the run page, opened with ⏎.
+      if (!this.transcriptPage()) return;
+      const record = this.focusedRecord();
       if (!record) return;
       this.focusId = record.id;
-      this.logBack = "R";
-      this.page = "SL";
-    } else if (this.page === "T") {
-      this.logBack = "T";
       this.page = "SL";
     } else if (this.page === "WA") {
       this.page = "SAL";
@@ -2104,10 +2167,11 @@ export class AgentHub implements Component {
   }
 
   /**
-   * `x` on a page showing one agent — T and WA (the transcript pages), SL and
-   * SAL (the logs): two-press, exactly like the roster's `stopSelected` — the
-   * first press arms and the band says `x again to STOP`, the second aborts.
-   * Any other key disarms (see `pageUnhandledKey` and `handleLogKey`).
+   * `x` on a page showing one agent — **R** and **WA** (the transcript pages),
+   * **SL** and **SAL** (the logs): two-press, exactly like the roster's
+   * `stopSelected` — the first press arms and the band says `x again to STOP`,
+   * the second aborts. Any other key disarms (see `pageUnhandledKey` and
+   * `handleLogKey`).
    */
   private stopFocused(): void {
     const record = this.focusedRecord();
