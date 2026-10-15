@@ -1,7 +1,7 @@
 /**
  * One window, two surfaces.
  *
- * The agent hub's chat pane and the workflow inspector draw the same window:
+ * The agent hub's pages and the workflow inspector draw the same window:
  * the same split bars, the same tee columns, the same row shape. These are the
  * invariants that make that true — and the ones that failed while the two
  * surfaces still did their own column math (the inspector's divider sat two

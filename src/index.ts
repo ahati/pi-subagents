@@ -5636,7 +5636,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
-    // The inspector's log level: the same viewer knobs the hub's chat pane
+    // The inspector's log level: the same viewer knobs the hub's transcript pages
     // gets, so an agent's live conversation steers, aborts and renders
     // identically inside the workflow window.
     embeddedLog: {

@@ -1408,7 +1408,7 @@ export class WorkflowDialog implements Component {
             return true;
           }
           // `f` flips windowed ↔ full-screen, `c` copies the shown agent's
-          // settled result and `p` pauses/resumes it — the hub chat pane's
+          // settled result and `p` pauses/resumes it — the hub pages'
           // extra keys. The composer check inside the viewer runs first, so a
           // steering message still receives its f's, c's and p's.
           if (matchesKey(data, "f")) {
@@ -1480,7 +1480,7 @@ export class WorkflowDialog implements Component {
 
   /**
    * `p` in the log: pause the agent being viewed if it is active, resume it if
-   * paused — the hub chat pane's same key and strings. Settled agents stay
+   * paused — the hub pages' same key and strings. Settled agents stay
    * put: this pauses one child, never the run.
    */
   private pauseResumeLogAgent(): void {

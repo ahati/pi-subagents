@@ -163,7 +163,7 @@ export async function showWorkflowDialog(
             },
           },
           // The third level: the same viewer knobs the hub gets, so the
-          // embedded log steers, aborts and copies like the hub's chat pane.
+          // embedded log steers, aborts and copies like the hub's transcript pages.
           0,
           deps.embeddedLog,
           { popup, resume },

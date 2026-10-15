@@ -442,6 +442,8 @@ interface HubResumeState {
   runAgentSel?: number;
   runItemSel?: number;
   logScroll?: number;
+  /** Where an SL page pops back to — `l` from the roster skips T. */
+  logBack?: HubPage;
 }
 
 export interface AgentHubInitial {
@@ -515,6 +517,8 @@ export class AgentHub implements Component {
   private stopArmed = false;
   /** The embedded conversation viewer while a transcript page is up. */
   private viewer: ConversationViewer | undefined;
+  /** The record id `viewer` was built for — retargets it when focus moves. */
+  private viewerId: string | undefined;
   /**
    * The rows the current page's right pane budgeted for its viewer body this
    * frame. The embedded viewer reads it through its `viewportRows` option, so
@@ -578,6 +582,7 @@ export class AgentHub implements Component {
     this.runAgentSel = this.resume.runAgentSel ?? 0;
     this.runItemSel = this.resume.runItemSel ?? 0;
     this.logScroll = this.resume.logScroll ?? 0;
+    this.logBack = this.resume.logBack ?? "T";
     // A window resumed on page T builds its viewer now, not on the first
     // render: the page's keys are handled by delegating to the viewer, and
     // input can arrive before the first frame.
@@ -646,6 +651,7 @@ export class AgentHub implements Component {
     clearInterval(this.tick);
     this.viewer?.dispose();
     this.viewer = undefined;
+    this.viewerId = undefined;
     // Hand the wheel back to the terminal (native scrollback, text selection).
     if (this.mouseCaptured) {
       disableTerminalMouse(this.tui as unknown as MouseTerminalHost);
@@ -744,6 +750,13 @@ export class AgentHub implements Component {
     // with no viewer (a record whose session is gone) still pops on the quit
     // keys — a level up, never out of the window.
     if (this.page === "T" || this.page === "WA") {
+      // While a steer message is being composed the input owns every key —
+      // ↑/↓ edit it, they must not move the roster under the writer.
+      if (this.viewer?.composing) {
+        this.viewer.handleInput(data);
+        this.tui.requestRender();
+        return;
+      }
       if (matchesKey(data, "down") || matchesKey(data, "up")) {
         const direction = matchesKey(data, "down") ? 1 : -1;
         if (this.page === "WA") this.moveRunSelection(direction);
@@ -869,6 +882,7 @@ export class AgentHub implements Component {
     this.resume.runAgentSel = this.runAgentSel;
     this.resume.runItemSel = this.runItemSel;
     this.resume.logScroll = this.logScroll;
+    this.resume.logBack = this.logBack;
   }
 
   private close(): void {
@@ -1156,13 +1170,14 @@ export class AgentHub implements Component {
 
   /** The legacy activity list, still reachable with `2` — the roster's sibling view. */
   private renderActivityWindow(width: number, terminalRows: number): string[] {
-    // Its own frame spends the same four rows around the list (title, two dim
-    // rules, footer), so the shared budget applies unchanged — and the twin's
-    // ceiling keeps the footer inside the popup overlay.
+    // Its chrome spends SIX rows around the list: the frame's two edges plus
+    // title, two dim rules and the one-list footer — two more than a page's
+    // band layout (HUB_CHROME_ROWS), so the budget must pay for them or the
+    // window draws past the twin's ceiling and pi clips the bottom.
     const rows = paneBodyHeight({
       terminalRows,
       viewportPct: this.viewportPct(),
-      chromeRows: HUB_CHROME_ROWS,
+      chromeRows: HUB_CHROME_ROWS + 2,
       min: MIN_BODY_ROWS,
       fallbackRows: HUB_FALLBACK_ROWS - HUB_CHROME_ROWS,
     });
@@ -1579,10 +1594,14 @@ export class AgentHub implements Component {
 
   /** The viewer for `record`, rebuilt only when the target changes. */
   private ensureViewer(record: AgentRecord): ConversationViewer | undefined {
-    if (this.viewer && this.focusId === record.id) return this.viewer;
+    // `focusId` tracks the roster's selection; the viewer is cached against
+    // the record it was BUILT for — `focusedRecord()` derives from focusId,
+    // so comparing against focusId would degenerate to `if (this.viewer)` and
+    // never retarget when the selection moves (P9 review blocker).
+    if (this.viewer && this.viewerId === record.id) return this.viewer;
     if (!record.session) return undefined;
     this.viewer?.dispose();
-    this.focusId = record.id;
+    this.viewerId = record.id;
     this.viewer = new ConversationViewer(
       this.tui,
       record.session,

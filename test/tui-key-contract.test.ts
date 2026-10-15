@@ -2,7 +2,7 @@
  * Contract pins for the key layer the whole UI stands on (pi-tui 1.1.0).
  *
  * Every surface in this fork — the FleetView bar's input listener, the agent
- * hub's two-pane chat, the conversation viewer's bindings — matches raw byte
+ * hub's transcript pages, the conversation viewer's bindings — matches raw byte
  * sequences by name via `matchesKey`, and filters kitty key-release events via
  * `isKeyRelease`. The unit tests for those surfaces feed `handleInput`
  * directly, so a pi-tui upgrade that changes delivery semantics (a renamed

@@ -330,7 +330,7 @@ export class ConversationViewer implements Component, Focusable {
   /**
    * The fullscreen observer (scrollbar, mouse, jump marker, clickable footer)
    * is the STANDALONE viewer's fullscreen-mode shape. An embedded viewer —
-   * the hub's chat pane — renders rows inside its host's frame no matter what
+   * the hub's transcript pages — renders rows inside its host's frame no matter what
    * mode pi runs in, so `options` opts out.
    */
   private readonly fullscreen: boolean;
@@ -360,6 +360,11 @@ export class ConversationViewer implements Component, Focusable {
   private keys: ViewerKeys;
   /** Steering composer — present while the user is typing a message to the agent. */
   private composer: Input | undefined;
+
+  /** Whether the steering composer is open — its keys must not be stolen. */
+  get composing(): boolean {
+    return this.composer !== undefined;
+  }
   /** Resolved once: pi's Markdown theme is fixed for the life of the process. */
   private readonly markdownTheme: MarkdownTheme;
   /** Set by the `m` key. Wins over the setting so `m` works without a persist hook. */

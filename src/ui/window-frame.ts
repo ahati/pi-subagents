@@ -1,6 +1,6 @@
 /**
  * window-frame.ts — the window chrome two overlays draw: the agent hub
- * (`agent-hub.ts`, roster and chat pane) and the workflow inspector
+ * (`agent-hub.ts`, the unified Agents & Workflows window) and the workflow
  * (`workflow-dialog.ts`, all three levels).
  *
  * Both draw the same window: a `╭───╮` / `╰───╯` box, content rows
@@ -228,7 +228,7 @@ function titledRuleCell(width: number, title: string, box: PaneBox, ellipsis: st
  * the bars stay in the columns the rows above and below put them in. The tee
  * where the cells meet is `┬` when either cell is titled and the pane `│` when
  * neither is — the shape the inspector draws at every level, and the shape the
- * hub's chat pane titles its master cell in.
+ * hub window titles its master cell in.
  */
 export function paneRule(options: {
   leftWidth: number;
@@ -373,7 +373,7 @@ export interface PaneGeometry {
 
 /**
  * The master/detail split at `width`. Both surfaces take their pane columns
- * from here — the hub's chat pane and the inspector's levels alike — so the
+ * from here — the hub's pages and the inspector's levels alike — so the
  * divider stays in one column across every window either one draws.
  *
  * The master cell gives way on a narrow terminal the way {@link leftPaneWidth}

@@ -14,6 +14,13 @@ function plain(line: string): string {
   return line.replace(/\u001b\[[0-9;]*m/g, "").replace(/<\/?[a-zA-Z]+>|\*/g, "");
 }
 
+function sessionOf(...messages: string[]): AgentRecord["session"] {
+  return {
+    subscribe: () => () => {},
+    messages: messages.map(content => ({ role: "user", content })),
+  } as AgentRecord["session"];
+}
+
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "a1",
@@ -309,6 +316,35 @@ describe("agent hub page T — the roster beside the transcript", () => {
     expect(frame.slice(1, -1).some(l => l.includes("╭") || l.includes("╰"))).toBe(false);
   });
 
+  it("↓ retargets the embedded viewer: the body follows the selection, not just the identity", async () => {
+    // Every other fixture shares an empty session, so a viewer that never
+    // retargets would pass every other pin — only distinct bodies can see it.
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000, session: sessionOf("ALPHA-BODY") }),
+      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000, session: sessionOf("BETA-BODY") }),
+    ]);
+    h.open({ agentId: "a1" });
+    expect(h.frame().join("\n")).toContain("ALPHA-BODY");
+    h.press(DOWN);
+    const out = h.frame().join("\n");
+    expect(out).toContain("beta task");
+    expect(out).toContain("BETA-BODY");
+    expect(out).not.toContain("ALPHA-BODY");
+  });
+
+  it("the steering composer owns ↑/↓ while it is open — the roster must not move under the writer", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
+    ]);
+    h.open({ agentId: "a1" });
+    h.press("\r"); // open the composer
+    h.press(DOWN); // an edit key for the message, not a selection move
+    const out = h.frame().join("\n");
+    expect(out).toContain("alpha task");
+    expect(out).not.toContain("❯ ● beta");
+  });
+
   it("↓ moves to the next agent's conversation, ↑ back, clamped at the ends", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
@@ -345,7 +381,7 @@ describe("agent hub page T — the roster beside the transcript", () => {
     expect(h.frame().join("\n")).toContain("beta task");
   });
 
-  it("ctrl+o toggles rich tool expansion in the chat pane — legacy and kitty encodings", () => {
+  it("ctrl+o toggles rich tool expansion on the transcript page — legacy and kitty encodings", () => {
     // D3 regression guard: the expand key must survive the hub's own key
     // funnel (mouse → filter → chat → viewer) in both the legacy byte (\x0f)
     // and the kitty-protocol encoding (\x1b[111;5u) — the fleet-bar fix
@@ -516,6 +552,18 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(await opened.promise).toBeUndefined();
   });
 
+  it("the popup twin budgets the activity view too: 28 rows on a 40-row terminal", async () => {
+    const h = harness([makeRecord({ id: "a1", status: "running" })]);
+    h.open();
+    h.press("2"); // the activity view, reachable from the roster
+    h.press("f"); // into the popup twin — still the activity view
+    await h.flush();
+    // 70 % of 40 is 28 — the frame's bottom edge and footer must land inside
+    // the overlay, not be clipped off it (chrome is 6 rows here, not 4).
+    expect(h.frame()).toHaveLength(28);
+    expect(h.frame().at(-1)).toMatch(/^╰/);
+  });
+
   it("f from the roster is a frame-size change only — the roster page stays up", async () => {
     const h = harness([makeRecord({ id: "a1", description: "the one" })]);
     h.open(); // full-screen roster
@@ -561,6 +609,19 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     h.press("f");
     await h.flush();
     expect(h.frame().join("\n")).toContain("waiting for first message");
+  });
+
+  it("a log page opened from the roster pops back to the roster after an f toggle", async () => {
+    const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
+    h.open(); // full-screen roster
+    h.press("l"); // `l` on a roster row skips T: SL with logBack = R
+    expect(h.frame().join("\n")).toContain("Esc back");
+    h.press("f"); // frame-size change mid-log — logBack must survive the reopen
+    await h.flush();
+    h.press(ESC); // SL pops to the roster, not to T
+    const out = h.frame().join("\n");
+    expect(out).toContain("(⏎ opens the full transcript)");
+    expect(out).not.toContain("[User]");
   });
 
   it("carries selection and filter across the toggle", async () => {
@@ -671,7 +732,7 @@ describe("agent hub roster", () => {
     expect(resumeAgent).not.toHaveBeenCalled();
   });
 
-  it("p in the chat pane pauses the agent being viewed", () => {
+  it("p on the transcript page pauses the agent being viewed", () => {
     const pauseAgent = vi.fn(() => undefined);
     const notify = vi.fn();
     const h = harness([makeRecord({ id: "a1", status: "running" })], { pauseAgent, notify });

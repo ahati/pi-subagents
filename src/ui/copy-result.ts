@@ -2,7 +2,7 @@
  * copy-result.ts — copy an agent's settled result to the system clipboard.
  *
  * One implementation for both surfaces that offer the key: the agent hub's
- * chat pane and the workflow inspector's log level. Only a settled agent has a
+ * hub transcript pages and the workflow inspector's log level. Only a settled agent has a
  * result worth pasting — a running one is still writing it — so the function
  * explains itself instead: it tells the caller why nothing was copied rather
  * than copying a half-written response or failing silently.
