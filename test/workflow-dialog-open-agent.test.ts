@@ -166,14 +166,18 @@ describe("the inspector opens a workflow agent's conversation", () => {
     dialog.handleInput?.("c");
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
 
-    // The fork's entry points open the two-pane hub, not a bare viewer — even
-    // in pi's fullscreen mode. Its chat viewer is embedded (it draws rows
-    // inside the hub's own frame), so it carries no fullscreen scrollbar rail;
-    // pi's fullscreenScrollbar preference would only matter to a standalone
-    // viewer open.
-    const hub = ui.overlays[1].instance as unknown as { chatView?: { fullscreen?: boolean } };
-    await vi.waitFor(() => expect(hub.chatView).toBeDefined());
-    expect(hub.chatView?.fullscreen).toBe(false);
+    // The fork's entry points open the hub window on its transcript page, not
+    // a bare viewer — even in pi's fullscreen mode. The viewer is embedded: it
+    // draws body rows inside the hub's own frame, with no fullscreen scrollbar
+    // rail; pi's fullscreenScrollbar preference would only matter to a
+    // standalone viewer open.
+    const hub = ui.overlays[1].instance;
+    const frame = hub.render?.(120) ?? [];
+    const rendered = frame.join("\n");
+    expect(rendered).toContain(" Agents & Workflows "); // the hub's own frame
+    expect(frame[0]?.startsWith("╭")).toBe(true);
+    expect(frame[0]).toContain("┬"); // the roster master beside the transcript
+    expect(rendered).toContain("row-99"); // the child's conversation, embedded
 
     ui.overlays[1].close();
     ui.overlays[0].close();

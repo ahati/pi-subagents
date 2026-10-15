@@ -6,14 +6,17 @@ the shared window-layout module. Audience: contributors changing
 `src/ui/agent-hub.ts`, `src/ui/workflow-dialog.ts`, or `src/ui/window-frame.ts`.
 
 Status: **spec**. This spec covers the hub window and its `f` twins — the same
-pages at either frame size. The popup chat twin (`renderChat`) is a separate
-window, not an `f` twin: it keeps its own ACTIVE/COMPLETED/FAILED grouping and
-its own frame, and is restyled separately. The visual language is the one the
-hub's popup chat pane
-established — narrow master list, detail pane opening with a two-line header
-block, transcript blocks in the shared viewer's grammar, one full-width footer
-band. The implementation may land in phases (narrow master → header blocks → footer band → strip
-removal → test repins); where code and this spec
+pages at either frame size. The popup twin is an `f` twin of the hub: the same
+roster master, the same page, the same keys, at 90 % × 70 % — `f` changes the
+frame size and nothing else. This supersedes the earlier scope note (plan D3)
+that treated the popup chat (`renderChat`) as a separate window with its own
+ACTIVE/COMPLETED/FAILED grouping: user direction after the P8 restyle retired
+that window, and the popup is the hub's twin now. The visual language is the
+one the popup chat pane established — narrow master list, detail pane opening
+with a two-line header block, transcript blocks in the shared viewer's grammar,
+one full-width footer band. The implementation may land in phases (narrow
+master → header blocks → footer band → strip removal → test repins → popup
+unification); where code and this spec
 disagree, either the code is behind (keep working) or a deliberate deviation
 was accepted (update this file in the same change). All frames are drawn at 120
 columns; `f` twins redraw the same pages at terminal size.
@@ -52,7 +55,7 @@ layout arithmetic in a surface module.
   columns a split row is `│ <18> │ <95> │`. `hubPaneGeometry` (the half split)
   is retired — it existed to fit the description/stats columns the narrow
   roster no longer carries; the proportional `paneGeometry` keeps its cap where
-  its bytes are pinned: the inspector and the popup chat twin.
+  its bytes are pinned: the inspector.
 - **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
   names both kinds and exactly fills the master cell, and the `┬` is where the
   divider lands. The bottom edge mirrors it plain; the divider's `┴` sits in
@@ -68,10 +71,13 @@ layout arithmetic in a surface module.
   3. the **band rule** — a full-width rule above the footer. The panes end at
      it; the footer row beneath spans the window. The divider column continues
      down to the band rule's `┴`, and the bottom edge below it is plain.
-- **Twins** — `f` swaps the popup twin (90 % viewport) and the fullscreen twin
-  (100 %); twins differ only in frame size, never in content or page. The
-  footer names the twin you would get: `f full` in the popup, `f popup` in
-  fullscreen. Frames in this document show the popup twin.
+- **Twins** — `f` swaps the popup twin (90 % × 70 %) and the fullscreen twin
+  (100 %); twins differ only in frame size, never in content or page. The popup
+  shows the same master and the same page with the same keys; the window
+  budgets its body against the overlay's 70 % ceiling, so the band rule and the
+  footer land inside the frame. The footer names the twin you would get:
+  `f full` in the popup, `f popup` in fullscreen. Frames in this document show
+  the popup twin.
 - **Width is a parameter, not a cap** — 120 columns is the verification width
   every frame here is drawn at; `renderWindow` stays width-parameterized, so a
   twin redraws the same pages at the terminal's size and a narrower one wraps
@@ -458,6 +464,7 @@ events interleaved with its agents' spawns, edits and completions.
 
 ```text
  R (subagent sel) ──⏎──> T ──o──> TD (in place) ──o──> T ──l──> SL ──esc──> T ──esc──> R
+ fleet Enter on an agent ──> T directly, in the popup twin (roster master beside it)
  R (subagent sel) ──l──────────────> SL (skips T) ──esc──> R
  R (run sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
                 W ──l──> L ──esc──> W

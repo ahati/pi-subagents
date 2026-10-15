@@ -52,9 +52,9 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 /**
- * The hub at `width`, rendered once and disposed: the popup chat twin by
- * default (the roster list beside the stream), or — with `popup` false — the
- * roster page's own split (`renderHubPage`).
+ * The hub at `width`, rendered once and disposed: the popup twin by default
+ * (page T — the roster master beside the transcript), or — with `popup` false —
+ * the full-screen twin on the roster page. Both twins draw the same window.
  */
 function hubFrames(width: number, popup = true): string[] {
   vi.useFakeTimers();
@@ -74,8 +74,8 @@ function hubFrames(width: number, popup = true): string[] {
     () => undefined,
     deps,
     popup
-      ? { popup: true, resume: { view: "chat", selected: 0, filterText: "", chatRecordId: "rec-1" }, onToggle: () => undefined }
-      : { popup: false, resume: { view: "table", selected: 0, filterText: "", chatRecordId: undefined }, onToggle: () => undefined },
+      ? { popup: true, resume: { view: "table", selected: 0, filterText: "", page: "T", focusId: "rec-1" }, onToggle: () => undefined }
+      : { popup: false, resume: { view: "table", selected: 0, filterText: "", page: "R", focusId: undefined }, onToggle: () => undefined },
   );
   const lines = hub.render(width);
   hub.dispose();
@@ -163,19 +163,13 @@ describe("one window for both surfaces", () => {
       for (const [level, lines] of Object.entries({ hub: hubFrames(width), ...dialogFrames(width) })) {
         expect(lines[0]!.indexOf("┬"), `${level} top edge`).toBe(tee);
         const bottom = lines.at(-1)!;
-        if (level === "hub") {
-          // The popup chat twin still bottoms out at a split edge; it is a
-          // separate window whose restyle is out of scope (plan D3) — it keeps
-          // its own grouping and frame.
-          expect(bottom.indexOf("┴"), `${level} bottom edge`).toBe(tee);
-        } else {
-          // The inspector's divider terminates at the band rule: the `┴` is in
-          // the band and the bottom edge below it is plain.
-          const band = lines.find(line => line.startsWith("\u2502 \u2500"));
-          expect(band, `${level} band rule`).toBeDefined();
-          expect(band!.indexOf("\u2534"), `${level} band tee`).toBe(tee);
-          expect(bottom.indexOf("\u2534"), `${level} bottom edge`).toBe(-1);
-        }
+        // Both twins' dividers terminate at the band rule: the `┴` is in the
+        // band and the bottom edge below it is plain — the popup twin is the
+        // same window, so it has no split edge of its own.
+        const band = lines.find(line => line.startsWith("\u2502 \u2500"));
+        expect(band, `${level} band rule`).toBeDefined();
+        expect(band!.indexOf("\u2534"), `${level} band tee`).toBe(tee);
+        expect(bottom.indexOf("\u2534"), `${level} bottom edge`).toBe(-1);
         for (const line of lines) {
           expect(visibleWidth(line), `${level} at ${width}: ${JSON.stringify(line)}`).toBe(width);
         }

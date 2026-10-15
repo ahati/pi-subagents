@@ -252,10 +252,17 @@ async function openToggleCloseHub(host: Host, fleet: FleetList): Promise<void> {
 async function openAndCloseHub(host: Host, fleet: FleetList, initial?: { agentId?: string }): Promise<string> {
   const hubPromise = fleet.openHub(initial?.agentId);
   await flushRender();
-  const overlayEntry = ((host.tui as any).overlayStack ?? []).at(-1);
-  expect(overlayEntry).toBeDefined(); // the hub is up (roster or popup chat)
+  let overlayEntry = ((host.tui as any).overlayStack ?? []).at(-1);
+  expect(overlayEntry).toBeDefined(); // the hub is up (roster or the popup twin's T page)
   const beforeClose = host.written.length;
+  // With an initial agent the popup twin opens on page T; Esc ascends a level
+  // (T → roster) rather than closing, so it takes a second Esc to close.
   overlayEntry.component.handleInput("\x1b");
+  if (initial?.agentId) {
+    await flushRender();
+    overlayEntry = ((host.tui as any).overlayStack ?? []).at(-1);
+    overlayEntry.component.handleInput("\x1b");
+  }
   await hubPromise;
   // The Esc keystroke pays for hideOverlay's render; the fleet's deferred
   // restore (setTimeout 0) registers nothing. Flush both.

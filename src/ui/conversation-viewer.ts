@@ -8,7 +8,7 @@
  *   - Standalone (FleetView, /agents): pi's fullscreen TUI mode renders it
  *     edge-to-edge with a ScrollView scrollbar, mouse handling and clickable
  *     footer controls; regular mode keeps the windowed floating overlay.
- *   - Embedded (`ConversationViewerOptions`, the agent hub's two-pane chat):
+ *   - Embedded (`ConversationViewerOptions`, the agent hub's transcript pages):
  *     content-only rows inside the host's frame, host-driven scrolling, no
  *     fullscreen machinery — even when pi itself runs fullscreen.
  */
@@ -92,8 +92,8 @@ export interface ConversationViewerOptions {
   /**
    * Render without the `╭─╮` frame and side borders — content rows only,
    * padded to the full render width. For a host that embeds the viewer inside
-   * its own overall frame (the hub's two-pane chat, whose border must span
-   * the agent list too). A function is re-read on every render, so the host
+   * its own overall frame (the hub window, whose border spans the roster
+   * master too). A function is re-read on every render, so the host
    * can fall back to the framed box when it drops the side pane on narrow
    * terminals. Defaults to framed.
    */
@@ -696,7 +696,7 @@ export class ConversationViewer implements Component, Focusable {
     if (!this.fullscreen && width < 6) return []; // too narrow for any meaningful rendering
     if (this.fullscreen && width <= SCROLLBAR_WIDTH + 1) return Array.from({ length: rows }, () => " ".repeat(Math.max(0, width)));
     const th = this.theme;
-    // Frameless: the host (the hub's two-pane chat) draws the overall border
+    // Frameless: the host (the hub window) draws the overall border
     // spanning its own panes, so this viewer contributes content rows only —
     // no `╭─╮` top/bottom, no side `│`; every line pads to the full width.
     const frameless = this.framelessNow();
