@@ -325,6 +325,11 @@ export class ConversationViewer implements Component, Focusable {
   /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
   private stopArmed = false;
   /**
+   * What the last frame rendered: the transcript's line count and scroll
+   * percent, read by a host that draws its own footer band (`bandReadout`).
+   */
+  private bandState: { lines: number; percent: number } | undefined;
+  /**
    * Rich-tool-output expansion, pi's `app.tools.expand` toggle. The rich
    * renderers draw their own "ctrl+o to expand" hints while collapsed; this
    * is the flag their key toggles. Viewer-local — it resets on reopen — and
@@ -744,6 +749,12 @@ export class ConversationViewer implements Component, Focusable {
     }
 
     const visibleStart = this.fullscreen ? this.scrollView.scrollTop : Math.min(this.scrollOffset, maxScroll);
+    // The readout the host's band reads: the same window the viewer's own
+    // footer reports, kept here because the band renders outside this method.
+    const readout = contentLines.length <= viewportHeight
+      ? 100
+      : Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100);
+    this.bandState = { lines: contentLines.length, percent: readout };
     const visible = contentLines.slice(visibleStart, visibleStart + viewportHeight);
     // Match Pi's scrollbar geometry: rounded size, at least two rows when available.
     const thumbHeight = Math.min(viewportHeight, Math.max(2, Math.round(viewportHeight * viewportHeight / Math.max(1, contentLines.length))));
@@ -810,10 +821,7 @@ export class ConversationViewer implements Component, Focusable {
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
       // it's the first thing dropped so it never crowds out the hints.
-      const scrollPct = contentLines.length <= viewportHeight
-        ? "100%"
-        : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
-      const count = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
+      const count = th.fg("dim", `${contentLines.length} lines · ${readout}%`);
       const withCount = [count, ...actions].join(sep);
       const footerLeft = visibleWidth(withCount) + visibleWidth(footerRight) + 1 <= innerW
         ? withCount
@@ -973,6 +981,21 @@ export class ConversationViewer implements Component, Focusable {
     this.scrollOffset = next;
     this.autoScroll = this.scrollOffset >= maxScroll;
     return true;
+  }
+
+  /**
+   * What a host's own footer band reads from this viewer: the transcript
+   * readout the viewer's footer shows (`<N> lines · <P>%`), whether rich tool
+   * output is expanded, and whether `x` is armed. The viewer keeps its own
+   * footer until the host owns it; this is the same state, exposed.
+   */
+  bandReadout(): { text: string; expanded: boolean; stopArmed: boolean } {
+    const band = this.bandState;
+    return {
+      text: band ? `${band.lines} lines · ${band.percent}%` : "",
+      expanded: this.expanded,
+      stopArmed: this.stopArmed,
+    };
   }
 
   dispose(): void {

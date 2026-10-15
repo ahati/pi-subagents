@@ -296,7 +296,7 @@ describe("page footers, headers and esc", () => {
     h.press("\r");
     const frame = h.frame().join("\n");
     expect(frame).toContain("l run log");
-    expect(frame).toContain("esc roster");
+    expect(frame).toContain("Esc roster");
   });
 
   it("keeps the title constant while the header block names the item", () => {
@@ -328,7 +328,7 @@ describe("page footers, headers and esc", () => {
     h.press("\r"); // WA
     h.press("l"); // SAL
     expect(h.frame().join("\n")).toContain("spawn"); // the log grammar
-    expect(h.frame().join("\n")).toContain("esc back");
+    expect(h.frame().join("\n")).toContain("Esc back");
     h.press(ESC);
     expect(h.frame().join("\n")).toContain("waiting for first message");
     expect(h.frame().join("\n")).not.toContain("spawn");
@@ -346,9 +346,9 @@ describe("page footers, headers and esc", () => {
     const h = harness([makeRecord({ id: "a1" })]);
     h.open();
     h.press("\r"); // T
-    expect(h.frame().join("\n")).toContain("esc roster");
+    expect(h.frame().join("\n")).toContain("Esc roster");
     h.press(ESC);
-    expect(h.frame().join("\n")).toContain("esc close");
+    expect(h.frame().join("\n")).toContain("Esc close");
     expect(h.settled()).toBe(false);
   });
 
@@ -358,11 +358,96 @@ describe("page footers, headers and esc", () => {
     h.press("l");
     const frame = h.frame().join("\n");
     expect(frame).toContain("spawn");
-    expect(frame).toContain("esc back");
+    expect(frame).toContain("Esc back");
     h.press(ESC);
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
-    expect(h.frame().join("\n")).toContain("esc close");
+    expect(h.frame().join("\n")).toContain("Esc close");
     expect(h.settled()).toBe(false);
+  });
+});
+
+describe("the footer band", () => {
+  const workflows = (): FleetWorkflow[] => [{
+    id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+    startedAt: Date.now() - 60_000, tokens: 500,
+  }];
+  /** The footer row's content columns at 120: `│ <116> │`. */
+  const bandOf = (frame: string[]) => (frame.at(-2) ?? "").slice(2, -2);
+  /**
+   * The band's two slots, split at the gap between them. The left slot's own
+   * separators are single spaces, so the first run of two or more is the gap.
+   */
+  const slots = (content: string) => {
+    const at = content.search(/ {2,}/);
+    let end = at;
+    while (content[end] === " ") end++;
+    return { left: content.slice(0, at), gap: end - at, right: content.slice(end) };
+  };
+
+  it("R: the roster's actions left, navigation and the twin right, flush to the edge", () => {
+    const h = harness([makeRecord({ id: "a1" })], { workflows });
+    h.open();
+    const frame = h.frame();
+    // The band rule carries the divider's `┴`; the bottom edge below is plain.
+    expect(frame.at(-1)).not.toContain("┴");
+    expect(frame.at(-3)!.indexOf("┴")).toBe(DIVIDER);
+    expect(frame.at(-1)!.endsWith("╯")).toBe(true);
+    const { left, gap, right } = slots(bandOf(frame));
+    expect(left).toBe("⏎ transcript · l log · p pause · c copy");
+    expect(gap).toBeGreaterThanOrEqual(2);
+    // The full-screen twin would give the popup, so that is the twin it names.
+    expect(right).toBe("↑↓ select · ⇥ activity · f popup · Esc close");
+    expect(bandOf(frame).length).toBe(116);
+  });
+
+  it("R: the run row's band offers the run's keys", () => {
+    const h = harness([makeRecord({ id: "a1" })], { workflows });
+    h.open();
+    h.press(DOWN);
+    expect(slots(bandOf(h.frame())).left).toBe("⏎ open run · s stop run · c copy");
+  });
+
+  it("T: the readout drops first and the page's hints and escape anchor survive", () => {
+    const h = harness([makeRecord({ id: "a1" })], { workflows });
+    h.open();
+    h.press("\r"); // T
+    const { left, right } = slots(bandOf(h.frame()));
+    expect(left).toBe("Enter steer · x stop · m md");
+    expect(right).toBe("PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f popup · Esc roster");
+  });
+
+  it("TD: the expanded call swaps `m md` for `c copy diff` and drops `o expand`", () => {
+    const h = harness([makeRecord({ id: "a1" })], { workflows });
+    h.open();
+    h.press("\r"); // T
+    h.frame(); // the viewer builds on the first render
+    expect(slots(bandOf(h.frame())).right).toContain("o expand");
+    h.press("\x0f"); // ctrl+o — expand in place, no new page
+    const { left, right } = slots(bandOf(h.frame()));
+    expect(left).toContain("c copy diff");
+    expect(left).not.toContain("m md");
+    expect(right).not.toContain("o expand");
+    // TD is a view state: the roster page is still the one beneath it.
+    expect(h.frame().join("\n")).toContain("SUBAGENTS");
+  });
+
+  it("SL: the log's readout rides the left slot, the page's keys the right", () => {
+    const h = harness([makeRecord({ id: "a1" })], { workflows });
+    h.open();
+    h.press("l"); // SL straight from the roster
+    const { left, right } = slots(bandOf(h.frame()));
+    expect(left).toBe("2 lines · 100% · Enter steer · x stop");
+    expect(right).toBe("↑↓ scroll · c copy tail · p pause agent · f popup · Esc back");
+  });
+
+  it("W: the band reads the run's counters and phase position", () => {
+    const h = harness([makeRecord({ id: "r1" })], { workflows, workflowRun: () => runSource() });
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    const { left, right } = slots(bandOf(h.frame()));
+    expect(left).toBe("1/2 agents · phase 1 of 1");
+    expect(right).toBe("↑↓ item · ⏎ agent · l run log · s stop run · f popup · Esc roster");
   });
 });
 
@@ -445,5 +530,17 @@ describe("per-row keys", () => {
     h.press(DOWN);
     h.press("p");
     expect(pauseAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("k on the run log page scrolls rather than reaching the run's stop", () => {
+    const stopWorkflow = vi.fn();
+    const h = harness([makeRecord({ id: "r1" })], { workflows, stopWorkflow, workflowRun: () => runSource() });
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("l"); // L
+    h.press("k"); // scroll-up on the log pages (D7), never a stop
+    expect(stopWorkflow).not.toHaveBeenCalled();
+    expect(h.frame().join("\n")).not.toContain("x again to STOP");
   });
 });

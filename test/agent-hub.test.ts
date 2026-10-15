@@ -98,7 +98,7 @@ function harness(agents: AgentRecord[], depsOver: Partial<AgentHubDeps> = {}, op
     ui,
     deps,
     manager,
-    open: (initial?: { agentId?: string }) => {
+    open: (initial?: { agentId?: string; popup?: boolean }) => {
       const promise = openAgentHub(ui as unknown as HubUICtx, deps, initial);
       return { promise, settled: () => settled, components, optionSets };
     },
@@ -730,5 +730,65 @@ describe("agent hub roster", () => {
     h.open();
     h.press("\r");
     expect(h.frame().join("\n")).toContain("waiting for first message");
+  });
+});
+
+describe("hub page keys through the band", () => {
+  /** A hub on the roster (full-screen), with one running agent. */
+  const rosterHub = () => {
+    const h = harness([makeRecord({ id: "a1" })]);
+    h.open();
+    return h;
+  };
+
+  it("x on a transcript page arms first, stops on the second press", () => {
+    const h = rosterHub();
+    h.press("\r"); // T — the embedded viewer is up
+    h.frame();
+    expect(h.frame().join("\n")).toContain("x stop");
+    h.press("x");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.frame().join("\n")).toContain("x again to STOP");
+    h.press("x");
+    expect(h.manager.abort).toHaveBeenCalledWith("a1");
+  });
+
+  it("another key disarms the transcript page's stop", () => {
+    const h = rosterHub();
+    h.press("\r"); // T
+    h.frame();
+    h.press("x");
+    expect(h.frame().join("\n")).toContain("x again to STOP");
+    h.press("j"); // the viewer's own scroll key — it disarms before scrolling
+    expect(h.frame().join("\n")).not.toContain("x again to STOP");
+    h.press("x");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+  });
+
+  it("k stops on a transcript page (the viewer hands it to the hub) but scrolls a log page", () => {
+    const h = rosterHub();
+    h.press("l"); // SL — `k` stays scroll-up here
+    h.frame();
+    h.press("k");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.frame().join("\n")).not.toContain("x again to STOP");
+    h.press(ESC); // back to the roster
+    h.press("\r"); // T
+    h.frame();
+    h.press("k");
+    expect(h.frame().join("\n")).toContain("x again to STOP");
+    h.press("k");
+    expect(h.manager.abort).toHaveBeenCalledWith("a1");
+  });
+
+  it("esc on a transcript page pops one level even when no viewer is up", () => {
+    // Resumed on T with the agent's session gone: the page is still a level
+    // above the roster, so the quit keys pop it rather than closing the hub.
+    const h = harness([makeRecord({ id: "a1", session: undefined })]);
+    h.open({ agentId: "a1", popup: false });
+    expect(h.frame().join("\n")).toContain("transcript unavailable");
+    h.press(ESC);
+    expect(h.settled()).toBe(false);
+    expect(h.frame().join("\n")).toContain("Esc close");
   });
 });

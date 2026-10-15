@@ -14,17 +14,21 @@
  *   (`│` + cell + `│` + cell + `│` = width).
  * - {@link frameEdge} and {@link frameRow} are the window's edges and its
  *   padded content row.
- * - {@link hintLine} is the footer rule: drop hints right-to-left until the
- *   line fits, so the escape hatch always survives and no hint is ever cut in
- *   half.
+ * - {@link hintLine} is the single-list footer rule the inspector still uses:
+ *   drop hints right-to-left until the line fits, so the escape hatch always
+ *   survives and no hint is ever cut in half.
+ * - {@link footerBand} is the two-slot band: the readout and the page's
+ *   actions on the left, navigation and keys with the escape anchor on the
+ *   right, fitted whole-hint by whole-hint.
  * - {@link paneBodyHeight} is the height basis, in viewport percent.
  * - {@link paneRule} is the titled rule between the panes: `├ ─ Phases ─┬─ …
  *   ─┤`, whose cells fill their pane widths the way the rows do.
  * - {@link paneGeometry} and {@link renderWindow} are the window itself: the
  *   split the hub's ` Agents ` pane established, and the row assembly (edges,
- *   full-width rows, pane rows, titled rules, seams) both surfaces render
- *   through. A surface contributes CONTENT — cells, hints, pane bodies — and
- *   the window decides where it goes. Neither overlay does column math.
+ *   full-width rows, pane rows, titled rules, the band rule, seams) both
+ *   surfaces render through. A surface contributes CONTENT — cells, hints,
+ *   pane bodies — and the window decides where it goes. Neither overlay does
+ *   column math.
  * - {@link windowRange} is the list windowing rule: the visible slice that
  *   keeps the selection centered and clamps at both ends.
  *
@@ -271,8 +275,79 @@ export function hintLine(keys: readonly string[], width: number, joiner = "·"):
 }
 
 /**
+ * One hint of the footer band, with the tier it drops in.
+ *
+ * The band's left slot is the readout and the page's live actions, its right
+ * slot navigation and the page's keys; the two are fitted as whole hints, and
+ * the group says what goes first when they do not both fit. `pinned` marks a
+ * hint the band keeps while anything else is left — the escape anchor.
+ */
+export interface FooterHint {
+  text: string;
+  group: "readout" | "action" | "hint";
+  pinned?: boolean;
+}
+
+/**
+ * The footer band, fitted to `width`: the left slot at the start, the right
+ * slot flush to the last column, at least two columns between them.
+ *
+ * Hints drop whole — never cut — in the order the spec gives: the readout
+ * first (it is the one hint the page can live without), then the left actions
+ * right-to-left, then the right hints right-to-left, skipping any pinned
+ * anchor. Only a single hint wider than the line is truncated.
+ */
+export function footerBand(options: {
+  width: number;
+  left?: readonly FooterHint[];
+  right?: readonly FooterHint[];
+  joiner?: string;
+}): string {
+  const width = Math.max(0, options.width);
+  const joiner = options.joiner ?? " · ";
+  const left = [...(options.left ?? [])];
+  const right = [...(options.right ?? [])];
+  const text = (hints: readonly FooterHint[]) => hints.map(hint => hint.text).join(joiner);
+  const fits = () => {
+    const l = text(left);
+    const r = text(right);
+    return visibleWidth(l) + visibleWidth(r) + (l !== "" && r !== "" ? 2 : 0) <= width;
+  };
+  while (!fits()) {
+    const at = left.findIndex(hint => hint.group === "readout");
+    if (at < 0) break;
+    left.splice(at, 1);
+  }
+  while (!fits()) {
+    const at = lastDroppable(left, hint => hint.group === "action");
+    if (at < 0) break;
+    left.splice(at, 1);
+  }
+  while (!fits()) {
+    const at = lastDroppable(right, () => true);
+    if (at < 0) break;
+    right.splice(at, 1);
+  }
+  const l = text(left);
+  const r = text(right);
+  // The right slot is flush to the last column; the two slots keep at least
+  // the two columns between them, and a slot on its own takes the whole line.
+  const pad = Math.max(l !== "" && r !== "" ? 2 : 0, width - visibleWidth(l) - visibleWidth(r));
+  const line = `${l}${" ".repeat(pad)}${r}`;
+  return visibleWidth(line) > width ? truncateToWidth(line, width) : line;
+}
+
+/** The last hint of a slot the fitter may give up, or -1 when none is left. */
+function lastDroppable(hints: readonly FooterHint[], match: (hint: FooterHint) => boolean): number {
+  for (let i = hints.length - 1; i >= 0; i--) {
+    if (!hints[i].pinned && match(hints[i])) return i;
+  }
+  return -1;
+}
+
+/**
  * The rows a window draws around its panes — top and bottom edges, the header
- * rows, the two rules and the footer — for a window whose body falls under
+ * rows, the rules and the footer — for a window whose body falls under
  * `viewportPct` of the terminal. The inspector's `WINDOW_CHROME_ROWS`.
  */
 export const WINDOW_CHROME_ROWS = 7;
@@ -355,7 +430,8 @@ function geometryForList(width: number, list: number, pad: number): PaneGeometry
  * One row of a window, as content: the surface says what, the window says
  * where. `full` spans the frame's inner width, `split` puts a master cell
  * beside a detail cell, `titles` is the rule that names them, `seam` the
- * closing rule (with a `┴` where the panes meet) and `headerRule` the rule the
+ * closing rule (with a `┴` where the panes meet), `band` the rule above the
+ * footer (whose `┴` the divider ends at), and `headerRule` the rule the
  * detail pane opens with — `left` carries on the master cell beside it, since
  * the panes flow independently.
  */
@@ -364,6 +440,7 @@ export type WindowRow =
   | { kind: "split"; left?: WorkflowCardLine; right?: WorkflowCardLine }
   | { kind: "headerRule"; left?: WorkflowCardLine }
   | { kind: "titles"; left?: string; right?: string; padding?: RuleTitlePadding }
+  | { kind: "band" }
   | { kind: "seam" };
 
 /** Measured width of a cell line. */
@@ -393,6 +470,23 @@ function headerRuleCell(cellWidth: number, pad: number, box: PaneBox): WorkflowC
     { text: " ".repeat(pad) },
     { text: box.horizontal.repeat(inner), color: "dim" },
     { text: " ".repeat(pad) },
+  ];
+}
+
+/**
+ * The band rule: the full-width rule the panes end at, with `┴` in the
+ * divider's column when the window is split. The bottom edge below a banded
+ * window is plain — the divider terminates here.
+ */
+function bandRuleLine(inner: number, box: PaneBox, teeAt: number | undefined): WorkflowCardLine {
+  if (inner <= 0) return [];
+  if (teeAt === undefined || teeAt < 0 || teeAt >= inner) {
+    return [{ text: box.horizontal.repeat(inner), color: "dim" }];
+  }
+  return [
+    { text: box.horizontal.repeat(teeAt), color: "dim" },
+    { text: box.bottomTee, color: "dim" },
+    { text: box.horizontal.repeat(inner - teeAt - 1), color: "dim" },
   ];
 }
 
@@ -483,6 +577,15 @@ export function renderWindow(options: {
           : [edge(rule.leftTee), ...ruleCell(rule.left), edge(rule.rightTee)]);
         break;
       }
+      case "band":
+        lines.push([
+          ...bar,
+          { text: " " },
+          ...bandRuleLine(windowInnerWidth(width), box, panes ? panes.leftCellWidth - 1 : undefined),
+          { text: " " },
+          ...bar,
+        ]);
+        break;
       case "seam":
         lines.push(panes
           ? [
@@ -497,7 +600,10 @@ export function renderWindow(options: {
     }
   }
 
-  lines.push([edge(panes ? splitEdge(width, panes.leftCellWidth, box, "bottom") : frameEdge(width, box, "bottom"))]);
+  // A banded window's bottom edge is plain: the band row carries the `┴` the
+  // divider ends at, so a second one below it would dangle.
+  const banded = options.rows.some(row => row.kind === "band");
+  lines.push([edge(panes && !banded ? splitEdge(width, panes.leftCellWidth, box, "bottom") : frameEdge(width, box, "bottom"))]);
   return lines;
 }
 

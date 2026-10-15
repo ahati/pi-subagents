@@ -51,7 +51,8 @@ layout arithmetic in a surface module.
   its bytes are pinned: the inspector and the popup chat twin.
 - **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
   names both kinds and exactly fills the master cell, and the `┬` is where the
-  divider lands. The bottom edge mirrors it with `┴`. The stacked twin
+  divider lands. The bottom edge mirrors it plain; the divider's `┴` sits in
+  the band rule just above the footer. The stacked twin
   (40–59 cols) has no tee to hang a title on, so its top edge carries the same
   title itself: `╭ Agents & Workflows ─…─╮`.
 - **Three rules, three jobs**:
@@ -62,7 +63,7 @@ layout arithmetic in a surface module.
      from body;
   3. the **band rule** — a full-width rule above the footer. The panes end at
      it; the footer row beneath spans the window. The divider column continues
-     down to the bottom edge's `┴`.
+     down to the band rule's `┴`, and the bottom edge below it is plain.
 - **Twins** — `f` swaps the popup twin (90 % viewport) and the fullscreen twin
   (100 %); twins differ only in frame size, never in content or page. The
   footer names the twin you would get: `f full` in the popup, `f popup` in
@@ -107,7 +108,7 @@ in full — the fitter may drop hints at narrower widths.
 | **R** — roster, subagent selected | hub open; `esc` from T | `⏎ transcript · l log · p pause · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
 | **R** — roster, run selected | `↑↓` onto a run row | `⏎ open run · s stop run · c copy` | `↑↓ select · ⇥ activity · f full · Esc close` |
 | **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
-| **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, plus `c copy diff · o collapse` | as the page it sits in |
+| **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, with `m md` swapped for `c copy diff · o collapse` | as the page it sits in, without `o expand` |
 | **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · Enter steer · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **W** — workflow run | `⏎` on a run row | `<done>/<total> agents · phase <n> of <m>` | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
 | **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back` |
@@ -183,9 +184,9 @@ two stacked rows:
 - **left slot** — the readout and live actions: `<N> lines · <P>%` then
   `Enter steer · x stop · m md` on pages embedding a live conversation or log;
   on **R** the selected row's action keys; on **W** the run counters;
-- **right slot** — navigation, then the page's keys, then the escape anchor
-  and the twin toggle: `PgUp/PgDn · j/k scroll · <page keys> · Esc <target> ·
-  f <twin>`.
+- **right slot** — navigation, then the page's keys, then the twin toggle and
+  the escape anchor: `PgUp/PgDn · j/k scroll · <page keys> · f <twin> ·
+  Esc <target>`.
 
 The slots keep at least two columns between them and the right slot is flush
 to the band's right edge. When the pair overflows, whole hints drop in this
@@ -193,9 +194,10 @@ order: (1) the readout; (2) left actions right-to-left — `m md` first,
 `Enter steer` last; (3) right hints right-to-left — the `f` twin first — with
 the `Esc …` anchor pinned. Hints are never cut mid-hint. `x` is armed on
 first press (`x again to STOP`); `k` aliases `x` on roster and transcript
-pages. The transcript pages are the widest bands: at 120 columns **T** and
-**WA** have already dropped `c copy · f full`, and **TD** `p pause · f full` —
-the frames show the fitter's honest output; wider terminals restore them.
+pages. The readout is the first thing the band gives up: at 120 columns **T**,
+**WA** and **TD** have already dropped `<N> lines · <P>%` (**TD**, which
+carries `c copy diff` instead of `m md`, its `o collapse` too) — the frames
+show the fitter's honest output; wider terminals restore them.
 
 ## Page R — roster
 
@@ -214,9 +216,9 @@ the frames show the fitter's honest output; wider terminals restore them.
 │   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
 │                    │ 12:01:41 still running — 3 unstable detected                                                    │
 │                    │ (⏎ opens the full transcript)                                                                   │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ ⏎ transcript · l log · p pause · c copy                                ↑↓ select · ⇥ activity · f full · Esc close   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ⏎ transcript · l log · p pause · c copy                                  ↑↓ select · ⇥ activity · f full · Esc close │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ### R2 — run selected (run overview preview)
@@ -232,9 +234,9 @@ the frames show the fitter's honest output; wider terminals restore them.
 │ WORKFLOWS          │ 3 verify                                                                                      — │
 │ ❯ ● migrate-v2 3/5 │ 4 report                                                                                      — │
 │   ✓ batch-d… 12/12 │ (⏎ opens the run page)                                                                          │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ ⏎ open run · s stop run · c copy                                       ↑↓ select · ⇥ activity · f full · Esc close   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ⏎ open run · s stop run · c copy                                         ↑↓ select · ⇥ activity · f full · Esc close │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Row grammar: the master holds group headers — `SUBAGENTS`, then `WORKFLOWS`,
@@ -279,9 +281,9 @@ full conversation. **TD** is this page with one rich block expanded.
 │                    │ ● Edit test/e2e/helpers/boot.ts                                                                 │
 │                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
 │                    │ ▍ running tests…                                                                                │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 705 lines · 100% · Enter steer · x stop · m md    PgUp/PgDn · j/k scroll · o expand · l log · p pause · Esc roster   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ Enter steer · x stop · m md       PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc roster │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page TD — expanded tool-call (in-place view state)
@@ -307,9 +309,9 @@ move, no nesting level is added.
 │                    │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
 │                    │   └ +9 −4 [━━━━━━━━━━] • 1 hunk at line 12                                                      │
 │                    │ ▍ running tests…                                                                                │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 701 lines · 100% · Enter steer · x stop · c copy diff · o collapse     PgUp/PgDn · j/k scroll · l log · Esc roster   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ Enter steer · x stop · c copy diff           PgUp/PgDn · j/k scroll · l log · p pause · c copy · f full · Esc roster │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page SL — subagent log (nested level 2)
@@ -331,9 +333,9 @@ tokens/cost.
 │   ● migrate-v2 3/5 │ 12:01:21 note   steering: focus on test/e2e                                                     │
 │   ✓ batch-d… 12/12 │ 12:01:40 tool   bash: pnpm vitest run test/x → 12 passing                                       │
 │                    │ 12:01:41 still running — 3 unstable detected                                                    │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 42 lines · 100% · Enter steer · x stop                 ↑↓ scroll · c copy tail · p pause agent · f full · Esc back   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 42 lines · 100% · Enter steer · x stop                   ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page W — workflow run (nested level 1)
@@ -360,9 +362,9 @@ current phase.
 │                    │ ✓ m-3   seed data                                                                          done │
 │                    │ ○ m-4   verify queries                                                                   queued │
 │                    │ ○ m-5   write report                                                                     queued │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 3/5 agents · phase 2 of 4                         ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 3/5 agents · phase 2 of 4                           ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page WA — a run's agent (nested level 2)
@@ -394,9 +396,9 @@ left list switches agents in place.
 │                    │   │ ─────────────────────────────────────────────────────────────────────────────────────────   │
 │                    │   └ +42 −6 [━━━━━━━━━━] • 1 hunk at line 88                                                     │
 │                    │ ▍ editing 2 files…                                                                              │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 701 lines · 100% · Enter steer · x stop · m md    PgUp/PgDn · j/k scroll · o collapse · l log · p pause · Esc back   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ Enter steer · x stop · m md         PgUp/PgDn · j/k scroll · o expand · l log · p pause · c copy · f full · Esc back │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page SAL — a run agent's log (nested level 3)
@@ -413,9 +415,9 @@ left list switches agents in place.
 │ ✓ discover         │ 12:02:44 turn   2 start                                                                         │
 │ ❯ 2 migrate        │ 12:02:45 tool   bash: pnpm test → 12 passing                                                    │
 │                    │ 12:02:46 still running                                                                          │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 7 lines · 100% · Enter steer · x stop                  ↑↓ scroll · c copy tail · p pause agent · f full · Esc back   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 7 lines · 100% · Enter steer · x stop                    ↑↓ scroll · c copy tail · p pause agent · f full · Esc back │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Page L — run log (nested level 2 from W)
@@ -436,9 +438,9 @@ events interleaved with its agents' spawns, edits and completions.
 │   ● m-2            │ 12:02:10 m-3 done — seeds applied                                                               │
 │   ✓ m-3            │ 12:02:11 phase 2 still running — 2 agents in flight                                             │
 │   ○ m-4            │                                                                                                 │
-│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 11 lines · 64% · s stop run                                            ↑↓ scroll · c copy tail · f full · Esc back   │
-╰────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
+│ 11 lines · 64% · s stop run                                              ↑↓ scroll · c copy tail · f full · Esc back │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Transition map

@@ -19,6 +19,7 @@ import type { AgentRecord } from "../src/types.js";
 import { AgentHub, type AgentHubDeps } from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import {
+  frameEdge,
   MASTER_LIST_WIDTH,
   masterPaneGeometry,
   PANE_PADDING,
@@ -194,7 +195,12 @@ describe("one window for both surfaces", () => {
     const tee = panes.leftCellWidth + 1;
     expect(barColumns(lines)).toEqual([0, tee, 119]);
     expect(lines[0]!.indexOf("┬"), "top edge").toBe(tee);
-    expect(lines.at(-1)!.indexOf("┴"), "bottom edge").toBe(tee);
+    // The band rule carries the `┴` the divider ends at — the row before the
+    // footer — and the bottom edge below it is plain, so no tee dangles.
+    const band = lines.length - 3;
+    expect(lines[band]!.indexOf("┴"), "band rule").toBe(tee);
+    expect(lines.at(-1)!.indexOf("┴"), "bottom edge").toBe(-1);
+    expect(lines.at(-1)).toBe(frameEdge(120, UNICODE_PANE_BOX, "bottom"));
     for (const line of lines) expect(visibleWidth(line), JSON.stringify(line)).toBe(120);
   });
 
