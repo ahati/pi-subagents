@@ -1452,7 +1452,9 @@ export class AgentHub implements Component {
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     return this.identityPane(
       this.agentIdentity(record, width),
-      this.agentLogLines(width, this.bodyRows(rows, true), LOG_TAIL),
+      // Infinity, not LOG_TAIL: the preview must never match the stored
+      // offset, so its render cannot move the log page's window.
+      this.agentLogLines(width, this.bodyRows(rows, true), Infinity),
       this.noteLine("(⏎ opens the full transcript)", width),
     );
   }
@@ -1712,7 +1714,11 @@ export class AgentHub implements Component {
   private stackedLines(width: number, rows: number): WindowRow[] {
     const lines: PaneRow[] = this.page === "R" ? this.rosterLines(width, rows) : this.rightPaneLines(width, rows);
     const content = lines.length > 0 ? lines : this.leftPaneLines(width, rows);
-    return content.map(row => (isHeaderRule(row) ? { kind: "headerRule" } : { kind: "full", cells: row }));
+    // Fill the body like the two-pane loop does: a short pane would leave
+    // stale rows visible below the bottom edge.
+    const padded = content.slice(0, rows);
+    for (let i = padded.length; i < rows; i++) padded.push([]);
+    return padded.map(row => (isHeaderRule(row) ? { kind: "headerRule" } : { kind: "full", cells: row }));
   }
 
   /** The viewer for `record`, rebuilt only when the target changes. */
@@ -1925,8 +1931,8 @@ export class AgentHub implements Component {
     }
     // Entering a log page is navigation: the armed stop must not survive it.
     this.stopArmed = false;
-    // Log pages open at the newest events; the first scroll up re-anchors
-    // (one press is eaten while the tail seed clamps down).
+    // Log pages open at the newest events; the first render clamps the
+    // seed down to the tail window.
     this.logScroll = LOG_TAIL;
     this.requestRender();
   }
@@ -1975,9 +1981,10 @@ export class AgentHub implements Component {
   private scrollTail(lines: readonly WorkflowCardLine[], offset: number, rows: number): WorkflowCardLine[] {
     const max = Math.max(0, lines.length - rows);
     const start = Math.max(0, Math.min(offset, max));
-    // Re-anchor a tail seed (or an offset gone stale after a resize): the
-    // stored offset should always be a window the user could be looking at.
-    if (offset > max) this.logScroll = start;
+    // Re-anchor a tail seed (or an offset gone stale after a resize) — but
+    // only when the offset is the stored one; callers passing an explicit
+    // offset (the R preview) must not move the user's window.
+    if (offset === this.logScroll && offset > max) this.logScroll = start;
     this.logReadout = {
       lines: lines.length,
       percent: lines.length <= rows ? 100 : Math.round(((start + rows) / lines.length) * 100),

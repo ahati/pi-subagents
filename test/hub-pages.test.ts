@@ -500,7 +500,7 @@ describe("size ladder", () => {
 
   it("fills the terminal exactly: chrome is the two edges, the band rule and the footer", () => {
     for (const rows of [10, 12, 15, 16, 24, 40]) {
-      for (const cols of [60, 120]) {
+      for (const cols of [50, 60, 120]) {
         const h = harness([makeRecord({ id: "a1" })], {}, { cols, rows });
         h.open();
         const frame = h.frame(cols);
@@ -509,6 +509,17 @@ describe("size ladder", () => {
         expect(frame.join("\n"), `${cols}x${rows}`).not.toContain("❞");
       }
     }
+    // The stacked branch too — a pushed page with a short pane must still
+    // fill its rows (it pads rather than leaving stale rows below the edge).
+    const stacked = harness(
+      [makeRecord({ id: "a1" })],
+      { workflows: () => [{ id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2, startedAt: Date.now() - 1000, tokens: 0 }] },
+      { cols: 50, rows: 10 },
+    );
+    stacked.open();
+    stacked.press(DOWN); // the run row
+    stacked.press("\r"); // W as a full-width page
+    expect(stacked.frame(50).length).toBe(10);
   });
 
   it("floors the body at six rows at ten rows — the floor is the arithmetic, not a clamp", () => {

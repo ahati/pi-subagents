@@ -480,11 +480,11 @@ two-pane size and the detail pane takes the rest.
 
 | Terminal | Behavior |
 |---|---|
-| ≥ 60 cols · ≥ 16 rows | Full layout: narrow master + detail, header blocks, footer band |
+| ≥ 60 cols | Full layout: narrow master + detail, header blocks, footer band |
 | 60–99 cols | Same grammar; detail wraps at its width; footer degrades by the fitter |
 | 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` pushes the right pane's content as a full-width page (header block + `esc` pops) |
 | < 40 cols or < 10 rows | The window refuses to open: `ctx.ui.notify("Agent hub needs a terminal ≥ 40×10")` — no partial frame is drawn |
-| height 10–15 (any width) | Body floors at six rows — five while the filter row is up; diff boxes keep their shape, older hunks scroll |
+| any height ≥ 10 rows | The same layout at every height — the body simply gains rows. At the 10-row floor it is six rows — five while the filter row is up; diff boxes keep their shape, older hunks scroll |
 
 Escalation back up is automatic on resize; selection, scroll, page and expand
 state are preserved through every resize.
