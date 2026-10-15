@@ -156,6 +156,10 @@ export function dialogChromeRows(): number {
   return 5;
 }
 
+/** The identity triple every run pane opens with — the rows the chat cell
+ * sits under, and therefore the rows the viewer's budget gives up. */
+const RUN_IDENTITY_ROWS = 3;
+
 export { leftPaneWidth };
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
@@ -843,7 +847,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   if (view.visibleAgents.length === 0) {
     agentRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], agentPaneWidth));
   } else {
-    const agents = windowRange(view.clampedAgent, view.visibleAgents.length, contentCapacity);
+    const agents = windowRange(view.clampedAgent, view.visibleAgents.length, inPhases ? contentCapacity : capacity);
     for (let i = agents.start; i < Math.min(agents.end, view.visibleAgents.length); i++) {
       agentRows.push(
         agentRow({
@@ -1385,16 +1389,11 @@ export class WorkflowDialog implements Component {
       this.log.scrollbarMode?.() ?? "auto",
       undefined,
       {
-        // The window around the pane spends rows too, so the viewer's ceiling
-        // shrinks by their share of the terminal — the whole dialog stays
-        // under the overlay's clip instead of losing its bottom border. Full
-        // screen starts from the whole terminal instead of the popup's share.
-        maxHeightPct: () =>
-          Math.max(
-            20,
-            this.viewportPct() -
-              Math.ceil((dialogChromeRows() * 100) / Math.max(1, this.tui.terminal.rows)),
-          ),
+        // The dialog owns the window's chrome and the run identity rides above
+        // the cell, but the viewer keeps its own identity triple — it names
+        // the agent. Its body budget is the pane body minus both triples.
+        footer: false,
+        viewportRows: () => Math.max(1, this.paneHeight() - RUN_IDENTITY_ROWS - 3),
         onBack: () => this.leaveLog(),
         // ↑/↓ are the pane list's selection keys, so the viewer must not
         // advertise them as scroll keys.

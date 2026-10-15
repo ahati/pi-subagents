@@ -533,13 +533,9 @@ export class AgentHub implements Component {
   private runId: string | undefined;
   /** Cursor in the run's agent list, on WA/SAL/L. */
   private runAgentSel = 0;
-  /** The run's current phase — the PHASES state mark, re-derived on every draw. */
-  private runPhaseSel = 0;
-  /**
-   * The item cursor on **W**: an index into the run's flattened sequence of
+  /** The item cursor on **W**: an index into the run's flattened sequence of
    * phases followed by agents. Separate from the state mark because the two
-   * answer different questions — where the run is, and what `⏎` would open.
-   */
+   * answer different questions — where the run is, and what `⏎` would open. */
   private runItemSel = 0;
   /** For a log opened straight from the roster: what `esc` returns to. */
   private logBack: HubPage = "T";
@@ -1561,8 +1557,7 @@ export class AgentHub implements Component {
 
   /** The phases' state mark for the pane being drawn, refreshed from the run. */
   private runPhaseMark(groups: readonly PhaseGroup[]): number {
-    this.runPhaseSel = currentPhaseIndex(groups);
-    return this.runPhaseSel;
+    return currentPhaseIndex(groups);
   }
 
   /** The phase groups of the named run, or none when its detail source is gone. */
@@ -1881,8 +1876,7 @@ export class AgentHub implements Component {
         this.runAgentSel = 0;
         // D8: both marks start where the run is — the state mark on the
         // current phase and the item cursor on that same phase row.
-        this.runPhaseSel = currentPhaseIndex(this.runGroups(entry.workflow.id));
-        this.runItemSel = this.runPhaseSel;
+        this.runItemSel = currentPhaseIndex(this.runGroups(entry.workflow.id));
         this.page = "W";
         this.requestRender();
         return;
@@ -1903,9 +1897,15 @@ export class AgentHub implements Component {
         this.deps.notify?.("That agent has no conversation to open.", "info");
         return;
       }
+      // WA's subject is the run's agent cursor: make it the agent the item
+      // cursor addressed — the row it sits on, or the phase row's first
+      // agent — so the page opens what ⏎ promised.
+      const index = this.itemAgentIndex();
+      if (index !== undefined) this.runAgentSel = index;
       this.page = "WA";
       this.requestRender();
-    }  }
+    }
+  }
 
   /** `esc`: exactly one nesting level up. */
   private popPage(): void {
@@ -1919,6 +1919,11 @@ export class AgentHub implements Component {
     if (this.page === "R" || this.page === "T") {
       const record = this.page === "R" ? this.rosterRecordForCurrent() : this.focusedRecord();
       this.chatRecordId = record?.id;
+    }
+    if (this.page === "W") {
+      // The item cursor follows the agent WA was showing, so the ❯ the run
+      // page draws is the row ⏎ would reopen.
+      this.runItemSel = this.pageGroups().length + this.clampRunAgentIndex();
     }
     this.requestRender();
   }

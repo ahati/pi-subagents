@@ -385,15 +385,31 @@ describe("the run's state mark and its item cursor", () => {
     expect(pane).not.toContain("❯ 3 verify");
   });
 
-  it("⏎ opens the agent the cursor addresses, not the run's first row", () => {
-    const h = runHarness();
+  it("⏎ opens the agent the cursor addresses — the phase row's first agent, or the row it sits on", () => {
+    const h = harness(
+      [makeRecord({ id: "r1" }), makeRecord({ id: "r2" }), makeRecord({ id: "r3" })],
+      { workflows, workflowRun: () => phasedRunSource() },
+    );
     h.open();
     h.press(DOWN);
-    h.press("\r"); // W
-    for (let i = 0; i < 3; i++) h.press(DOWN); // onto m-1
-    h.press("\r"); // WA
-    expect(h.frame().join("\n")).toContain("waiting for first message");
-    expect(h.frame().join("\n")).toContain("Esc back");
+    h.press(DOWN);
+    h.press(DOWN); // past all three agents, onto the run row
+    h.press("\r"); // W — the cursor is seeded on the running phase `migrate`
+    // The phase row's first agent is m-2 (phase `discover` holds m-1), so ⏎
+    // at the seed must open m-2 — not the run's first row, m-1.
+    h.press("\r");
+    expect(h.frame().join("\n")).toMatch(/❯ . m-2/);
+    expect(h.frame().join("\n")).not.toMatch(/❯ . m-1/);
+    h.press(ESC);
+    // And on an agent row: walk to m-3 (the phase's second agent) and open it.
+    for (let i = 0; i < 5; i++) h.press(DOWN);
+    h.press("\r");
+    expect(h.frame().join("\n")).toMatch(/❯ . m-3/);
+    // Round trip: moving WA's agent cursor and popping back leaves W's ❯ on
+    // the agent WA was showing — the row ⏎ would reopen.
+    h.press(DOWN);
+    h.press(ESC);
+    expect(h.frame().join("\n")).toMatch(/❯ . m-3/);
   });
 
   it("WA's left pane keeps the agent cursor and marks the run's phase beneath it", () => {
@@ -412,7 +428,7 @@ describe("the run's state mark and its item cursor", () => {
       .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
       .map(leftCell)
       .join("\n");
-    expect(left).toContain("❯ ✓ m-1");
+    expect(left).toMatch(/❯ . m-2/);
     expect(left).toContain("PHASES");
     expect(left).toContain("❯ 2 migrate");
   });
