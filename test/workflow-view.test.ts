@@ -191,3 +191,22 @@ describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
     expect(rows[4]).toContain("‖ parked");
   });
 });
+
+describe("agentRow — a live row's clock", () => {
+  it("derives the duration from the start while the agent runs", () => {
+    const row = agentRow({
+      entry: entry({ label: "m-2", state: "progress", startedAt: 1_000 }),
+      selected: false,
+      compact: false,
+      width: 60,
+      glyphs: UNICODE_DIALOG_GLYPHS,
+      workflowActive: true,
+      spinnerFrame: 0,
+      now: 33_000,
+      live: { turns: 2, tokens: 63_400, tail: "editing" },
+    });
+    expect(row[0].map(s => s.text).join("")).toContain("turn 2 · 63.4k tok · 32s");
+    // The live tail rides the second line as a ↳ continuation.
+    expect(row[1].map(s => s.text).join("")).toContain("↳ editing");
+  });
+});

@@ -275,6 +275,11 @@ export function agentRow(options: {
   if (live?.turns !== undefined && live.turns > 0) parts.push(`turn ${live.turns}`);
   if (live?.tokens) parts.push(`${formatCompactTokens(live.tokens)} tok`);
   if (entry.durationMs) parts.push(formatDuration(entry.durationMs));
+  else if (live && entry.startedAt != null && options.now > entry.startedAt) {
+    // A running agent's clock is still going: settled rows carry durationMs,
+    // live ones derive it from their start.
+    parts.push(formatDuration(options.now - entry.startedAt));
+  }
   const tail: WorkflowCardLine = parts.length > 0 ? [{ text: `${parts.join(" · ")} `, color: "dim" }] : [];
   const headRow = tail.length > 0 ? rightAlign(head, tail, width) : clampLine(head, width);
   // The live tail's last output line, one dim line under the head — a `↳`

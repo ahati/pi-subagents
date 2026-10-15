@@ -113,6 +113,13 @@ function lastNonEmptyLine(text: string): string {
   return "";
 }
 
+/** Turns taken from the session: one assistant message ≈ one model turn. */
+function assistantTurnCount(messages: readonly { role?: string }[] | undefined): number | undefined {
+  if (messages === undefined) return undefined;
+  const count = messages.filter(m => m.role === "assistant").length;
+  return count > 0 ? count : undefined;
+}
+
 /**
  * The run-state glyph for a roster workflow row, the same vocabulary the
  * subagent rows use: running `●`, paused `‖`, completed `✓`, failed/killed `✗`.
@@ -1667,7 +1674,10 @@ export class AgentHub implements Component {
     const activity = this.deps.agentActivity.get(entry.recordId);
     if (record === undefined && activity === undefined) return undefined;
     return {
-      turns: activity?.turnCount,
+      // Run-owned children get no activity tracker (the fleet registers
+      // those only for its own spawns), so the turn count falls back to the
+      // session: one assistant message ≈ one completed model turn.
+      turns: activity?.turnCount ?? assistantTurnCount(record?.session?.messages),
       tokens: record ? getLifetimeTotal(record.lifetimeUsage) : entry.tokens,
       tail: this.runAgentTail(record, activity),
     };
@@ -1676,22 +1686,21 @@ export class AgentHub implements Component {
   /**
    * The running agent's last output line. While a tool runs, the tool
    * summary is the live thing; while text streams, its last line. Between
-   * turns nothing streams and the activity's text is empty — the last
-   * assistant text is pulled from the session instead, exactly how the main
-   * window's agent tree derives its line (`getLastAssistantText`).
+   * turns nothing streams and the activity's text is empty — the newest
+   * output is pulled from the session instead, exactly how the main window's
+   * agent tree derives its line (`getLastAssistantText`), widened to tool
+   * results: while the next turn waits they are the freshest output there
+   * is, which is why the walk must not stop at the last assistant text.
    */
   private runAgentTail(record: AgentRecord | undefined, activity: AgentActivity | undefined): string {
     const tools = activity?.activeTools ?? new Map<string, string>();
     if (tools.size > 0) return describeActivity(tools, activity?.responseText);
     const streamed = lastNonEmptyLine(activity?.responseText ?? "");
     if (streamed) return streamed;
-    // Between turns nothing streams and the activity's text is empty — the
-    // last assistant text is pulled from the session instead, the same walk
-    // the main window's agent tree makes (`getLastAssistantText`).
     const messages = record?.session?.messages ?? [];
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
-      if (message.role !== "assistant") continue;
+      if (message.role !== "assistant" && message.role !== "toolResult") continue;
       const line = lastNonEmptyLine(extractText(message.content as unknown[]));
       if (line) return line;
     }

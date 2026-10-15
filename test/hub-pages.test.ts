@@ -376,26 +376,41 @@ describe("the run's state mark and its item cursor", () => {
     expect(pane.match(/turn \d/g)?.length).toBe(1);
   });
 
-  it("between turns the tail falls back to the session's last assistant line, like the main window's tree", () => {
-    // Nothing streams and no tool runs — the case that used to stick at
-    // "thinking…" forever.
-    const activity = new Map([["r2", { activeTools: new Map(), toolUses: 2, responseText: "", turnCount: 3 }]]);
+  it("between turns the tail falls back to the session's last output, like the main window's tree", () => {
+    // Nothing streams and no tool runs — and run-owned children get no
+    // activity tracker at all, which is the case that used to stick at
+    // "thinking…" or the session's OPENING line: the walk must reach past
+    // the last assistant text to the tool results, which are the freshest
+    // output while the next turn waits, and the turn count must come from
+    // the session too.
     const h = harness(
       [
         makeRecord({
           id: "r2", parentAgentId: "main", description: "api endpoints", status: "running",
-          session: { subscribe: () => () => {}, messages: [{ role: "assistant", content: [{ type: "text", text: "first line\nRoute handlers split into modules" }] }] },
+          session: {
+            subscribe: () => () => {},
+            messages: [
+              { role: "user", content: "split the route handlers" },
+              { role: "assistant", content: [{ type: "text", text: "I'll start by mapping the src/ directory." }] },
+              { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "src/api.ts\nsrc/routes.ts" }] } as never,
+              { role: "assistant", content: [{ type: "text", text: "Two files own the routes." }] },
+              { role: "toolResult", toolCallId: "t2", toolName: "bash", content: [{ type: "text", text: "api.ts: 120 refs\nroutes.ts: 14 refs" }] } as never,
+            ],
+          },
         }),
       ],
-      { workflows, workflowRun: () => phasedRunSource(), agentActivity: activity },
+      { workflows, workflowRun: () => phasedRunSource() },
     );
     h.open();
     h.press(DOWN);
     h.press("\r"); // page W
     const pane = runPane(h.frame());
-    // The LAST line of the last assistant text — the freshest output.
-    expect(pane).toContain("↳ Route handlers split into modules");
+    // The LAST tool result's last line — not the opener, not "thinking…".
+    expect(pane).toContain("↳ routes.ts: 14 refs");
+    expect(pane).not.toContain("I'll start by");
     expect(pane).not.toContain("thinking…");
+    // Two assistant messages → turn 2, derived where no tracker exists.
+    expect(pane).toContain("turn 2");
   });
 
   it("← focuses the parent pane, → descends — the run page's roster is reachable without esc", () => {

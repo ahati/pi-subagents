@@ -349,11 +349,15 @@ and the run's agents — the level the next `⏎` descends into.
 `↑↓` moves the `❯` across phases and run agents alike; it starts on the
 current phase. In `RUNNING WORKFLOW AGENTS`, a running agent with a record
 carries its live facts on the row — `turn <n>` and the record's token total,
-flush right beside the duration — and its last output line one dim row under
-it as a `↳` continuation: while a tool runs, the tool summary; while text
-streams, its last line; between turns, the last assistant line pulled from
-the session — the same derivation the main window's agent tree uses
-(`getLastAssistantText`). Settled and queued rows carry neither. The
+flush right beside the duration — a running row's clock derives from its
+start, since only settled rows carry a recorded duration — and its last
+output line one dim row under it as a `↳` continuation: while a tool runs,
+the tool summary; while text streams, its last line; otherwise the newest
+output in the session (the last tool result's, else the last assistant
+line), the walk the main window's agent tree makes (`getLastAssistantText`)
+widened to tool results. Run-owned children carry no activity tracker, so
+the turn count comes from the session too (one assistant message ≈ one
+model turn). Settled and queued rows carry neither. The
 18-column masters keep the section's clamped label and the compact rows only.
 `←` from any run page focuses its parent pane — the same level `esc` pops
 to, so the roster is reachable without closing anything — and `→` is `⏎`'s
