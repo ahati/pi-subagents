@@ -35,7 +35,8 @@ import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import type { ViewerKeybindings } from "./viewer-keys.js";
 import {
-  hintLine,
+  type FooterHint,
+  footerBand,
   masterPaneGeometry,
   paneGeometry,
   renderWindow,
@@ -161,16 +162,53 @@ const PAGE_PARENT: Record<HubPage, HubPage | undefined> = {
   L: "W",
 };
 
-/** The footer's keys, per page — the spec's bottom-controls table, as data. */
-const PAGE_KEYS: Record<HubPage, readonly string[]> = {
-  R: ["↑↓ select", "⏎ transcript", "l log", "p pause", "c copy", "f full", "esc close"],
-  T: ["↑↓ scroll", "o expand", "l log", "p pause", "r resume", "c copy", "k stop", "f full", "esc roster"],
-  SL: ["↑↓ scroll", "c copy tail", "p pause agent", "f full", "esc back"],
-  W: ["↑↓ item", "⏎ agent", "l run log", "s stop run", "f full", "esc roster"],
-  WA: ["p pause", "r resume", "o expand", "c copy", "l log", "k stop", "f full", "esc back"],
-  SAL: ["↑↓ scroll", "c copy tail", "p pause agent", "f full", "esc back"],
-  L: ["↑↓ scroll", "c copy tail", "s stop run", "f full", "esc back"],
+/**
+ * A page's footer band, as data: the left slot's actions — the readout is
+ * computed per render and drops first — and the right slot's hints. The right
+ * slot gains the twin toggle (the twin you would get) and the pinned escape
+ * anchor, so neither is repeated per page.
+ */
+interface PageFooterKeys {
+  actions: readonly string[];
+  hints: readonly string[];
+  /** Where `esc` lands, as the band's `Esc <target>` anchor. */
+  esc: string;
+}
+
+/** The footer's slots, per page — the spec's bottom-controls table, as data. */
+const PAGE_KEYS: Record<HubPage, PageFooterKeys> = {
+  R: { actions: ["⏎ transcript", "l log", "p pause", "c copy"], hints: ["↑↓ select", "⇥ activity"], esc: "close" },
+  T: {
+    actions: ["Enter steer", "x stop", "m md"],
+    hints: ["PgUp/PgDn", "j/k scroll", "o expand", "l log", "p pause", "c copy"],
+    esc: "roster",
+  },
+  SL: { actions: ["Enter steer", "x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
+  W: { actions: [], hints: ["↑↓ item", "⏎ agent", "l run log", "s stop run"], esc: "roster" },
+  WA: {
+    actions: ["Enter steer", "x stop", "m md"],
+    hints: ["PgUp/PgDn", "j/k scroll", "o expand", "l log", "p pause", "c copy"],
+    esc: "back",
+  },
+  SAL: { actions: ["Enter steer", "x stop"], hints: ["↑↓ scroll", "c copy tail", "p pause agent"], esc: "back" },
+  L: { actions: ["s stop run"], hints: ["↑↓ scroll", "c copy tail"], esc: "back" },
 };
+
+/** **R**'s run-row slots: the selected row type decides what the band offers. */
+const R_RUN_KEYS: PageFooterKeys = {
+  actions: ["⏎ open run", "s stop run", "c copy"],
+  hints: ["↑↓ select", "⇥ activity"],
+  esc: "close",
+};
+
+/**
+ * **TD**'s own actions — the expanded tool-call's pair. It replaces the page's
+ * markdown hint with them and drops the `o expand` hint: the call is already
+ * expanded, and `o collapse` is what undoes it.
+ */
+const TD_ACTIONS = ["c copy diff", "o collapse"] as const;
+const TD_REPLACED_ACTION = "m md";
+const TD_DROPPED_HINT = "o expand";
 
 /** The hub window's refuse/single-pane/two-pane thresholds (spec size ladder). */
 const HUB_MIN_WIDTH = 40;
@@ -507,6 +545,11 @@ export class AgentHub implements Component {
   private logBack: HubPage = "T";
   /** Log pages' scroll offset, reset when none is up. */
   private logScroll = 0;
+  /**
+   * The band's readout for a log page: the line count and scroll percent of
+   * the log pane as it last rendered. The pane knows them; the band cannot.
+   */
+  private logReadout: { lines: number; percent: number } | undefined;
   /** Whether the too-small refusal has already been announced. */
   private refused = false;
   /** Shared state object written back on close/toggle so the loop can resume. */
@@ -700,7 +743,9 @@ export class AgentHub implements Component {
 
     // The transcript pages own their keys through the same viewer; `esc` walks
     // back one level via the viewer's `onBack`, and the page keys arrive
-    // through its `onUnhandledKey` hook.
+    // through its `onUnhandledKey` hook. A page with no viewer (a record whose
+    // session is gone) still pops on the quit keys — a level up, never out of
+    // the window.
     if (this.page === "T" || this.page === "WA") {
       if (this.page === "WA" && (matchesKey(data, "down") || matchesKey(data, "up"))) {
         this.moveRunSelection(matchesKey(data, "down") ? 1 : -1);
@@ -709,6 +754,10 @@ export class AgentHub implements Component {
       if (this.chatViewer) {
         this.chatViewer.handleInput(data);
         this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
+        this.popPage();
         return;
       }
     }
@@ -942,6 +991,10 @@ export class AgentHub implements Component {
     this.chatViewer = undefined;
     this.chatRecordId = undefined;
     this.view = "table";
+    // The table view is the roster: the page pops with the view, so the next
+    // `esc` closes the hub rather than popping an orphaned transcript page.
+    this.page = "R";
+    this.stopArmed = false;
     this.clampSelection();
     this.requestRender();
   }
@@ -1095,8 +1148,10 @@ export class AgentHub implements Component {
     const chrome = header.length + 4 + (showStatus ? 1 : 0) + (showBlank ? 1 : 0);
     const bodyRows = Math.max(MIN_BODY_ROWS, terminalRows - chrome);
 
-    const dimRule: WindowRow = { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] };
     const body: WindowRow[] = [];
+    // A log page's readout is captured as its pane renders; clear it so a page
+    // without one never shows the last log's numbers.
+    this.logReadout = undefined;
 
     if (!twoPane) {
       // Stacked: one full-width page. `⏎` pushes the right pane's content as
@@ -1117,7 +1172,7 @@ export class AgentHub implements Component {
     const rows: WindowRow[] = [...header, ...body];
     if (showBlank) rows.push({ kind: "full", cells: [{ text: "" }] });
     if (showStatus) rows.push({ kind: "full", cells: [{ text: this.statusStrip(windowInnerWidth(width)) }] });
-    rows.push(dimRule, { kind: "full", cells: [{ text: this.pageFooter(windowInnerWidth(width)) }] });
+    rows.push({ kind: "band" }, { kind: "full", cells: [{ text: this.pageFooter(windowInnerWidth(width)) }] });
 
     return paintWindow(
       renderWindow({
@@ -1160,19 +1215,69 @@ export class AgentHub implements Component {
   }
 
   /**
-   * The page's own footer. The keys belong to the PAGE, so the same hints
-   * render in the popup twin and maximized alike; the shared fitter drops
-   * whole hints from the right.
+   * The page's footer band: the readout and the page's actions in the left
+   * slot, navigation, the page's keys, the twin toggle and the pinned escape
+   * anchor in the right. The window's fitter drops whole hints — the readout
+   * first — so the band never cuts one in half.
    */
   private pageFooter(width: number): string {
-    const th = this.theme;
-    // Per-row keys: workflow rows get the run's safe set, subagent rows the
-    // lifecycle set. The footer says which row type the cursor is on.
-    const keys = this.page === "R" && this.entries()[this.selected]?.kind === "workflow"
-      ? ["↑↓ select", "⏎ open run", "s stop run", "c copy", "f full", "esc close"]
-      : [...PAGE_KEYS[this.page]];
-    if (this.stopArmed) return truncateToWidth(`${th.fg("error", "x again to STOP")} ${hintLine(keys, Math.max(1, width - 16))}`, width);
-    return truncateToWidth(hintLine(keys, width), width);
+    const keys = this.page === "R" && this.entries()[this.selected]?.kind === "workflow" ? R_RUN_KEYS : PAGE_KEYS[this.page];
+    const viewer = this.viewerBand();
+    const expanded = (this.page === "T" || this.page === "WA") && (viewer?.expanded ?? false);
+    const actions = expanded
+      ? [...keys.actions.filter(action => action !== TD_REPLACED_ACTION), ...TD_ACTIONS]
+      : [...keys.actions];
+    const hints = expanded ? keys.hints.filter(hint => hint !== TD_DROPPED_HINT) : [...keys.hints];
+    const armed = this.stopArmed || (viewer?.stopArmed ?? false);
+
+    const left: FooterHint[] = [];
+    const readout = this.pageReadout();
+    if (readout) left.push({ text: readout, group: "readout" });
+    // The armed stop reads on whichever slot the page advertises it in, and
+    // sits leftmost among the actions so it outlives them when the band is
+    // tight. A page that does not advertise `x` still arms the roster's own.
+    if (armed) left.push({ text: "x again to STOP", group: "action" });
+    for (const action of actions) {
+      if (armed && action === "x stop") continue;
+      left.push({ text: action, group: "action" });
+    }
+    const right: FooterHint[] = [
+      ...hints.map((text): FooterHint => ({ text, group: "hint" })),
+      { text: `f ${this.popup ? "full" : "popup"}`, group: "hint" },
+      { text: `Esc ${keys.esc}`, group: "hint", pinned: true },
+    ];
+    return footerBand({ width, left, right });
+  }
+
+  /** The embedded viewer's band state, when a page is showing one. */
+  private viewerBand(): { text: string; expanded: boolean; stopArmed: boolean } | undefined {
+    return this.page === "T" || this.page === "WA" ? this.chatViewer?.bandReadout() : undefined;
+  }
+
+  /**
+   * The band's readout — the one hint that is data, not a key. T/WA read the
+   * embedded viewer's transcript; the log pages the log they just windowed;
+   * **W** the run's counters; **R** has none (its left slot is actions).
+   */
+  private pageReadout(): string | undefined {
+    if (this.page === "T" || this.page === "WA") return this.chatViewer?.bandReadout().text || undefined;
+    if (this.page === "SL" || this.page === "SAL" || this.page === "L") {
+      const log = this.logReadout;
+      return log ? `${log.lines} lines · ${log.percent}%` : undefined;
+    }
+    if (this.page === "W") {
+      const run = this.currentRun();
+      return run ? this.runReadout(run) : undefined;
+    }
+    return undefined;
+  }
+
+  /** **W**'s readout: the run's counters and how far through its phases it is. */
+  private runReadout(run: FleetWorkflow): string {
+    const groups = this.runGroups(run.id);
+    const parts = [`${run.doneCount}/${run.totalCount} agents`];
+    if (groups.length > 0) parts.push(`phase ${currentPhaseIndex(groups) + 1} of ${groups.length}`);
+    return parts.join(" · ");
   }
 
   /** The legacy activity list, still reachable with `2` — the roster's sibling view. */
@@ -1667,6 +1772,10 @@ export class AgentHub implements Component {
 
   /** The viewer keys that belong to the PAGE, not to the viewer. */
   private pageUnhandledKey(data: string): boolean {
+    // Anything but the stop key disarms a pending stop — the viewer hands
+    // every key it sees through here first, so this covers its own scrolling
+    // keys too, which the hub never sees again.
+    if (!matchesKey(data, "k") && !matchesKey(data, "x") && this.stopArmed) this.stopArmed = false;
     if (matchesKey(data, "l")) { this.pushLogPage(); return true; }
     if (matchesKey(data, "f")) { this.requestToggle(); return true; }
     if (matchesKey(data, "c")) { this.copyFocusedResult(); return true; }
@@ -1695,16 +1804,21 @@ export class AgentHub implements Component {
     this.requestRender();
   }
 
-  /** The log pages' keys: scroll, copy, pause, stop the run, expand, back. */
+  /**
+   * The log pages' keys: scroll, copy, pause, stop the focused agent, stop the
+   * run, expand, back. `k` stays scroll-up here (the roster and transcript
+   * pages are where it aliases `x`); any other key disarms a pending stop.
+   */
   private handleLogKey(data: string): boolean {
     const down = matchesKey(data, "down") || matchesKey(data, "j");
     const up = matchesKey(data, "up") || matchesKey(data, "k");
-    if (down || up) { this.scrollLog(down ? 1 : -1); return true; }
-    if (matchesKey(data, "c")) { this.copyFocusedResult(); return true; }
-    if (matchesKey(data, "p")) { this.pauseResumeFocused(); return true; }
-    if (matchesKey(data, "s") && this.page === "L") { this.stopRun(); return true; }
-    if (matchesKey(data, "f")) { this.requestToggle(); return true; }
-    if (matchesKey(data, "escape") || matchesKey(data, "q")) { this.popPage(); return true; }
+    if (down || up) { this.stopArmed = false; this.scrollLog(down ? 1 : -1); return true; }
+    if (matchesKey(data, "c")) { this.stopArmed = false; this.copyFocusedResult(); return true; }
+    if (matchesKey(data, "p")) { this.stopArmed = false; this.pauseResumeFocused(); return true; }
+    if (matchesKey(data, "s") && this.page === "L") { this.stopArmed = false; this.stopRun(); return true; }
+    if (matchesKey(data, "x") && (this.page === "SL" || this.page === "SAL")) { this.stopFocused(); return true; }
+    if (matchesKey(data, "f")) { this.stopArmed = false; this.requestToggle(); return true; }
+    if (matchesKey(data, "escape") || matchesKey(data, "q")) { this.stopArmed = false; this.popPage(); return true; }
     return false;
   }
 
@@ -1749,6 +1863,7 @@ export class AgentHub implements Component {
     const from = this.page;
     this.page = from === "SL" && this.logBack === "R" ? "R" : PAGE_PARENT[from]!;
     this.logScroll = 0;
+    this.stopArmed = false;
     // Back on the roster the pointer is what the right pane follows; deeper, the
     // pinned record stays the page's subject.
     if (this.page === "R" || this.page === "T") {
@@ -1837,9 +1952,21 @@ export class AgentHub implements Component {
     if (record) this.pauseResumeAgent(record);
   }
 
+  /**
+   * `x` on a page showing one agent — T and WA (the transcript pages), SL and
+   * SAL (the logs): two-press, exactly like the roster's `stopSelected` — the
+   * first press arms and the band says `x again to STOP`, the second aborts.
+   * Any other key disarms (see `pageUnhandledKey` and `handleLogKey`).
+   */
   private stopFocused(): void {
     const record = this.focusedRecord();
     if (!record || (record.status !== "running" && record.status !== "queued")) return;
+    if (!this.stopArmed) {
+      this.stopArmed = true;
+      this.requestRender();
+      return;
+    }
+    this.stopArmed = false;
     if (this.deps.manager.abort(record.id)) {
       this.deps.notify?.(`Stopped "${record.description}".`, "info");
     }
@@ -1852,10 +1979,17 @@ export class AgentHub implements Component {
     this.requestRender();
   }
 
-  /** The window of log lines the pane shows, from `offset` toward the tail. */
+  /**
+   * The window of log lines the pane shows, from `offset` toward the tail —
+   * and the readout the band reports for it, which is exactly this window.
+   */
   private scrollTail(lines: readonly WorkflowCardLine[], offset: number, rows: number): WorkflowCardLine[] {
     const max = Math.max(0, lines.length - rows);
     const start = Math.max(0, Math.min(offset, max));
+    this.logReadout = {
+      lines: lines.length,
+      percent: lines.length <= rows ? 100 : Math.round(((start + rows) / lines.length) * 100),
+    };
     return lines.slice(start, start + rows);
   }
 
