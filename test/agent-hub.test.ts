@@ -130,6 +130,24 @@ describe("agent hub mouse wheel", () => {
     return { h, component };
   }
 
+  it("moves the roster selection after an f toggle and esc back — the chat routing must not outlive the page", async () => {
+    const h = harness([
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
+    ]);
+    h.open({ agentId: "a1" });
+    h.press("f");
+    await h.flush();
+    h.press("\u001b"); // esc: T back to the roster
+    expect(h.frame().join("\n")).toContain("SUBAGENTS");
+    const component = h.components.at(-1)! as unknown as {
+      handleMouse(e: { type: string; wheelDelta?: number }): { handled?: boolean } | undefined;
+    };
+    expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
+    // The wheel moves the roster selection, not an invisible transcript.
+    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
+  });
+
   it("moves the roster selection and consumes the event", () => {
     const { h, component } = wheelHub([
       makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),

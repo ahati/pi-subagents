@@ -470,7 +470,7 @@ describe("ConversationViewer", () => {
       expect(joined).toContain("l6");
       expect(joined).toContain("l3"); // the tail four survive
       expect(joined).not.toContain("l1"); // everything earlier is elided
-      expect(joined).toContain("2 earlier lines");
+      expect(joined).toContain("… 2 earlier lines");
 
       // The end event clears it; with no result message yet the placeholder returns.
       emit({ type: "tool_execution_end", toolCallId: "t1" });

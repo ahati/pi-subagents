@@ -1918,6 +1918,10 @@ export class AgentHub implements Component {
     this.page = from === "SL" && this.logBack === "R" ? "R" : PAGE_PARENT[from]!;
     this.logScroll = 0;
     this.stopArmed = false;
+    // The full-screen chat is page T of the hub window; once the roster is
+    // back, the chat-view routing must not outlive the page — applyWheel's
+    // chat branch would otherwise scroll the transcript nobody is looking at.
+    if (!this.popup && this.view === "chat" && this.page === "R") this.view = "table";
     // Back on the roster the pointer is what the right pane follows; deeper, the
     // pinned record stays the page's subject.
     if (this.page === "R" || this.page === "T") {

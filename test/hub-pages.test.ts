@@ -704,7 +704,7 @@ describe("size ladder", () => {
 
   it("fills the terminal exactly: chrome is the two edges, the band rule and the footer", () => {
     for (const rows of [10, 12, 15, 16, 24, 40]) {
-      for (const cols of [50, 60, 120]) {
+      for (const cols of [40, 50, 60, 120]) {
         const h = harness([makeRecord({ id: "a1" })], {}, { cols, rows });
         h.open();
         const frame = h.frame(cols);
@@ -852,7 +852,7 @@ describe("P8 — roster grammar", () => {
   it("styles the group headers dim and bold, and selects nothing on them", () => {
     const seen: Array<{ color?: string; bold?: string }> = [];
     const recording = {
-      fg: (c: string, s: string) => { seen.push({ color: c }); return s; },
+      fg: (c: string, s: string) => { seen.push({ color: c, text: s }); return s; },
       bold: (s: string) => { seen.push({ bold: s }); return s; },
     };
     const h = harness(many(1), {
@@ -862,7 +862,9 @@ describe("P8 — roster grammar", () => {
     h.frame();
     expect(seen.some(e => e.bold === "SUBAGENTS")).toBe(true);
     expect(seen.some(e => e.bold === "WORKFLOWS")).toBe(true);
-    expect(seen.filter(e => e.color === "dim").length).toBeGreaterThanOrEqual(2);
+    // Dim is bound to the headers themselves, not merely present somewhere.
+    expect(seen.some(e => e.color === "dim" && e.text === "SUBAGENTS")).toBe(true);
+    expect(seen.some(e => e.color === "dim" && e.text === "WORKFLOWS")).toBe(true);
     // One ↓ crosses the WORKFLOWS header onto the run row: the header took no
     // cursor slot, so the first press lands on the run, not on the header.
     h.press("\x1b[B");
@@ -1033,6 +1035,13 @@ describe("P8 — the footer band", () => {
       // The escape anchor is the last thing to go.
       expect(right, `${cols}: Esc pinned`).toContain("Esc close");
       if (cols === 120) expect(left).toBe(R_LEFT.join(" · "));
+      // Order, pinned at the narrowest width: the readout-less left slot
+      // keeps its most important action, whole hints survive in the spec's
+      // order, and the pinned anchor closes the right slot.
+      if (cols === 64) {
+        expect(left ?? "").toBe("⏎ transcript");
+        expect(right ?? "").toBe("↑↓ select · ⇥ activity · f popup · Esc close");
+      }
     }
   });
 
