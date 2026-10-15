@@ -23,9 +23,9 @@ import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
-/** Base lines consumed by chrome: top border + header + invocation + header sep + footer sep + footer + bottom border. */
-const CHROME_LINES_BASE = 7;
 const MIN_VIEWPORT = 3;
+/** Rows the composer spends: its input row and its `Enter send · Esc cancel` hint. */
+const COMPOSER_ROWS = 2;
 /** Height ceiling shared by the overlay's `maxHeight` and the viewer's internal viewport cap. */
 export const VIEWPORT_HEIGHT_PCT = 70;
 const SCROLLBAR_WIDTH = 1;
@@ -51,6 +51,33 @@ export interface ConversationViewerOptions {
    * `VIEWPORT_HEIGHT_PCT`.
    */
   maxHeightPct?: number | (() => number);
+  /**
+   * Content rows the host has left for this viewer. An embedded host knows
+   * this exactly — its frame's own arithmetic produced it — so it replaces the
+   * `maxHeightPct` ceiling instead of stacking with it. A function is re-read
+   * on every render, so a resizing host drags the viewport along.
+   */
+  viewportRows?: number | (() => number);
+  /**
+   * The viewer's own header block — the header line, the `↳` line and the rule
+   * under them. `false` suppresses all three for a host that composes identity
+   * in its own frame (which then owns the rule too); a prebuilt block replaces
+   * the two text rows. Defaults to the viewer's own block.
+   */
+  identity?: readonly string[] | false;
+  /**
+   * The viewer's own footer row and the rule above it. `false` for a host that
+   * draws its own footer band; the composer still renders its own rows, so
+   * steering stays possible. Defaults to drawn (the standalone overlay keeps
+   * its clickable footer).
+   */
+  footer?: boolean;
+  /**
+   * The run this agent belongs to: leads the `↳` line the way the run-agent
+   * pages read (`↳ migrate-v2 · opencode-go/… · worktree`). A function is
+   * re-read on every render. Undefined → the model alone.
+   */
+  parentName?: string | (() => string | undefined);
   /**
    * When set, Esc/Ctrl+C/Q return to the parent surface by calling this instead
    * of resolving `done` (which would close the whole overlay). The quit keys
@@ -700,39 +727,14 @@ export class ConversationViewer implements Component, Focusable {
     const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
-    // Header
     if (!this.fullscreen && !frameless) lines.push(hrTop);
-    const modeLabel = getPromptModeLabel(this.record.type);
-    const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
-    const statusIcon = this.record.status === "running"
-      ? th.fg("accent", "●")
-      : this.record.status === "completed"
-        ? th.fg("success", "✓")
-        : this.record.status === "error"
-          ? th.fg("error", "✗")
-          : th.fg("dim", "○");
-    const duration = formatDuration(this.record.startedAt, this.record.completedAt);
-
-    const headerParts: string[] = [duration];
-    const toolUses = this.activity?.toolUses ?? this.record.toolUses;
-    if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
-    // Spend from the record, context from the live session: the record is the
-    // only total that survives the agent finishing and the only one carrying a
-    // nested child's spend.
-    const tokens = getLifetimeTotal(this.record.lifetimeUsage);
-    if (tokens > 0) {
-      const percent = getSessionContextPercent(this.activity?.session);
-      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
+    // Header block — suppressed (or replaced) when the host composes identity
+    // in its own frame, so exactly one identity block is ever drawn.
+    const identity = this.identityBlock();
+    if (identity.length > 0) {
+      for (const line of identity) lines.push(row(line));
+      lines.push(hrMid);
     }
-    const cost = this.showCost ? formatCost(getLifetimeCost(this.record.lifetimeUsage)) : "";
-    if (cost) headerParts.push(cost);
-
-    lines.push(row(
-      `${statusIcon} ${renderAgentRecordName(this.record, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
-    ));
-    const invocationLine = this.invocationLine();
-    lines.push(row(invocationLine));
-    lines.push(hrMid);
 
     // Content area — the fullscreen observer scrolls a ScrollView over the
     // (cached) content lines; every other mode slices them itself.
@@ -785,7 +787,9 @@ export class ConversationViewer implements Component, Focusable {
       const padding = Math.floor((innerW - labelWidth) / 2);
       this.latestTarget = { row: lines.length, start: padding + 1, end: padding + 1 + labelWidth };
       lines.push(row(th.fg("dim", "─".repeat(padding)) + th.fg("accent", label) + th.fg("dim", "─".repeat(innerW - padding - labelWidth))));
-    } else {
+    } else if (this.footerShown()) {
+      // The rule above the footer belongs to the footer; a host that draws its
+      // own band draws its own band rule.
       lines.push(hrMid);
     }
     if (this.composer) {
@@ -797,7 +801,7 @@ export class ConversationViewer implements Component, Focusable {
       const composeLeft = th.fg("accent", "✎ steer");
       const composeGap = Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeHint));
       lines.push(row(composeLeft + " ".repeat(composeGap) + composeHint));
-    } else {
+    } else if (this.footerShown()) {
       // Actions on the left, navigation on the right. The scroll hint keeps its
       // full key list so the less-obvious bindings stay discoverable; it leads
       // the right group so "Esc close" is the only part that truncates first.
@@ -851,6 +855,54 @@ export class ConversationViewer implements Component, Focusable {
   private framelessNow(): boolean {
     const flag = this.options?.frameless;
     return typeof flag === "function" ? flag() : !!flag;
+  }
+
+  /** Whether the viewer draws its own footer row (and the rule above it). */
+  private footerShown(): boolean {
+    return this.options?.footer !== false;
+  }
+
+  /**
+   * The rows of the viewer's own header block: the header line and the `↳`
+   * line. Suppressed (`false`) or replaced (a prebuilt block) when the host's
+   * frame composes identity itself — exactly one identity block per pane.
+   */
+  private identityBlock(): readonly string[] {
+    const identity = this.options?.identity;
+    if (identity === false) return [];
+    if (Array.isArray(identity)) return identity;
+    return this.ownIdentityLines();
+  }
+
+  /** The viewer's own header line and `↳` line, when it draws them itself. */
+  private ownIdentityLines(): [string, string] {
+    const th = this.theme;
+    const modeLabel = getPromptModeLabel(this.record.type);
+    const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
+    const statusIcon = this.record.status === "running"
+      ? th.fg("accent", "●")
+      : this.record.status === "completed"
+        ? th.fg("success", "✓")
+        : this.record.status === "error"
+          ? th.fg("error", "✗")
+          : th.fg("dim", "○");
+    const headerParts: string[] = [formatDuration(this.record.startedAt, this.record.completedAt)];
+    const toolUses = this.activity?.toolUses ?? this.record.toolUses;
+    if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
+    // Spend from the record, context from the live session: the record is the
+    // only total that survives the agent finishing and the only one carrying a
+    // nested child's spend.
+    const tokens = getLifetimeTotal(this.record.lifetimeUsage);
+    if (tokens > 0) {
+      const percent = getSessionContextPercent(this.activity?.session);
+      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
+    }
+    const cost = this.showCost ? formatCost(getLifetimeCost(this.record.lifetimeUsage)) : "";
+    if (cost) headerParts.push(cost);
+    return [
+      `${statusIcon} ${renderAgentRecordName(this.record, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      this.invocationLine(),
+    ];
   }
 
   /** Stoppable only when a stop handler exists and the agent is still active. */
@@ -1011,6 +1063,12 @@ export class ConversationViewer implements Component, Focusable {
 
   private viewportHeight(): number {
     if (this.fullscreen) return Math.max(0, this.tui.terminal.rows - this.chromeLines());
+    // A host that knows its frame's arithmetic hands the body budget in
+    // directly (the hub's page panes); it replaces the overlay-ceiling
+    // approximation rather than stacking with it.
+    const explicit = this.options?.viewportRows;
+    const rows = typeof explicit === "function" ? explicit() : explicit;
+    if (rows !== undefined) return Math.max(1, Math.floor(rows));
     // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
     // more lines than the overlay shows and clip the footer. A function option
     // is re-read per render so a resizing host drags the viewport along.
@@ -1020,10 +1078,23 @@ export class ConversationViewer implements Component, Focusable {
     return Math.max(MIN_VIEWPORT, maxRows - this.chromeLines());
   }
 
+  /**
+   * Rows the viewer emits around its content in the current mode — the
+   * capacity basis `viewportHeight` subtracts. Counted from what `render`
+   * actually draws and what the host suppressed, never from a fixed constant:
+   * the frameless path has no border rows, and a host that composes identity
+   * and draws its own band gets content rows only.
+   */
   private chromeLines(): number {
-    // The composer adds one row above the footer hint while it's open.
-    // Fullscreen has no top border/bottom border rows (−2).
-    return CHROME_LINES_BASE - (this.fullscreen ? 2 : 0) + (this.composer ? 1 : 0);
+    const framed = !this.fullscreen && !this.framelessNow();
+    const identity = this.identityBlock().length;
+    const borders = framed ? 2 : 0;
+    const identityRule = identity > 0 ? 1 : 0;
+    if (!this.footerShown()) {
+      // Only the composer can still contribute chrome to a footerless host.
+      return borders + identity + identityRule + (this.composer ? COMPOSER_ROWS : 0);
+    }
+    return borders + identity + identityRule + 1 + (this.composer ? COMPOSER_ROWS : 1);
   }
 
   /**
@@ -1038,7 +1109,8 @@ export class ConversationViewer implements Component, Focusable {
     // models whose short names read alike.
     const { modelName, modelId, tags } = buildInvocationTags(this.record.invocation);
     const model = modelId ?? modelName;
-    const parts = model ? [model, ...tags] : tags;
+    const parent = typeof this.options?.parentName === "function" ? this.options.parentName() : this.options?.parentName;
+    const parts = [...(parent ? [parent] : []), ...(model ? [model] : []), ...tags];
     return this.theme.fg("dim", `  ↳ ${parts.length > 0 ? parts.join(" · ") : "—"}`);
   }
 
@@ -1248,7 +1320,7 @@ export class ConversationViewer implements Component, Focusable {
       lines.push(truncateToWidth(th.fg("dim", indent + l), width));
     }
     if (body.length > RESULT_PREVIEW_LINES) {
-      lines.push(truncateToWidth(th.fg("dim", `${indent}… +${body.length - RESULT_PREVIEW_LINES} lines (m for full)`), width));
+      lines.push(truncateToWidth(th.fg("dim", `${indent}… +${body.length - RESULT_PREVIEW_LINES} lines (o/ctrl+o for full)`), width));
     }
     return lines;
   }
@@ -1434,10 +1506,10 @@ export class ConversationViewer implements Component, Focusable {
       needsSeparator = true;
     }
 
-    // Streaming indicator for running agents
+    // Streaming indicator for running agents — the live tail, as the last
+    // content row (no blank spacer: the body's tail is where the eye lands).
     if (this.record.status === "running" && this.activity) {
       const act = describeActivity(this.activity.activeTools, this.activity.responseText);
-      lines.push("");
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }
 

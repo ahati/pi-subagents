@@ -508,6 +508,12 @@ export class AgentHub implements Component {
   private stopArmed = false;
   /** Chat view state — one viewer instance per opened agent. */
   private chatViewer: ConversationViewer | undefined;
+  /**
+   * The rows a page's right pane budgeted for its viewer body this frame. The
+   * embedded viewer reads it through its `viewportRows` option, so its
+   * capacity matches the frame's arithmetic instead of an overlay ceiling.
+   */
+  private chatViewportRows = 1;
   /** The embedded conversation viewer while the hub is on its chat view. */
   get chatView(): ConversationViewer | undefined { return this.chatViewer; }
   private chatRecordId: string | undefined;
@@ -1487,8 +1493,12 @@ export class AgentHub implements Component {
     }
     const viewer = this.ensureViewer(record);
     if (!viewer) return [];
+    const capacity = this.bodyRows(rows, false);
+    // The frame budgeted this many rows for the body; the viewer renders
+    // exactly that many and the host wraps them in the identity block.
+    this.chatViewportRows = capacity;
     const body: PaneRow[] = viewer.render(width).map((text): PaneRow => [{ text }]);
-    return this.identityPane(this.agentIdentity(record, width), padLines(body, this.bodyRows(rows, false)));
+    return this.identityPane(this.agentIdentity(record, width), padLines(body, capacity));
   }
 
   /**
@@ -1771,7 +1781,13 @@ export class AgentHub implements Component {
       this.deps.scrollbarMode?.() ?? "auto",
       this.deps.backgroundAction?.(record, message => this.deps.notify?.(message, "info")),
       {
-        maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
+        // The page's frame draws the identity block and the footer band, so
+        // the viewer contributes body rows only — one identity block per pane.
+        identity: false,
+        footer: false,
+        viewportRows: () => this.chatViewportRows,
+        // The run the agent belongs to, as on the page's own identity block.
+        parentName: () => (this.page === "WA" || this.page === "SAL" ? this.currentRun()?.name : undefined),
         onBack: () => this.popPage(),
         backHint: () => "↑↓ scroll · esc back · f full",
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",

@@ -273,6 +273,33 @@ describe("the header block every right pane opens with", () => {
     expect(rows[3], "the row under the rule is body, not another rule or blank").not.toBe(before[2]);
     expect(rows[3].trim()).not.toBe("");
   });
+
+  it("T/WA: the embedded viewer contributes no header, rule or footer of its own", () => {
+    const pages: Array<{ page: string; to: (press: (key: string) => void) => void }> = [
+      { page: "T", to: p => p("\r") },
+      { page: "WA", to: p => { p(DOWN); p("\r"); p("\r"); } },
+    ];
+    for (const { page, to } of pages) {
+      const h = pageHarness();
+      h.open();
+      to(h.press);
+      const rows = rightRows(h.frame());
+      // Exactly one rule in the pane — the frame's header rule at row 2. The
+      // viewer's own identity rule and its footer rule are suppressed, so a
+      // second full-cell rule would be a second identity block.
+      const ruleRows = rows
+        .map((r, i) => (r.trim() === "─".repeat(DETAIL_WIDTH) ? i : -1))
+        .filter(i => i >= 0);
+      expect(ruleRows, page).toEqual([2]);
+      // Body opens directly under the rule with the transcript, never with a
+      // viewer-drawn header block or footer row.
+      expect(rows[3].trim(), page).toBe("(waiting for first message...)");
+      const body = rows.slice(3).join("\n");
+      expect(body, page).not.toContain("↳");
+      expect(body, page).not.toContain("Esc ");
+      expect(body, page).not.toContain("m md");
+    }
+  });
 });
 
 /** A four-phase run with agents in two of them, for the state mark and cursor. */
@@ -564,6 +591,26 @@ describe("the footer band", () => {
     expect(right).not.toContain("o expand");
     // TD is a view state: the roster page is still the one beneath it.
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
+  });
+
+  it("TD: plain `o` is the advertised alias of the same expand toggle", () => {
+    const viaO = harness([makeRecord({ id: "a1" })], { workflows });
+    viaO.open();
+    viaO.press("\r"); // T
+    viaO.frame(); // the viewer builds on the first render
+    const viaCtrlO = harness([makeRecord({ id: "a1" })], { workflows });
+    viaCtrlO.open();
+    viaCtrlO.press("\r");
+    viaCtrlO.frame();
+    viaCtrlO.press("\x0f"); // ctrl+o — the resolved binding
+    viaO.press("o"); // the band's advertised alias
+    expect(bandOf(viaO.frame())).toBe(bandOf(viaCtrlO.frame()));
+    expect(slots(bandOf(viaO.frame())).left).toContain("c copy diff");
+    expect(bandOf(viaO.frame())).not.toContain("o expand");
+    // The alias toggles both ways.
+    viaO.press("o");
+    expect(slots(bandOf(viaO.frame())).right).toContain("o expand");
+    expect(slots(bandOf(viaO.frame())).left).toContain("m md");
   });
 
   it("SL: the log's readout rides the left slot, the page's keys the right", () => {
