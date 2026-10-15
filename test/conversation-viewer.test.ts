@@ -107,7 +107,7 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer invocation line", () => {
-  /** The `↳` metadata row for a record, or "" when the viewer renders none. */
+  /** The `↳` metadata row for a record — the header block's second row, always drawn. */
   function invocationLine(invocation: AgentRecord["invocation"]): string {
     const viewer = new ConversationViewer(
       mockTui(30, 200), mockSession([]), mockRecord({ invocation }), undefined,
@@ -146,8 +146,10 @@ describe("ConversationViewer invocation line", () => {
     })).toBe("↳ anthropic/claude-haiku-4-5 (asked google/gemini-3-pro) · thinking: low (asked max)");
   });
 
-  it("renders no row at all for a record with no invocation", () => {
-    expect(invocationLine(undefined)).toBe("");
+  it("renders the empty row for a record with no invocation", () => {
+    // The row is one of the header block's three: it stays, so the rule and
+    // the body below it do not move by a row per record.
+    expect(invocationLine(undefined)).toBe("↳ —");
   });
 });
 

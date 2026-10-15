@@ -23,8 +23,8 @@ import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
-/** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
-const CHROME_LINES_BASE = 6;
+/** Base lines consumed by chrome: top border + header + invocation + header sep + footer sep + footer + bottom border. */
+const CHROME_LINES_BASE = 7;
 const MIN_VIEWPORT = 3;
 /** Height ceiling shared by the overlay's `maxHeight` and the viewer's internal viewport cap. */
 export const VIEWPORT_HEIGHT_PCT = 70;
@@ -726,7 +726,7 @@ export class ConversationViewer implements Component, Focusable {
       `${statusIcon} ${renderAgentRecordName(this.record, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
-    if (invocationLine) lines.push(row(invocationLine));
+    lines.push(row(invocationLine));
     lines.push(hrMid);
 
     // Content area — the fullscreen observer scrolls a ScrollView over the
@@ -1000,18 +1000,23 @@ export class ConversationViewer implements Component, Focusable {
   private chromeLines(): number {
     // The composer adds one row above the footer hint while it's open.
     // Fullscreen has no top border/bottom border rows (−2).
-    return CHROME_LINES_BASE - (this.fullscreen ? 2 : 0) + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0);
+    return CHROME_LINES_BASE - (this.fullscreen ? 2 : 0) + (this.composer ? 1 : 0);
   }
 
-  private invocationLine(): string | undefined {
+  /**
+   * The header block's `↳` metadata row. Always drawn — it is one of the
+   * header block's three rows, so the content below it starts at the same
+   * place whether or not this record carries an invocation. With no tag to
+   * show it reads `—` rather than collapsing the block.
+   */
+  private invocationLine(): string {
     // Canonical id here, short label everywhere else: this overlay is opened to
     // inspect one agent and has the width for it, and two providers can serve
     // models whose short names read alike.
     const { modelName, modelId, tags } = buildInvocationTags(this.record.invocation);
     const model = modelId ?? modelName;
     const parts = model ? [model, ...tags] : tags;
-    if (parts.length === 0) return undefined;
-    return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
+    return this.theme.fg("dim", `  ↳ ${parts.length > 0 ? parts.join(" · ") : "—"}`);
   }
 
   // ---- Detailed-log rendering (omp-style) ----

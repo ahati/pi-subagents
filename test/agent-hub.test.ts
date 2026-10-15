@@ -225,12 +225,19 @@ describe("agent hub mouse in regular TUI mode", () => {
   });
 
   it("consumes non-wheel mouse reports without moving anything", () => {
-    const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
-    h.open();
-    const before = h.frame().join("\n");
-    h.press("\x1b[<0;10;5M"); // left click
-    h.press("\x1b[<0;10;5m"); // release
-    expect(h.frame().join("\n")).toBe(before);
+    // The identity block carries a live clock (`1ms (running)` ticks between
+    // two renders), so the clock is frozen for the byte-for-byte comparison.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
+      h.open();
+      const before = h.frame().join("\n");
+      h.press("\x1b[<0;10;5M"); // left click
+      h.press("\x1b[<0;10;5m"); // release
+      expect(h.frame().join("\n")).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -687,7 +694,9 @@ describe("agent hub roster", () => {
     expect(h.settled()).toBe(false);
     expect(h.components).toHaveLength(1);
     const frame = h.frame().join("\n");
-    expect(frame).toContain("Agents & Workflows › audit");
+    // The constant title names the window; the header block names the run.
+    expect(h.frame()[0]).toContain(" Agents & Workflows ");
+    expect(frame).toContain("● audit  workflow · 1/2 agents");
     expect(frame).toContain("⏎ agent");
   });
 

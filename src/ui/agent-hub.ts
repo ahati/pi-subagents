@@ -25,10 +25,10 @@ import { type Component, Input, matchesKey, type ScrollViewScrollbar, type TUI, 
 import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
-import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { buildPhaseGroups, displayState, type WorkflowAgentEntry } from "../workflow/progress.js";
+import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { buildPhaseGroups, currentPhaseIndex, displayState, elapsedMs, formatDuration, type PhaseGroup, type WorkflowAgentEntry } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
-import { describeActivity, formatCost, formatFleetElapsed } from "./agent-widget.js";
+import { buildInvocationTags, describeActivity, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
 import { copyRecordResult } from "./copy-result.js";
 import type { FleetWorkflow } from "./fleet-list.js";
@@ -178,6 +178,12 @@ const HUB_MIN_ROWS = 10;
 const HUB_FULL_ROWS = 16;
 /** The status strip's prefix — `describeActivity`'s output follows it. */
 const STATUS_PREFIX = "❞";
+/**
+ * The window's title: the constant ` Agents & Workflows `, which fills the
+ * 20-column master cell exactly. The header block, never the title, names the
+ * item the right pane is showing.
+ */
+const HUB_TITLE = " Agents & Workflows ";
 /** How the window refuses a terminal under the ladder. */
 export const HUB_SIZE_REFUSAL = "Agent hub needs a terminal ≥ 40×10";
 
@@ -287,6 +293,105 @@ export function statusGlyph(status: AgentRecord["status"], th: Theme): string {
       return th.fg("dim", "·");
   }
 }
+
+/**
+ * The header block's `↳` line: the run name when the page sits inside one,
+ * then the canonical model, then whatever invocation tags apply. A record with
+ * nothing to say still draws the line — `—` — because the block is exactly
+ * three rows on every page and the rule under it never moves.
+ */
+function invocationSummary(record: AgentRecord, parentName?: string): string {
+  const { modelName, modelId, tags } = buildInvocationTags(record.invocation);
+  const model = modelId ?? modelName;
+  const parts = [...(parentName ? [parentName] : []), ...(model ? [model] : []), ...tags];
+  return parts.length > 0 ? parts.join(" · ") : "—";
+}
+
+/**
+ * The agent header block's two text lines (spec: *the right pane opens with a
+ * header block*). Every pane that shows an agent — R's preview, T, SL, WA,
+ * SAL — opens with these, then the frame's header rule, then its body.
+ *
+ * `parentName` is the run the agent belongs to; the run-agent pages lead their
+ * `↳` line with it.
+ */
+export function agentHeaderLines(input: {
+  record: AgentRecord;
+  activity: AgentActivity | undefined;
+  width: number;
+  th: Theme;
+  parentName?: string;
+}): WorkflowCardLine[] {
+  const { activity, parentName, record, th, width } = input;
+  const mode = getPromptModeLabel(record.type);
+  const tools = activity?.toolUses ?? record.toolUses;
+  const elapsed = formatDuration(elapsedMs({ startTime: record.startedAt, endTime: record.completedAt }, Date.now()));
+  const tokens = getLifetimeTotal(record.lifetimeUsage);
+  const stats: string[] = [];
+  if (tools > 0) stats.push(`${tools} tool${tools === 1 ? "" : "s"}`);
+  stats.push(`${elapsed} (${record.status})`);
+  if (tokens > 0) stats.push(formatSessionTokens(tokens, getSessionContextPercent(activity?.session), th, record.compactionCount));
+  return [
+    clampLine([
+      { text: `${statusGlyph(record.status, th)} ${renderAgentRecordName(record, th, { bold: true })}${mode ? th.fg("dim", ` (${mode})`) : ""}` },
+      { text: `  ${record.description}`, color: "muted" },
+      { text: ` · ${stats.join(" · ")}`, color: "dim" },
+    ], width),
+    clampLine([{ text: th.fg("dim", `  ↳ ${invocationSummary(record, parentName)}`) }], width),
+  ];
+}
+
+/**
+ * The run header block's two text lines: the run's identity and counters, then
+ * where the run currently is. A settled run freezes its clock and reads
+ * `↳ <m> phases · <state word>`.
+ */
+export function runHeaderLines(input: {
+  run: FleetWorkflow;
+  groups: readonly PhaseGroup[];
+  width: number;
+  th: Theme;
+  now?: number;
+}): WorkflowCardLine[] {
+  const { groups, run, th, width } = input;
+  const active = run.status === "running" || run.status === "paused";
+  const state = workflowStatusWord(run.status);
+  const elapsed = formatDuration(elapsedMs({ startTime: run.startedAt, endTime: run.completedAt }, input.now ?? Date.now()));
+  const flight = groups.reduce((count, group) => count + group.agents.filter(entry => displayState(entry, true) === "running").length, 0);
+  const subtext = groups.length === 0 ? state
+    : !active ? `${groups.length} phase${groups.length === 1 ? "" : "s"} · ${state}`
+    : runPhaseSubtext(groups, flight);
+  return [
+    clampLine([
+      { text: `${workflowStatusGlyph(run.status, th)} ${th.bold(run.name)}` },
+      { text: `  workflow · ${run.doneCount}/${run.totalCount} agents · ${elapsed} (${state})`, color: "dim" },
+    ], width),
+    clampLine([{ text: th.fg("dim", `  ↳ ${subtext}`) }], width),
+  ];
+}
+
+/** `phase 2 of 4 — migrate · 2 agents in flight`, a live run's `↳` line. */
+function runPhaseSubtext(groups: readonly PhaseGroup[], flight: number): string {
+  const current = currentPhaseIndex(groups);
+  const parts = [`phase ${current + 1} of ${groups.length} — ${groups[current].title}`];
+  if (flight > 0) parts.push(`${flight} agent${flight === 1 ? "" : "s"} in flight`);
+  return parts.join(" · ");
+}
+
+/**
+ * A right-pane row: content cells, or the marker for the frame's header rule.
+ * The rule itself is `renderWindow`'s — a surface never spells its glyphs or
+ * its role — so the composer emits a marker where the rule belongs.
+ */
+type PaneRow = WorkflowCardLine | { kind: "headerRule" };
+
+/** Rows the identity block spends: the header line, the `↳` line, the header rule. */
+const IDENTITY_ROWS = 3;
+
+/** The one marker value the composer and `renderHubPage` agree on by identity. */
+const HEADER_RULE: PaneRow = { kind: "headerRule" };
+
+const isHeaderRule = (row: PaneRow | undefined): row is { kind: "headerRule" } => row !== undefined && !Array.isArray(row);
 
 /** Overlay geometry for the popup panel — the familiar windowed viewer size. */
 const POPUP_OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` };
@@ -968,15 +1073,18 @@ export class AgentHub implements Component {
 
   /**
    * The unified window: the roster (or a run's agent list) on the left, the
-   * current page's detail on the right, one breadcrumb title, a full-width
+   * current page's detail on the right, the constant window title, a full-width
    * status strip, and the page's own footer.
+   *
+   * The detail pane opens with its identity block on every page; on run-agent
+   * pages the `↳` line leads with the run name.
    *
    * Two-pane down to {@link TWO_PANE_MIN_WIDTH}, stacked below it: the pane
    * policy is the size ladder's, the columns are the shared window's.
    */
   private renderHubPage(width: number, terminalRows: number): string[] {
     const twoPane = width >= TWO_PANE_MIN_WIDTH;
-    const header: WindowRow[] = [{ kind: "full", cells: [{ text: this.breadcrumb(width) }] }];
+    const header: WindowRow[] = [];
     if (this.filterInput || this.filterText) {
       header.push({ kind: "full", cells: [{ text: this.filterLine(windowInnerWidth(width)) }] });
     }
@@ -993,17 +1101,20 @@ export class AgentHub implements Component {
     if (!twoPane) {
       // Stacked: one full-width page. `⏎` pushes the right pane's content as
       // its own page; `esc` pops it — the page model unchanged, one column.
-      for (const line of this.stackedLines(width - 4, bodyRows)) body.push({ kind: "full", cells: line });
+      body.push(...this.stackedLines(width - 4, bodyRows));
     } else {
       const panes = masterPaneGeometry(width);
       const left = this.leftPaneLines(panes.listWidth, bodyRows);
       const right = this.rightPaneLines(panes.detailWidth, bodyRows);
       for (let i = 0; i < bodyRows; i++) {
-        body.push({ kind: "split", left: left[i] ?? [], right: right[i] ?? [] });
+        const rightRow = right[i];
+        body.push(isHeaderRule(rightRow)
+          ? { kind: "headerRule", left: left[i] }
+          : { kind: "split", left: left[i], right: rightRow ?? [] });
       }
     }
 
-    const rows: WindowRow[] = [...header, dimRule, ...body];
+    const rows: WindowRow[] = [...header, ...body];
     if (showBlank) rows.push({ kind: "full", cells: [{ text: "" }] });
     if (showStatus) rows.push({ kind: "full", cells: [{ text: this.statusStrip(windowInnerWidth(width)) }] });
     rows.push(dimRule, { kind: "full", cells: [{ text: this.pageFooter(windowInnerWidth(width)) }] });
@@ -1013,26 +1124,12 @@ export class AgentHub implements Component {
         width,
         box: UNICODE_PANE_BOX,
         panes: twoPane ? masterPaneGeometry(width) : undefined,
-        title: ` ${this.breadcrumb(windowInnerWidth(width))} `,
+        title: HUB_TITLE,
         rows,
         ellipsis: "…",
       }),
       this.theme,
     );
-  }
-
-  /** `Agents & Workflows › run › agent › log` — the page trail, truncated to fit. */
-  private breadcrumb(width: number): string {
-    const th = this.theme;
-    const parts = ["Agents & Workflows"];
-    const run = this.currentRun();
-    if (this.page === "W" || this.page === "WA" || this.page === "SAL" || this.page === "L") {
-      if (run) parts.push(run.name);
-    }
-    if (this.page === "WA" || this.page === "SAL") parts.push(this.selectedRunAgentLabel() ?? "agent");
-    if (this.page === "T" || this.page === "SL") parts.push(this.selectedAgentLabel() ?? "agent");
-    if (this.page === "SL" || this.page === "SAL" || this.page === "L") parts.push("log");
-    return truncateToWidth(th.bold(parts.join(th.fg("dim", " › "))), width);
   }
 
   /**
@@ -1243,8 +1340,8 @@ export class AgentHub implements Component {
     }
   }
 
-  /** The right pane: the selected item's detail, per page. */
-  private rightPaneLines(width: number, rows: number): WorkflowCardLine[] {
+  /** The right pane: the selected item's detail, per page. Identity is composed in front of it. */
+  private rightPaneLines(width: number, rows: number): PaneRow[] {
     switch (this.page) {
       case "R":
         return this.previewLines(width, rows);
@@ -1253,46 +1350,51 @@ export class AgentHub implements Component {
         return this.transcriptLines(width, rows);
       case "SL":
       case "SAL":
-        return this.agentLogLines(width, rows);
+        return this.agentLogPageLines(width, rows);
       case "W":
         return this.runPaneLines(width, rows);
       case "L":
-        return this.runLogLines(width, rows);
+        return this.runLogPageLines(width, rows);
     }
   }
 
-  /** **R**'s detail: a run overview for a workflow row, the transcript for an agent. */
-  private previewLines(width: number, rows: number): WorkflowCardLine[] {
+  /** **R**'s detail: the agent-log preview for a subagent row, the run overview for a workflow row. */
+  private previewLines(width: number, rows: number): PaneRow[] {
     const entry = this.entries()[this.selected];
-    if (entry?.kind === "workflow") return this.runOverviewLines(entry.workflow, width, rows);
-    return this.transcriptLines(width, rows);
+    if (entry?.kind === "workflow") return this.runPreviewLines(entry.workflow, width, rows);
+    const record = this.rosterRecordForCurrent();
+    if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
+    return this.identityPane(
+      this.agentIdentity(record, width),
+      this.agentLogLines(width, this.bodyRows(rows, true)),
+      this.noteLine("(⏎ opens the full transcript)", width),
+    );
   }
 
-  /** The run overview **R** shows for a selected workflow row (spec R2). */
-  private runOverviewLines(run: FleetWorkflow, width: number, rows: number): WorkflowCardLine[] {
-    const lines: WorkflowCardLine[] = [
-      clampLine([{ text: run.name, color: "toolTitle", bold: true }], width),
-      clampLine(
-        [{ text: `${workflowStatusWord(run.status)} · ${formatFleetElapsed((run.completedAt ?? Date.now()) - run.startedAt)} · ${run.doneCount}/${run.totalCount} agents`, color: "dim" }],
-        width,
-      ),
-    ];
+  /**
+   * The run overview **R** shows for a selected workflow row (spec R2): the run
+   * header block, the phases with the current one carrying the `❯`, and the
+   * hint onto the run page.
+   */
+  private runPreviewLines(run: FleetWorkflow, width: number, rows: number): PaneRow[] {
     const source = this.runSource(run.id);
     const groups = source ? buildPhaseGroups(source.progress, source.meta?.phases) : [];
-    if (groups.length === 0) return padLines([...lines, []], rows);
-    lines.push([]);
-    lines.push(clampLine([{ text: "PHASES", color: "muted", bold: true }], width));
-    lines.push(
-      ...phaseListRows({
+    const body: PaneRow[] = [];
+    if (groups.length > 0) {
+      body.push(clampLine([{ text: "PHASES", color: "muted", bold: true }], width));
+      body.push(...phaseListRows({
         groups,
-        selectedPhase: 0,
-        capacity: Math.max(1, rows - lines.length - 1),
+        selectedPhase: currentPhaseIndex(groups),
+        capacity: Math.max(1, this.bodyRows(rows, true) - body.length),
         width,
         glyphs: UNICODE_DIALOG_GLYPHS,
-      }),
+      }));
+    }
+    return this.identityPane(
+      runHeaderLines({ run, groups, width, th: this.theme }),
+      body,
+      this.noteLine("(⏎ opens the run page)", width),
     );
-    lines.push(clampLine([{ text: "(⏎ opens the run page)", color: "dim" }], width));
-    return padLines(lines, rows);
   }
 
   /**
@@ -1301,7 +1403,7 @@ export class AgentHub implements Component {
    * assistant, tool-call, diff and streaming blocks, with `o`/`ctrl+o`
    * expanding a tool-call in place (a view state, never a page).
    */
-  private transcriptLines(width: number, rows: number): WorkflowCardLine[] {
+  private transcriptLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     if (!record.session) {
@@ -1309,20 +1411,24 @@ export class AgentHub implements Component {
     }
     const viewer = this.ensureViewer(record);
     if (!viewer) return [];
-    return padLines(viewer.render(width).map((text): WorkflowCardLine => [{ text }]), rows);
+    const body: PaneRow[] = viewer.render(width).map((text): PaneRow => [{ text }]);
+    return this.identityPane(this.agentIdentity(record, width), padLines(body, this.bodyRows(rows, false)));
   }
 
   /**
    * **W**: the run's phases followed by its agents — the level the next `⏎`
    * descends into. Rows come from the inspector's own builders.
    */
-  private runPaneLines(width: number, rows: number): WorkflowCardLine[] {
+  private runPaneLines(width: number, rows: number): PaneRow[] {
     const run = this.currentRun();
-    const source = run ? this.runSource(run.id) : undefined;
-    if (!source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    if (!run) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    const identity = runHeaderLines({ run, groups: this.runGroups(run.id), width, th: this.theme });
+    const source = this.runSource(run.id);
+    if (!source) return this.identityPane(identity, [this.noteLine("run detail unavailable", width)]);
+    const capacity = this.bodyRows(rows, false);
     const glyphs = UNICODE_DIALOG_GLYPHS;
     const groups = buildPhaseGroups(source.progress, source.meta?.phases);
-    const lines: WorkflowCardLine[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
+    const lines: PaneRow[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
     lines.push(
       ...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: Math.max(1, groups.length), width, glyphs }),
     );
@@ -1330,7 +1436,7 @@ export class AgentHub implements Component {
     lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
     const entries = flattenRunAgents(source);
     const selection = this.clampRunAgentIndex();
-    const slice = windowRange(selection, entries.length, Math.max(1, rows - lines.length));
+    const slice = windowRange(selection, entries.length, Math.max(1, capacity - lines.length));
     if (entries.length === 0) lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
     for (let i = slice.start; i < slice.end; i++) {
       lines.push(
@@ -1346,7 +1452,13 @@ export class AgentHub implements Component {
         }),
       );
     }
-    return padLines(lines, rows);
+    return this.identityPane(identity, padLines(lines, capacity));
+  }
+
+  /** The phase groups of the named run, or none when its detail source is gone. */
+  private runGroups(id: string): PhaseGroup[] {
+    const source = this.runSource(id);
+    return source ? buildPhaseGroups(source.progress, source.meta?.phases) : [];
   }
 
   /**
@@ -1389,12 +1501,11 @@ export class AgentHub implements Component {
   }
 
   /** The run log: the events the run's progress entries carry, timestamped. */
-  private runLogLines(width: number, rows: number): WorkflowCardLine[] {
+  private runLogLines(width: number, rows: number): PaneRow[] {
     const run = this.currentRun();
     const source = run ? this.runSource(run.id) : undefined;
     if (!run || !source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
     const active = source.task.status === "running" || source.task.status === "paused";
-    const stamp = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
     const lines: WorkflowCardLine[] = [
       clampLine([{ text: `${stamp(run.startedAt)} run start: ${run.totalCount} agent${run.totalCount === 1 ? "" : "s"}`, color: "muted" }], width),
     ];
@@ -1414,20 +1525,19 @@ export class AgentHub implements Component {
       if (state === "skipped") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} skipped`, color: "dim" }], width));
     }
     if (!active) lines.push(clampLine([{ text: `${stamp(run.completedAt ?? Date.now())} run ${workflowStatusWord(run.status)}`, color: "muted" }], width));
-    lines.push(clampLine([{ text: "(filter: all)", color: "dim" }], width));
     return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
   }
 
   /**
    * An agent's event log — the compact timestamped companion to the
    * transcript, from what the record and its live activity know: spawn, turns,
-   * tool calls, completion with tokens and cost.
+   * tool calls, completion with tokens and cost. The trailing line is the live
+   * activity, which is where the removed `❞` strip's information went.
    */
-  private agentLogLines(width: number, rows: number): WorkflowCardLine[] {
+  private agentLogLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
     if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
     const activity = this.deps.agentActivity.get(record.id);
-    const stamp = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
     const lines: WorkflowCardLine[] = [
       clampLine([{ text: `${stamp(record.startedAt)} spawn  ${record.alias ?? record.handle ?? record.type} · ${record.description}`, color: "muted" }], width),
     ];
@@ -1441,7 +1551,8 @@ export class AgentHub implements Component {
       lines.push(clampLine([{ text: `${stamp(Date.now())} note   ${activity.responseText.split("\n")[0] ?? ""}`, color: "dim" }], width));
     }
     if (record.status === "running" || record.status === "queued" || record.status === "paused") {
-      lines.push(clampLine([{ text: `${stamp(Date.now())} still ${record.status}`, color: "dim" }], width));
+      const doing = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
+      lines.push(clampLine([{ text: `${stamp(Date.now())} still ${record.status} — ${doing}`, color: "dim" }], width));
     }
     if (record.completedAt != null) {
       const done = record.status === "completed" || record.status === "steered";
@@ -1450,8 +1561,56 @@ export class AgentHub implements Component {
       const cost = this.deps.showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
       lines.push(clampLine([{ text: `${stamp(record.completedAt)} usage  ${tokens} tokens${cost ? ` · ${cost}` : ""}`, color: "dim" }], width));
     }
-    lines.push(clampLine([{ text: "(filter: all)", color: "dim" }], width));
     return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
+  }
+
+  /**
+   * An agent's event-log page (**SL**, **SAL**): the identity block, the
+   * frame's header rule, then the log.
+   */
+  private agentLogPageLines(width: number, rows: number): PaneRow[] {
+    const record = this.focusedRecord();
+    if (!record) return [clampLine([{ text: this.theme.fg("dim", "no agent selected") }], width)];
+    return this.identityPane(this.agentIdentity(record, width), this.agentLogLines(width, this.bodyRows(rows, false)));
+  }
+
+  /** The run log page (**L**): the run's identity block, the rule, the events. */
+  private runLogPageLines(width: number, rows: number): PaneRow[] {
+    const run = this.currentRun();
+    if (!run) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
+    const identity = runHeaderLines({ run, groups: this.runGroups(run.id), width, th: this.theme });
+    return this.identityPane(identity, this.runLogLines(width, this.bodyRows(rows, false)));
+  }
+
+  /** Rows a pane has left for its body, the identity block and a closing note removed. */
+  private bodyRows(rows: number, note: boolean): number {
+    return Math.max(1, rows - IDENTITY_ROWS - (note ? 1 : 0));
+  }
+
+  /**
+   * A pane's content: the identity block, the frame's header rule, the body,
+   * then an optional closing note (a preview's `⏎` hint). Identity is composed
+   * here, outside the body: the body is windowed to the rows it is handed, and
+   * identity must never be trimmed by that windowing.
+   */
+  private identityPane(identity: WorkflowCardLine[], body: readonly PaneRow[], note?: WorkflowCardLine): PaneRow[] {
+    return [...identity, HEADER_RULE, ...body, ...(note ? [note] : [])];
+  }
+
+  /** The agent header block for whichever record the page is showing. */
+  private agentIdentity(record: AgentRecord, width: number): WorkflowCardLine[] {
+    return agentHeaderLines({
+      record,
+      activity: this.deps.agentActivity.get(record.id),
+      width,
+      th: this.theme,
+      parentName: this.page === "WA" || this.page === "SAL" ? this.currentRun()?.name : undefined,
+    });
+  }
+
+  /** A dim one-line note closing a pane. */
+  private noteLine(text: string, width: number): WorkflowCardLine {
+    return clampLine([{ text, color: "dim" }], width);
   }
 
   /**
@@ -1459,10 +1618,10 @@ export class AgentHub implements Component {
    * at full width. `⏎` pushes the detail page, `esc` pops it — the pane model
    * with one column.
    */
-  private stackedLines(width: number, rows: number): WorkflowCardLine[] {
-    if (this.page === "R") return this.rosterLines(width, rows);
-    const lines = this.rightPaneLines(width, rows);
-    return lines.length > 0 ? lines : this.leftPaneLines(width, rows);
+  private stackedLines(width: number, rows: number): WindowRow[] {
+    const lines: PaneRow[] = this.page === "R" ? this.rosterLines(width, rows) : this.rightPaneLines(width, rows);
+    const content = lines.length > 0 ? lines : this.leftPaneLines(width, rows);
+    return content.map(row => (isHeaderRule(row) ? { kind: "headerRule" } : { kind: "full", cells: row }));
   }
 
   /** The viewer for `record`, rebuilt only when the target changes. */
@@ -1642,16 +1801,6 @@ export class AgentHub implements Component {
     return recordId === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === recordId);
   }
 
-  private selectedRunAgentLabel(): string | undefined {
-    const entries = this.runAgents();
-    return entries[this.clampRunAgentIndex()]?.label;
-  }
-
-  private selectedAgentLabel(): string | undefined {
-    const record = this.focusedRecord();
-    return record ? (record.alias ?? record.handle ?? record.type) : undefined;
-  }
-
   /** `l`: to the log page one level below the current one (R skips T). */
   private pushLogPage(): void {
     if (this.page === "R") {
@@ -1782,6 +1931,11 @@ function fullRow(text: string): WindowRow {
   return { kind: "full", cells: [{ text }] };
 }
 
+/** `HH:MM:SS` — the log pages' event rows are timestamps first. */
+function stamp(ms: number): string {
+  return new Date(ms).toTimeString().slice(0, 8);
+}
+
 /** A run source with nothing in it, for pages whose run has been swept. */
 const EMPTY_RUN_SOURCE: WorkflowDialogSource = {
   progress: [],
@@ -1798,7 +1952,7 @@ function flattenRunAgents(source: WorkflowDialogSource): WorkflowAgentEntry[] {
 }
 
 /** A pane's lines, cut or padded to the body height so both cells stay level. */
-function padLines(lines: readonly WorkflowCardLine[], rows: number): WorkflowCardLine[] {
+function padLines(lines: readonly PaneRow[], rows: number): PaneRow[] {
   const out = lines.slice(0, rows);
   while (out.length < rows) out.push([]);
   return out;

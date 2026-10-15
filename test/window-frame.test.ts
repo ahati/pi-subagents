@@ -27,10 +27,12 @@ import {
   paneRightWidth,
   paneRule,
   type RuleCell,
+  renderWindow,
   splitEdge,
   UNICODE_PANE_BOX,
   WINDOW_CHROME_ROWS,
 } from "../src/ui/window-frame.js";
+import type { WorkflowCardLine } from "../src/ui/workflow-card.js";
 import type { WorkflowDialogLogDeps } from "../src/ui/workflow-dialog.js";
 import { WorkflowDialog } from "../src/ui/workflow-dialog.js";
 
@@ -118,6 +120,49 @@ describe("window chrome", () => {
     const bottom = splitEdge(24, 8, UNICODE_PANE_BOX, "bottom");
     expect(bottom).toBe(`╰${"─".repeat(8)}┴${"─".repeat(13)}╯`);
     expect(bottom.length).toBe(24);
+  });
+
+  it("names a single-pane window on its top edge, where it has no tee to hang a title on", () => {
+    const titled = frameEdge(40, UNICODE_PANE_BOX, "top", " Agents & Workflows ");
+    expect(titled).toBe(`╭ Agents & Workflows ${"─".repeat(18)}╮`);
+    expect(visibleWidth(titled)).toBe(40);
+    // An untitled edge is unchanged: the title is optional, not a second shape.
+    expect(frameEdge(12, UNICODE_PANE_BOX, "top", "")).toBe(frameEdge(12, UNICODE_PANE_BOX, "top"));
+  });
+});
+
+describe("the header rule row", () => {
+  const text = (line: WorkflowCardLine) => line.map(segment => segment.text).join("");
+
+  it("fills the detail cell, the cell's pad columns as inset, the master cell carrying on", () => {
+    const panes = masterPaneGeometry(120);
+    const lines = renderWindow({
+      width: 120,
+      box: UNICODE_PANE_BOX,
+      panes,
+      title: " Agents & Workflows ",
+      rows: [
+        { kind: "split", left: [{ text: "SUBAGENTS" }], right: [{ text: "● explore" }] },
+        { kind: "split", left: [{ text: "❯ ● explore" }], right: [{ text: "  ↳ model" }] },
+        { kind: "headerRule", left: [{ text: "  ○ audit" }] },
+        { kind: "split", left: [], right: [{ text: "body" }] },
+      ],
+    });
+    // `│` + the whole master cell + `│` + the detail cell + `│`.
+    expect(text(lines[3])).toBe(`│ ${"  ○ audit".padEnd(18)} │ ${"─".repeat(95)} │`);
+    expect(visibleWidth(text(lines[3]))).toBe(120);
+  });
+
+  it("spans a single-pane window's row, the window's own inset either side", () => {
+    const lines = renderWindow({
+      width: 40,
+      box: UNICODE_PANE_BOX,
+      title: " Agents & Workflows ",
+      rows: [{ kind: "headerRule" }],
+    });
+    expect(text(lines[0])).toBe(`╭ Agents & Workflows ${"─".repeat(18)}╮`);
+    expect(text(lines[1])).toBe(`│ ${"─".repeat(36)} │`);
+    expect(visibleWidth(text(lines[1]))).toBe(40);
   });
 });
 

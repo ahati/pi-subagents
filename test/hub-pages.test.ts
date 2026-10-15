@@ -193,7 +193,86 @@ describe("hub pane invariant — detail is always on the right", () => {
   });
 });
 
-describe("page footers, breadcrumbs and esc", () => {
+describe("the header block every right pane opens with", () => {
+  const workflows = (): FleetWorkflow[] => [{
+    id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+    startedAt: Date.now() - 60_000, tokens: 500,
+  }];
+  /** The detail cell's content columns at 120: `│ <18> │ <95> │`. */
+  const DETAIL_WIDTH = 95;
+  /** The right cell's rows, content only. */
+  const rightRows = (frame: string[]) => frame
+    .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+    .map(l => rightCell(l).slice(1, 1 + DETAIL_WIDTH));
+  /** The three identity rows: the header line, the `↳` line and the header rule. */
+  const identity = (frame: string[]) => rightRows(frame).slice(0, 3);
+
+  /** A harness with one run-agent, its record carrying an invocation. */
+  const pageHarness = () => harness(
+    [makeRecord({
+      id: "r1",
+      alias: "explore",
+      description: "schema tables",
+      invocation: { modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" },
+    })],
+    { workflows, workflowRun: () => runSource() },
+  );
+
+  /** How to reach each page from the roster. */
+  const PAGES: Array<{ page: string; to: (press: (key: string) => void) => void }> = [
+    { page: "R (agent)", to: () => {} },
+    { page: "R (run)", to: p => p(DOWN) },
+    { page: "T", to: p => p("\r") },
+    { page: "SL", to: p => p("l") },
+    { page: "W", to: p => { p(DOWN); p("\r"); } },
+    { page: "WA", to: p => { p(DOWN); p("\r"); p("\r"); } },
+    { page: "SAL", to: p => { p(DOWN); p("\r"); p("\r"); p("l"); } },
+    { page: "L", to: p => { p(DOWN); p("\r"); p("l"); } },
+  ];
+
+  it("opens every page with the header line, the `↳` line and the rule, nothing above", () => {
+    for (const { page, to } of PAGES) {
+      const h = pageHarness();
+      h.open();
+      to(h.press);
+      const rows = rightRows(h.frame());
+      const [head, sub, rule] = identity(h.frame());
+      expect(rows[0], page).toBe(head);
+      expect(head, page).not.toMatch(/^─/);
+      expect(head, page).toMatch(/[●○‖✓✗·]/);
+      expect(sub, page).toMatch(/^ {2}↳ /);
+      expect(rule, page).toBe("─".repeat(DETAIL_WIDTH));
+    }
+  });
+
+  it("leads a run-agent's `↳` line with the run name, and only there", () => {
+    const h = pageHarness();
+    h.open();
+    h.press("\r"); // T — the roster's preview of the same agent
+    expect(identity(h.frame())[1].trimEnd()).toBe("  ↳ anthropic/claude-sonnet-4-6 · worktree");
+    h.press(ESC);
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("\r"); // WA — one level inside the run
+    expect(identity(h.frame())[1].trimEnd()).toBe("  ↳ migrate-v2 · anthropic/claude-sonnet-4-6 · worktree");
+    h.press("l"); // SAL — same agent, the log page
+    expect(identity(h.frame())[1].trimEnd()).toBe("  ↳ migrate-v2 · anthropic/claude-sonnet-4-6 · worktree");
+  });
+
+  it("keeps identity ahead of the body at nonzero logScroll", () => {
+    const h = pageHarness();
+    h.open();
+    h.press("l"); // SL
+    const before = identity(h.frame());
+    for (let i = 0; i < 5; i++) h.press(DOWN);
+    expect(identity(h.frame())).toEqual(before);
+    expect(rightRows(h.frame())[0]).toBe(before[0]);
+    expect(rightRows(h.frame())[1]).toBe(before[1]);
+    expect(rightRows(h.frame())[2]).toBe(before[2]);
+  });
+});
+
+describe("page footers, headers and esc", () => {
   const workflows = (): FleetWorkflow[] => [{
     id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
     startedAt: Date.now() - 60_000, tokens: 500,
@@ -220,20 +299,22 @@ describe("page footers, breadcrumbs and esc", () => {
     expect(frame).toContain("esc roster");
   });
 
-  it("breadcrumb shows the trail and grows one level per page", () => {
+  it("keeps the title constant while the header block names the item", () => {
     const h = harness(
       [makeRecord({ id: "r1" })],
       { workflows, workflowRun: () => runSource() },
     );
     h.open();
-    expect(h.frame().join("\n")).toContain("Agents & Workflows");
+    // The 20-column title cell never carries a breadcrumb: the same title on
+    // every page, and the right pane's identity block is what names the item.
+    expect(h.frame()[0]).toContain(" Agents & Workflows ");
     h.press(DOWN);
     h.press("\r");
-    expect(h.frame().join("\n")).toContain("Agents & Workflows › migrate-v2");
+    expect(h.frame()[0]).toContain(" Agents & Workflows ");
+    expect(h.frame().join("\n")).toContain("● migrate-v2  workflow");
     h.press("\r");
-    expect(h.frame().join("\n")).toContain("Agents & Workflows › migrate-v2 › m-1");
-    h.press("l");
-    expect(h.frame().join("\n")).toContain("Agents & Workflows › migrate-v2 › m-1 › log");
+    expect(h.frame()[0]).toContain(" Agents & Workflows ");
+    expect(h.frame().join("\n")).toContain("Sleep then report 1");
   });
 
   it("esc pops exactly one level: SAL → WA → W → R", () => {
@@ -246,12 +327,14 @@ describe("page footers, breadcrumbs and esc", () => {
     h.press("\r"); // W
     h.press("\r"); // WA
     h.press("l"); // SAL
-    expect(h.frame().join("\n")).toContain("› m-1 › log");
+    expect(h.frame().join("\n")).toContain("spawn"); // the log grammar
+    expect(h.frame().join("\n")).toContain("esc back");
     h.press(ESC);
-    expect(h.frame().join("\n")).toContain("› migrate-v2 › m-1");
+    expect(h.frame().join("\n")).toContain("waiting for first message");
+    expect(h.frame().join("\n")).not.toContain("spawn");
     h.press(ESC);
-    expect(h.frame().join("\n")).toContain("› migrate-v2");
-    expect(h.frame().join("\n")).not.toContain("› migrate-v2 › m-1");
+    expect(h.frame().join("\n")).toContain("⏎ agent");
+    expect(h.frame().join("\n")).toContain("PHASES");
     h.press(ESC);
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
     expect(h.settled()).toBe(false);
@@ -274,10 +357,11 @@ describe("page footers, breadcrumbs and esc", () => {
     h.open();
     h.press("l");
     const frame = h.frame().join("\n");
-    expect(frame).toContain("› general-purpose › log");
     expect(frame).toContain("spawn");
+    expect(frame).toContain("esc back");
     h.press(ESC);
     expect(h.frame().join("\n")).toContain("SUBAGENTS");
+    expect(h.frame().join("\n")).toContain("esc close");
     expect(h.settled()).toBe(false);
   });
 });
@@ -307,10 +391,11 @@ describe("size ladder", () => {
     expect(frame.at(-1)).not.toContain("┴");
     expect(frame.join("\n")).toContain("SUBAGENTS");
     // ⏎ pushes the detail page full width; esc pops it — the page model with
-    // one column. (The breadcrumb, not the footer, is the stable witness: the
-    // footer's fitter drops whole hints from the right at 50 columns.)
+    // one column. The pushed page opens with the identity block (the constant
+    // title stays on the top edge).
     h.press("\r");
-    expect(h.frame(50).join("\n")).toContain("general-purp");
+    expect(h.frame(50)[0]).toContain(" Agents & Workflows ");
+    expect(h.frame(50).join("\n")).toContain("alpha task");
     expect(h.frame(50).join("\n")).toContain("waiting for first message");
     h.press(ESC);
     expect(h.frame(50).join("\n")).toContain("SUBAGENTS");
