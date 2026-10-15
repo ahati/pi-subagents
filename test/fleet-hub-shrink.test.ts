@@ -250,7 +250,7 @@ async function openToggleCloseHub(host: Host, fleet: FleetList): Promise<void> {
 /** Open the hub over the fleet, close it with Esc, flush every deferred render.
  *  Returns the bytes the close phase emitted — the full-redraw assertion reads them. */
 async function openAndCloseHub(host: Host, fleet: FleetList, initial?: { agentId?: string }): Promise<string> {
-  const hubPromise = fleet.openHub(initial?.agentId);
+  const hubPromise = fleet.openHub({ agentId: initial?.agentId });
   await flushRender();
   let overlayEntry = ((host.tui as any).overlayStack ?? []).at(-1);
   expect(overlayEntry).toBeDefined(); // the hub is up (roster or the popup twin's T page)

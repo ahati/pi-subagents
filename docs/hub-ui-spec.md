@@ -3,7 +3,8 @@
 This document is the design contract for the unified hub window: one popup that
 shows subagents and workflow runs together, grouped, rendered entirely through
 the shared window-layout module. Audience: contributors changing
-`src/ui/agent-hub.ts`, `src/ui/workflow-dialog.ts`, or `src/ui/window-frame.ts`.
+`src/ui/agent-hub.ts`, `src/ui/workflow-view.ts`, or
+`src/ui/window-frame.ts`.
 
 Status: **spec**. This spec covers the hub window and its `f` twins — the same
 pages at either frame size. The popup twin is an `f` twin of the hub: the same
@@ -37,10 +38,8 @@ tail); the single-list `hintLine` footer becomes the two-slot band; `▸` become
 flows through mentions and `/agents revive`). The `●`/`├`/`└` diff chrome
 tracks pi's tool renderers (`resolveRenderers`) — the text fallback must stay
 readable. Expand state is viewer-wide (`o`/`ctrl+o`), not per tool-call. Still
-handed off: `/agents → Workflows` rewiring onto this window (`WorkflowDialog`
-remains that path's adapter), a dedicated event stream behind the log pages
-(they render from run/record progress), `AgentHubInitial.runId` for opening a
-run pre-focused, and the activity view's (`2`) restyle.
+handed off: a dedicated event stream behind the log pages (they render from
+run/record progress) and the activity view's (`2`) restyle.
 
 ## The window style (the chat-pane grammar)
 
@@ -54,8 +53,8 @@ layout arithmetic in a surface module.
   identity (cursor, state glyph, name); the detail pane owns the width. At 120
   columns a split row is `│ <18> │ <95> │`. `hubPaneGeometry` (the half split)
   is retired — it existed to fit the description/stats columns the narrow
-  roster no longer carries; the proportional `paneGeometry` keeps its cap where
-  its bytes are pinned: the inspector.
+  roster no longer carries; the proportional `paneGeometry` stays exported for
+  the frame's own tests, with no production caller since the inspector retired.
 - **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
   names both kinds and exactly fills the master cell, and the `┬` is where the
   divider lands. The bottom edge mirrors it plain; the divider's `┴` sits in
@@ -120,15 +119,16 @@ in full — the fitter may drop hints at narrower widths.
 | **T** — subagent transcript | `⏎` on a subagent row | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc roster` |
 | **TD** — expanded tool-call | `o` / `ctrl+o` in T or WA | as the page it sits in, with `m md` swapped for `c copy diff · o collapse` | as the page it sits in, without `o expand` |
 | **SL** — subagent log | `l` in T — or `l` on a subagent row | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
-| **W** — workflow run | `⏎` on a run row | `<done>/<total> agents · phase <n> of <m>` | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
-| **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back` |
+| **W** — workflow run | `⏎` on a run row; fleet Enter on a run; `/agents → Workflows` | `<done>/<total> agents · phase <n> of <m> · p pause run` (or `p resume run`) | `↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster` |
+| **WA** — agent inside a run | `⏎` on an agent row in W | `<N> lines · <P>% · Enter steer · x stop · m md · s skip · r retry` | `PgUp/PgDn · j scroll · o expand · l log · p pause · c copy · f full · Esc back` |
 | **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **L** — run log | `l` in W | `<N> lines · <P>% · s stop run` | `↑↓ scroll · c copy tail · f full · Esc back` |
 
-On **W**, **WA** and **SAL** the per-agent `s skip` and `r retry` keys exist
-only in the inspector (`WorkflowDialog`, `onSkipAgent`/`onRetryAgent`); the hub
-has no skip/retry wires for a run's children, so those pages' slots carry only
-the keys above.
+On **WA** the per-agent `s skip` and `r retry` keys act on the current run
+agent, gated exactly as the retired inspector gated them — skip only while a
+live run, retry only a failed or interrupted agent inside a live run — and
+neither is advertised when the extension wired no run controls for that run.
+**W**'s `s` stays stop-run; its `p` toggles pause/resume on the run.
 
 **TD** is a view state of the page it sits in, not a nesting level. The
 activity view (`2`, `⇥`) stays a single-pane legacy table with its own
@@ -466,14 +466,14 @@ events interleaved with its agents' spawns, edits and completions.
  R (subagent sel) ──⏎──> T ──o──> TD (in place) ──o──> T ──l──> SL ──esc──> T ──esc──> R
  fleet Enter on an agent ──> T directly, in the popup twin (roster master beside it)
  R (subagent sel) ──l──────────────> SL (skips T) ──esc──> R
+ fleet Enter on a run / `/agents → Workflows` ──> W (the run selected)
  R (run sel) ──⏎──> W ──⏎ on agent──> WA ──l──> SAL ──esc──> WA ──esc──> W
                 W ──l──> L ──esc──> W
  R ──⇥ / 2──> A (activity view) ──1 / ⇥──> R
  any page ──f──> twin (popup ⇄ fullscreen; frame size only)
  roster ──↑/↓──> cursor crosses group headers; right pane + footer follow
  /agents menu ── "Agent hub" ──> R
- SubagentWorkflow tool ── open ──> R, cursor on that run's row (AgentHubInitial.runId)
- legacy workflow-dialog entry points ──> same window, focused (adapter)
+ SubagentWorkflow tool ── open ──> W, that run selected (AgentHubInitial.runId)
 ```
 
 `esc` always ascends exactly one nesting level; the footer's `Esc <target>`
@@ -519,8 +519,10 @@ may not.
 ## Tests that hold this together
 
 - **Chrome parity**: the shared chrome (edges, tees, rules, band, footer row
-  shape) renders identically for the hub and the workflow inspector at equal
-  widths — `renderWindow` owns it; parity pins fail if a surface drifts.
+  shape) renders identically for the hub's popup and fullscreen twins at equal
+  widths — `renderWindow` owns it; parity pins fail if a surface drifts. The
+  workflow inspector that used to be the second surface is retired (P10); its
+  surviving row vocabulary lives in `src/ui/workflow-view.ts`.
 - **Pane invariant**: every page's left pane shows the parent level and its
   right pane the detail — pinned per page in `test/hub-pages.test.ts`.
 - **Header block**: every right pane opens with the same three identity rows —

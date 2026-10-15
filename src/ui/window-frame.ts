@@ -1,14 +1,12 @@
 /**
- * window-frame.ts — the window chrome two overlays draw: the agent hub
- * (`agent-hub.ts`, the unified Agents & Workflows window) and the workflow
- * (`workflow-dialog.ts`, all three levels).
+ * window-frame.ts — the window chrome the agent hub draws
+ * (`agent-hub.ts`, roster and chat pane).
  *
- * Both draw the same window: a `╭───╮` / `╰───╯` box, content rows
+ * A `╭───╮` / `╰───╯` box, content rows
  * `│ content │`, and a two-pane split whose three bars partition the width
- * exactly. They arrived at it independently — the hub in strings, the
- * inspector in `WorkflowCardLine` segments plus a second string copy for its
- * log level — so the arithmetic lived in four places and drifted silently.
- * This module is that arithmetic, once:
+ * exactly. The arithmetic used to live in four hand-rolled copies — the hub's
+ * roster strings, its chat pane, and the retired inspector's segment and log
+ * paths — so it drifted silently. This module is that arithmetic, once:
  *
  * - {@link paneRightWidth} is the bar-partition invariant
  *   (`│` + cell + `│` + cell + `│` = width).
@@ -29,10 +27,7 @@
  * - {@link windowRange} is the list windowing rule: the visible slice that
  *   keeps the selection centered and clamps at both ends.
  *
- * The two surfaces stay separate where they differ on purpose: which pane
- * policy picks the left cell's width ({@link leftPaneWidth} is the
- * inspector's, the hub gates on {@link TWO_PANE_MIN_WIDTH} and pins its list
- * column), how each styles a segment, and every key they bind.
+ * The hub gates on {@link TWO_PANE_MIN_WIDTH} and pins its list column.
  */
 
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -43,7 +38,7 @@ export const FRAME_BARS = 3;
 
 /**
  * Below this total width a surface drops its side pane rather than squeezing
- * both cells to unreadable. The hub's chat and the inspector's panes share it.
+ * both cells to unreadable. The hub's two-pane ladder uses it.
  */
 export const TWO_PANE_MIN_WIDTH = 60;
 
@@ -183,8 +178,7 @@ export function frameRow(
 
 /**
  * One cell of a rule: ` Title ─────` — the three regions unstyled, so each
- * surface themes them its own way (the inspector's segment levels want a
- * segment per region, its log level a themed string).
+ * surface themes them its own way (the hub's panes want a segment per region).
  */
 export interface RuleCell {
   /** The single column between the cell's bar and the title. */
@@ -199,9 +193,9 @@ export interface RuleCell {
  * Where a title's padding sits when the title has to be cut to fit:
  * `outside` cuts the title alone and keeps the space either side of it,
  * `inside` cuts ` title ` as one string, so a title that overruns eats its own
- * leading column. Both fill the cell exactly; the inspector's segment levels
- * have always done the first and its log level the second, and both are
- * pinned byte-for-byte by their tests.
+ * leading column. Both fill the cell exactly; the retired inspector's segment
+ * levels did the first and its log level the second, and both are pinned
+ * byte-for-byte by their tests.
  */
 export type RuleTitlePadding = "outside" | "inside";
 
@@ -227,8 +221,7 @@ function titledRuleCell(width: number, title: string, box: PaneBox, ellipsis: st
  * `├` and `┤` close the line and the cells fill their pane widths exactly, so
  * the bars stay in the columns the rows above and below put them in. The tee
  * where the cells meet is `┬` when either cell is titled and the pane `│` when
- * neither is — the shape the inspector draws at every level, and the shape the
- * hub window titles its master cell in.
+ * neither is — the shape the hub titles its master cell in.
  */
 export function paneRule(options: {
   leftWidth: number;
@@ -329,9 +322,9 @@ function lastDroppable(hints: readonly FooterHint[], match: (hint: FooterHint) =
 /**
  * The frame's reference chrome count for a window whose body falls under
  * `viewportPct` of the terminal: edges, header rows, rules and the footer.
- * Surfaces derive their own from the rows they draw — the inspector's
- * `dialogChromeRows`, the hub's `HUB_CHROME_ROWS` — so this is the pinned
- * baseline {@link paneBodyHeight} is tested against, not a live basis.
+ * The hub derives its own from the rows it draws (`HUB_CHROME_ROWS`), so
+ * this is the pinned baseline {@link paneBodyHeight} is tested against, not a
+ * live basis.
  */
 export const WINDOW_CHROME_ROWS = 7;
 
@@ -372,9 +365,8 @@ export interface PaneGeometry {
 }
 
 /**
- * The master/detail split at `width`. Both surfaces take their pane columns
- * from here — the hub's pages and the inspector's levels alike — so the
- * divider stays in one column across every window either one draws.
+ * The master/detail split at `width`. The hub takes its pane columns from
+ * here, so the divider stays in one column across every window it draws.
  *
  * The master cell gives way on a narrow terminal the way {@link leftPaneWidth}
  * says: capped at a third of the cells, so the detail pane keeps twice the
@@ -394,7 +386,7 @@ export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad =
  * over. {@link paneGeometry}'s third-of-the-cells cap would shave the master to
  * 17 at 60 columns — the two-pane floor — before the two agree again from 61
  * up; that proportional policy
- * stays where its bytes are pinned — the inspector.
+ * stays exported for the frame's own tests; nothing in src calls it.
  */
 export function masterPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {
   const available = Math.max(2, width - FRAME_BARS - 4 * pad);
@@ -485,8 +477,8 @@ function ruleCell(cell: RuleCell): WorkflowCardLine {
  * otherwise — both titled: the split edge carries `title` in the master's
  * cell, the plain edge carries it in the edge itself), every row in between, and nothing else: the caller owns
  * the content and the order, this owns the columns. That is the whole contract
- * — the hub's chat, its roster table and the workflow inspector's three levels
- * are all calls to this function with different rows.
+ * — the hub's roster, preview and transcript panes are all calls to this
+ * function with different rows.
  */
 export function renderWindow(options: {
   width: number;
@@ -583,8 +575,8 @@ export function renderWindow(options: {
 /**
  * The visible slice of a list, centered on `selected` and clamped at both
  * ends: the selection stays on screen and the list never leaves a blank row
- * where a row could be. The hub's roster and the inspector's panes both
- * window this way, so a long list reads the same in either window.
+ * where a row could be. The hub's roster and run panes both window this way,
+ * so a long list reads the same on every page.
  */
 export function windowRange(selected: number, total: number, height: number): { start: number; end: number } {
   const rows = Math.max(0, height);

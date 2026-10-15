@@ -9,12 +9,13 @@ import {
   type HubUICtx,
   openAgentHub,
   statusGlyph,
+  type WorkflowRunControls,
   workflowStatusGlyph,
 } from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import type { FleetWorkflow } from "../src/ui/fleet-list.js";
 import { MASTER_LIST_WIDTH, PANE_PADDING } from "../src/ui/window-frame.js";
-import type { WorkflowDialogSource } from "../src/ui/workflow-dialog.js";
+import type { WorkflowDialogSource } from "../src/ui/workflow-view.js";
 import type { WorkflowAgentEntry } from "../src/workflow/progress.js";
 
 const ESC = "\x1b";
@@ -96,8 +97,8 @@ function harness(
   return {
     ui,
     deps,
-    open: () => {
-      const promise = openAgentHub(ui as unknown as HubUICtx, deps);
+    open: (initial?: Parameters<typeof openAgentHub>[2]) => {
+      const promise = openAgentHub(ui as unknown as HubUICtx, deps, initial);
       return { promise, settled: () => settled };
     },
     frame: (width = 120) => (components.at(-1)?.render(width) ?? []).map(plain),
@@ -1147,5 +1148,99 @@ describe("P8 — transcript grammar parity and refusal behavior", () => {
     expect(pauseAgent).not.toHaveBeenCalled();
     h.press("s");
     expect(stopWorkflow).toHaveBeenCalledWith("wf_1");
+  });
+});
+
+describe("P10 — runId opens the run's page and the run controls live there", () => {
+  const workflows = (status: FleetWorkflow["status"] = "running"): FleetWorkflow[] => [{
+    id: "wf_1", name: "migrate-v2", status, doneCount: 1, totalCount: 3,
+    startedAt: Date.now() - 60_000, tokens: 500,
+  }];
+  const records = () => [
+    makeRecord({ id: "r1" }),
+    makeRecord({ id: "r2" }),
+    makeRecord({ id: "r3" }),
+  ];
+  const controls = (over: Partial<WorkflowRunControls> = {}): WorkflowRunControls => ({
+    pause: vi.fn(() => true),
+    resume: vi.fn(() => true),
+    skip: vi.fn(() => true),
+    retry: vi.fn(() => true),
+    ...over,
+  });
+  /** The footer row's content columns at 120: `│ <116> │`. */
+  const bandOf = (frame: string[]) => (frame.at(-2) ?? "").slice(2, -2);
+  const openRun = (depsOver: Partial<AgentHubDeps> = {}, status: FleetWorkflow["status"] = "running") =>
+    harness(records(), { workflows: () => workflows(status), workflowRun: () => phasedRunSource(), ...depsOver });
+
+  it("runId opens page W with the run selected and the item cursor on the current phase", () => {
+    const h = openRun();
+    h.open({ runId: "wf_1" });
+    const frame = h.frame();
+    // The master's ❯ is on the run row, and the right pane is the run's page.
+    expect(frame.join("\n")).toContain("❯ ● migrate-v2");
+    expect(frame.join("\n")).toContain("❯ 2 migrate");
+    expect(frame.join("\n")).toContain("RUN AGENTS");
+    expect(bandOf(frame)).toContain("Esc roster");
+  });
+
+  it("a swept runId falls back to the roster instead of an empty run page", () => {
+    const h = openRun();
+    h.open({ runId: "wf_gone" });
+    expect(h.frame().join("\n")).toContain("SUBAGENTS");
+    expect(h.frame().at(-2)).toContain("Esc close");
+  });
+
+  it("p on W pauses a running run; on a parked run it resumes", () => {
+    const running = controls();
+    const h = openRun({ workflowControls: () => running });
+    h.open({ runId: "wf_1" });
+    expect(bandOf(h.frame(160))).toContain("p pause run");
+    h.press("p");
+    expect(running.pause).toHaveBeenCalledTimes(1);
+
+    const parked = controls();
+    const parkedHub = openRun({ workflowControls: () => parked }, "paused");
+    parkedHub.open({ runId: "wf_1" });
+    expect(bandOf(parkedHub.frame(160))).toContain("p resume run");
+    parkedHub.press("p");
+    expect(parked.resume).toHaveBeenCalledTimes(1);
+    expect(parked.pause).not.toHaveBeenCalled();
+  });
+
+  it("s/r on WA skip and retry the current run agent; a done agent refuses both", () => {
+    const c = controls();
+    const h = openRun({ workflowControls: () => c });
+    h.open({ runId: "wf_1" });
+    h.press("\r"); // WA on the current phase's first agent — m-2, running
+    expect(h.frame().join("\n")).toMatch(/❯ . m-2/);
+    // Wider than 120: at the spec's frame the fitter gives `r retry` up first.
+    expect(bandOf(h.frame(160))).toContain("s skip");
+    expect(bandOf(h.frame(160))).toContain("r retry");
+    h.press("s");
+    expect(c.skip).toHaveBeenCalledWith(1);
+    h.press("r");
+    expect(c.retry).toHaveBeenCalledWith(1);
+
+    h.press("\x1b[A"); // ↑ — m-1, which finished
+    expect(h.frame().join("\n")).toMatch(/❯ . m-1/);
+    expect(bandOf(h.frame(160))).not.toContain("s skip");
+    expect(bandOf(h.frame(160))).not.toContain("r retry");
+    h.press("s");
+    h.press("r");
+    expect(c.skip).toHaveBeenCalledTimes(1);
+    expect(c.retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("advertises no run control when the extension wired none", () => {
+    const h = openRun();
+    h.open({ runId: "wf_1" });
+    expect(bandOf(h.frame(160))).not.toContain("p pause run");
+    h.press("p"); // no-op, not a crash
+    h.press("\r"); // WA
+    expect(bandOf(h.frame(160))).not.toContain("s skip");
+    h.press("s");
+    h.press("r");
+    expect(h.frame().at(-1)).toContain("╯");
   });
 });

@@ -353,7 +353,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             records.set(request.agentId, id);
             // Ahead of `reportResolved`, and not folded into it: that one waits
             // for the child's session so it can name the effective model, while
-            // the record id is known here and is what the inspector opens a
+            // the record id is known here and is what the hub opens a
             // conversation on. A child that fails before its session resolves
             // would otherwise never be openable at all.
             request.onResolved?.({ recordId: id });

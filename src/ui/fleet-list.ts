@@ -18,10 +18,11 @@ import { hasAgentBadge, renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import type { WorkflowRunControls } from "./agent-hub.js";
 import { openAgentHub } from "./agent-hub.js";
 import { type AgentActivity, formatCost, formatFleetElapsed, formatFleetTokens, type Theme } from "./agent-widget.js";
 import { type ViewerBackgroundAction } from "./conversation-viewer.js";
-import type { WorkflowDialogSource } from "./workflow-dialog.js";
+import type { WorkflowDialogSource } from "./workflow-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -125,14 +126,16 @@ export class FleetList {
   private openWorkflow: ((id: string) => Promise<void> | void) | undefined;
   /** The hub's run-page detail and its `s`, injected by the extension. */
   private workflowRunSource: ((id: string) => WorkflowDialogSource | undefined) | undefined;
-  private stopWorkflowRun: ((id: string) => void) | undefined;
+  private stopWorkflowRun: ((id: string) => boolean | undefined) | undefined;
+  /** The hub's run controls (W's `p`, WA's `s`/`r`), injected by the extension. */
+  private workflowRunControls: ((id: string) => WorkflowRunControls | undefined) | undefined;
   /** Injected pause/resume for the `p` key — see `setLifecycleActions`. */
   private lifecycleActions: { pause: (id: string) => string | undefined; resume: (id: string) => boolean } | undefined;
   /**
-   * Set while the workflow inspector is up.
+   * Set while the hub is up on a run's page.
    *
    * It does the two jobs `viewerClose` does for an agent's overlay — keep the
-   * list out of the dialog's keys, and remember which row to come back to —
+   * list out of the hub's keys, and remember which row to come back to —
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
@@ -208,7 +211,7 @@ export class FleetList {
     this.inputUnsub = undefined;
     if (this.viewerClose) { this.viewerClose(); this.viewerClose = undefined; }
     this.viewingAgentId = undefined;
-    // No handle to close the workflow inspector with, but the list is going
+    // No handle to close the hub with, but the list is going
     // away — leaving the id set would keep it swallowing input forever.
     this.viewingWorkflowId = undefined;
     if (this.ui && this.widgetRegistered) this.ui.setWidget(FLEET_KEY, undefined);
@@ -326,16 +329,20 @@ export class FleetList {
   }
 
   /**
-   * The hub's run pages (W/WA/L) need the run's detail, and its
-   * `s` key needs a way to stop one. Both live where the runs do; the hub gets
-   * them as callbacks rather than reaching into the workflow runtime.
+   * The hub's run pages (W/WA/L) need the run's detail, its `s` needs a way to
+   * stop one, and its `p`/`s`/`r` need the run's own controls (pause/resume,
+   * skip/retry). All three live where the runs do; the hub gets them as
+   * callbacks rather than reaching into the workflow runtime. Omitting the
+   * controls keeps those keys and their band hints absent.
    */
   setWorkflowRunSource(
     run: (id: string) => WorkflowDialogSource | undefined,
-    stop: (id: string) => void,
+    stop: (id: string) => boolean | undefined,
+    controls?: (id: string) => WorkflowRunControls | undefined,
   ): void {
     this.workflowRunSource = run;
     this.stopWorkflowRun = stop;
+    this.workflowRunControls = controls;
   }
 
   /**
@@ -408,7 +415,7 @@ export class FleetList {
     // tap would move/fire twice. Repeats still pass through for held-key nav.
     if (isKeyRelease(data)) return undefined;
     // While an overlay is open, let it own all input. Checked before the focus
-    // test below, which would otherwise read the dialog holding the keyboard as
+    // test below, which would otherwise read the hub holding the keyboard as
     // "the user left the list" and reset the selection out from under it.
     // `hubOpen` included: the held-down bar has zeroed `this.tui`, so
     // `editorHasFocus()` reads true ("unknowable = editor") and this listener
@@ -498,12 +505,13 @@ export class FleetList {
 
   /**
    * Open the full-screen agent hub. `agentId` starts in the windowed panel on
-   * that agent (the Enter-on-agent / `c`-on-row flow); without it the hub
-   * opens full-screen on the roster.
+   * that agent (the Enter-on-agent / `c`-on-row flow); `runId` starts it on
+   * that run's page (**W**), with the run selected (the Enter-on-run and
+   * `/agents → Workflows` flow); neither opens full-screen on the roster.
    *
    * `uiOverride` serves entry points reached before this session bound the
-   * fleet's UI context (the workflow inspector's `c`), so they get the same
-   * panel instead of silently no-oping.
+   * fleet's UI context (the workflow menu), so they get the same panel instead
+   * of silently no-oping.
    *
    * Returns the hub's promise — resolves when the hub closes. Callers that
    * stack another dialog after this (e.g. /agents re-showing its list) MUST
@@ -513,12 +521,13 @@ export class FleetList {
    * Shared by the fleet list and `/agents` so both entry points drive the same
    * overlay lifecycle: while the hub is up the list keeps its keys to itself
    * (the `hubOpen` input gate), and on close the cursor returns to the viewed
-   * agent.
+   * item.
    */
-  openHub(agentId?: string, uiOverride?: FleetUICtx): Promise<void> {
+  openHub(initial: { agentId?: string; runId?: string } = {}, uiOverride?: FleetUICtx): Promise<void> {
     const ui = uiOverride ?? this.ui;
     if (!ui) return Promise.resolve(undefined);
-    if (agentId != null) this.viewingAgentId = agentId;
+    if (initial.agentId != null) this.viewingAgentId = initial.agentId;
+    if (initial.runId != null) this.viewingWorkflowId = initial.runId;
     // The hub replaces the roster on screen: hold the bar down for the
     // overlay's whole life — the popup ↔ full-screen toggles loop inside this
     // promise — and leave it down after close: the hub collapse reads as a
@@ -537,14 +546,14 @@ export class FleetList {
         workflows: this.workflowSource,
         workflowRun: id => this.workflowRunSource?.(id),
         stopWorkflow: id => this.stopWorkflowRun?.(id),
-        openWorkflow: id => this.openWorkflow?.(id),
+        workflowControls: id => this.workflowRunControls?.(id),
         notify: (message, type) => ui.notify(message, type),
         pauseAgent: id => this.lifecycleActions?.pause(id),
         resumeAgent: id => this.lifecycleActions?.resume(id) ?? false,
         scrollbarMode: this.scrollbarMode,
         backgroundAction: this.backgroundAction,
       },
-      { agentId },
+      { agentId: initial.agentId, runId: initial.runId },
     ).finally(() => {
       this.hubOpen = false;
       // The Esc keystroke already pays for hideOverlay's immediate full
@@ -594,7 +603,7 @@ export class FleetList {
     // Agents open in the hub window, on their transcript page — Esc comes
     // back to the roster instead of closing the overlay. The hub's transcript
     // viewer carries this row's `b` handoff and scrollbar mode.
-    this.openHub(entry.record.id);
+    this.openHub({ agentId: entry.record.id });
   }
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */

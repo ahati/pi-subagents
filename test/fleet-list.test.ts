@@ -12,6 +12,7 @@ import {
   formatFleetElapsed,
   formatFleetTokens,
 } from "../src/ui/fleet-list.js";
+import type { WorkflowDialogSource } from "../src/ui/workflow-view.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -175,6 +176,10 @@ function harness(
   return {
     fleet,
     setWorkflows: (list: FleetWorkflow[]) => { workflows = list; fleet.update(); },
+    /** Wire the hub's run detail, the way the extension does at activation. */
+    setRunSource: (run: (id: string) => WorkflowDialogSource | undefined) => {
+      fleet.setWorkflowRunSource(run, () => true);
+    },
     openedWorkflows: () => openedWorkflows,
     closeWorkflowDialog: async () => { closeWorkflowDialog?.(); await Promise.resolve(); },
     ui,
@@ -500,7 +505,7 @@ describe("FleetList navigation", () => {
   it("the popup entry (openHub with an agent) leaves the bar down after close too", async () => {
     const agent = makeRecord();
     const h = harness([agent]);
-    const hub = h.fleet.openHub(agent.id);
+    const hub = h.fleet.openHub({ agentId: agent.id });
     expect(h.overlayOpened()).toBe(true);
     expect(h.render()).toEqual([]);
     await h.closeOverlay();
@@ -509,6 +514,29 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
     expect(h.press(DOWN)).toEqual({ consume: true });
     expect(h.render().some(l => l.includes("enter view"))).toBe(true); // recall opens into the list (active hint)
+  });
+
+  it("a runId opens the hub on the run's page, with the run selected", async () => {
+    const h = harness([makeRecord()]);
+    h.setWorkflows([makeWorkflow({ id: "wf-1", name: "migrate-v2" })]);
+    h.setRunSource(id => id === "wf-1"
+      ? { progress: [], task: { status: "running", workflowName: "migrate-v2", startTime: Date.now() } }
+      : undefined);
+
+    const hub = h.fleet.openHub({ runId: "wf-1" });
+    expect(h.overlayOpened()).toBe(true);
+    const frame = (h.overlayComponent() as { render(width: number): string[] }).render(120).map(plain).join("\n");
+    // Page W: the run's pane on the right, the run row selected in the master.
+    expect(frame).toContain("RUN AGENTS");
+    // The master's cursor marker sits on the run's row (the fake theme's tags
+    // cost the 18-column cell its name, so the marker is what there is to see).
+    expect(frame).toMatch(/^│ ❯/m);
+    expect(frame).toContain("migrate-v2");
+    // W's escape anchor names the roster, not the hub close.
+    expect(frame).toContain("Esc roster");
+
+    await h.closeOverlay();
+    await hub;
   });
 
   it("a → dismissal survives the hub: the bar stays hidden after it closes", async () => {

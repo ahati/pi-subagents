@@ -30,20 +30,8 @@ interface CapturedFleetActions {
   resume: (id: string) => boolean;
 }
 
-interface CapturedEmbeddedLog {
-  pauseAgent?: (id: string) => string | undefined;
-}
-
-interface CapturedWorkflowDeps {
-  embeddedLog?: CapturedEmbeddedLog;
-}
-
 /** The `p` key's pause/resume pair, captured from `setLifecycleActions`. */
 let fleetActions: CapturedFleetActions | undefined;
-/** The fleet list's "open a workflow" callback, captured from `setWorkflowSource`. */
-let workflowOpen: ((id: string) => void) | undefined;
-/** The deps object `openWorkflowFromFleet` receives — the inspector's log deps. */
-let workflowDeps: CapturedWorkflowDeps | undefined;
 
 vi.mock("../src/ui/fleet-list.js", () => ({
   FleetList: class {
@@ -52,7 +40,7 @@ vi.mock("../src/ui/fleet-list.js", () => ({
       fleetActions = actions;
     });
     setWorkflowSource = vi.fn((_source: unknown, open: (id: string) => void) => {
-      workflowOpen = open;
+      void open;
     });
     setWorkflowRunSource = vi.fn();
     setEnabled = vi.fn();
@@ -66,9 +54,7 @@ vi.mock("../src/ui/fleet-list.js", () => ({
 }));
 
 vi.mock("../src/ui/workflow-menu.js", () => ({
-  openWorkflowFromFleet: vi.fn((_id: string, deps: CapturedWorkflowDeps) => {
-    workflowDeps = deps;
-  }),
+  openWorkflowFromFleet: vi.fn(),
   showWorkflowsMenu: vi.fn(),
 }));
 
@@ -91,8 +77,6 @@ let booted: Map<string, any> | undefined;
 beforeEach(() => {
   vi.mocked(runAgent).mockReset();
   fleetActions = undefined;
-  workflowOpen = undefined;
-  workflowDeps = undefined;
 });
 
 afterEach(async () => {
@@ -223,18 +207,6 @@ describe("pause funnel — ownership refusal", () => {
     expect(record.isBackground).toBe(true);
     expect(record.worktree).toBeUndefined();
     expect(fleetActions!.pause(record.id)).toBe(OWNERSHIP_REFUSAL);
-    expect(record.status).toBe("running");
-    expect(pausedEmits(b)).toEqual([]);
-  });
-
-  it("the workflow inspector's log pause callback refuses a workflow-owned record", async () => {
-    const { b } = boot();
-    const record = await spawnRunning(b, "workflow child");
-    own(record, "workflow");
-
-    workflowOpen!(record.id);
-    expect(workflowDeps?.embeddedLog).toBeDefined();
-    expect(workflowDeps!.embeddedLog!.pauseAgent!(record.id)).toBe(OWNERSHIP_REFUSAL);
     expect(record.status).toBe("running");
     expect(pausedEmits(b)).toEqual([]);
   });
