@@ -10,13 +10,16 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import type { WorkflowEntry } from "../src/workflow/progress.js";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
   completeWorkflowTask,
   createWorkflowTask,
   failWorkflowTask,
+  formatWorkflowNotification,
   pauseWorkflowTask,
   resumeWorkflowTask,
+  updateWorkflowProgressBatch,
   type WorkflowTask,
 } from "../src/workflow/task.js";
 
@@ -128,5 +131,32 @@ describe("settling a run", () => {
 
     expect(task.control).toBeUndefined();
     expect(task.status).toBe("failed");
+  });
+});
+
+describe("formatWorkflowNotification", () => {
+  it("reports agents, not row emissions, in the summary", () => {
+    // Three agents × the lifecycle rows the runtime emits per agent. Counting
+    // raw entries once read this as 3/10 (a real run read 5/25).
+    const task = createWorkflowTask({ id: "wf_abc123", script: "" });
+    const entries: WorkflowEntry[] = [];
+    for (let index = 0; index < 3; index++) {
+      entries.push(
+        { type: "workflow_agent", index, label: `agent-${index}`, phaseIndex: 0, state: "start", queuedAt: 5 },
+        { type: "workflow_agent", index, label: `agent-${index}`, phaseIndex: 0, state: "progress", queuedAt: 5, startedAt: 6 },
+        { type: "workflow_agent", index, label: `agent-${index}`, phaseIndex: 0, state: "done" },
+      );
+    }
+    updateWorkflowProgressBatch(task, entries);
+    completeWorkflowTask(task, {
+      status: "completed",
+      value: undefined,
+      meta: { name: "probe", description: "d" },
+      progress: [],
+      agentCount: 3,
+      replayedCount: 0,
+    });
+
+    expect(formatWorkflowNotification(task, 10_000)).toContain('completed — 3/3 agents');
   });
 });

@@ -299,6 +299,34 @@ describe("stats", () => {
     expect(result.running).toBe(true);
   });
 
+  it("collapses an agent's lifecycle emissions into one row", () => {
+    // The runtime re-emits each row as the agent moves along — queued, started,
+    // a model-info re-emit, the settle — so raw-entry counting would read 10
+    // agents here. The shape is the one a real all-settled run produces.
+    const result = stats([
+      agentEntry({ index: 0, state: "start", queuedAt: 5 }),
+      agentEntry({ index: 0, state: "progress", queuedAt: 5, startedAt: 6 }),
+      agentEntry({ index: 0, state: "done" }),
+      agentEntry({ index: 1, state: "start", queuedAt: 5 }),
+      agentEntry({ index: 1, state: "progress", queuedAt: 5, startedAt: 6 }),
+      agentEntry({ index: 1, state: "progress", queuedAt: 5, startedAt: 6 }),
+      agentEntry({ index: 1, state: "done" }),
+      agentEntry({ index: 2, state: "start", queuedAt: 5 }),
+      agentEntry({ index: 2, state: "progress", queuedAt: 5, startedAt: 6 }),
+      agentEntry({ index: 2, state: "error" }),
+    ]);
+    expect(result).toMatchObject({ done: 2, failedCount: 1, total: 3, started: 3, running: false });
+  });
+
+  it("keeps the total at the agent count while rows re-emit mid-flight", () => {
+    const result = stats([
+      agentEntry({ index: 0, state: "done" }),
+      agentEntry({ index: 1, state: "start", queuedAt: 5 }),
+      agentEntry({ index: 1, state: "progress", queuedAt: 5, startedAt: 6 }),
+    ]);
+    expect(result).toMatchObject({ done: 1, total: 2, started: 2, running: true });
+  });
+
   it("counts a live agent with no queuedAt as started", () => {
     const result = stats([agentEntry({ index: 0, state: "progress" })]);
     expect(result.started).toBe(1);
