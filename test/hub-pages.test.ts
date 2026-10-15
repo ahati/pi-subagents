@@ -2,7 +2,15 @@ import * as piHost from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentHub, type AgentHubDeps, HUB_SIZE_REFUSAL, type HubUICtx, openAgentHub } from "../src/ui/agent-hub.js";
+import {
+  AgentHub,
+  type AgentHubDeps,
+  HUB_SIZE_REFUSAL,
+  type HubUICtx,
+  openAgentHub,
+  statusGlyph,
+  workflowStatusGlyph,
+} from "../src/ui/agent-hub.js";
 import type { AgentActivity } from "../src/ui/agent-widget.js";
 import type { FleetWorkflow } from "../src/ui/fleet-list.js";
 import { MASTER_LIST_WIDTH, PANE_PADDING } from "../src/ui/window-frame.js";
@@ -53,6 +61,7 @@ function harness(
   agents: AgentRecord[],
   depsOver: Partial<AgentHubDeps> = {},
   size: { cols?: number; rows?: number } = {},
+  th: { fg(c: string, s: string): string; bold(s: string): string } = theme,
 ) {
   const fakeTui = {
     mode: "regular",
@@ -70,7 +79,7 @@ function harness(
           settled = true;
           resolve(undefined);
         };
-        components.push(factory(fakeTui, theme, undefined, done) as (typeof components)[number]);
+        components.push(factory(fakeTui, th, undefined, done) as (typeof components)[number]);
       });
     }),
   };
@@ -824,5 +833,310 @@ describe("per-row keys", () => {
     for (let i = 0; i < 4; i++) await Promise.resolve();
     expect(copy).toHaveBeenCalledWith("the final answer");
     copy.mockRestore();
+  });
+});
+
+/**
+ * P8 — additive spec coverage. Everything P1–P7 broke was repinned in place;
+ * these pins cover the spec's Tests section and the plan's D3/D4 readings.
+ */
+/** The right cell's content, trimmed of the frame's pad columns and border. */
+const detailRows = (frame: string[]) => frame
+  .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+  .map(l => rightCell(l).slice(1, 96));
+
+describe("P8 — roster grammar", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) =>
+    makeRecord({ id: `a${i}`, alias: `agent-${i}`, description: `task ${i}`, startedAt: 1000 + i }));
+
+  it("styles the group headers dim and bold, and selects nothing on them", () => {
+    const seen: Array<{ color?: string; bold?: string }> = [];
+    const recording = {
+      fg: (c: string, s: string) => { seen.push({ color: c }); return s; },
+      bold: (s: string) => { seen.push({ bold: s }); return s; },
+    };
+    const h = harness(many(1), {
+      workflows: () => [{ id: "wf_1", name: "audit", status: "running", doneCount: 1, totalCount: 2, startedAt: 1, tokens: 0 }],
+    }, {}, recording);
+    h.open();
+    h.frame();
+    expect(seen.some(e => e.bold === "SUBAGENTS")).toBe(true);
+    expect(seen.some(e => e.bold === "WORKFLOWS")).toBe(true);
+    expect(seen.filter(e => e.color === "dim").length).toBeGreaterThanOrEqual(2);
+    // One ↓ crosses the WORKFLOWS header onto the run row: the header took no
+    // cursor slot, so the first press lands on the run, not on the header.
+    h.press("\x1b[B");
+    expect(h.frame().join("\n")).toContain("❯ ● audit");
+  });
+
+  it("omits an empty group's header entirely", () => {
+    const agentsOnly = harness(many(1));
+    agentsOnly.open();
+    expect(agentsOnly.frame().join("\n")).toContain("SUBAGENTS");
+    expect(agentsOnly.frame().join("\n")).not.toContain("WORKFLOWS");
+
+    const runsOnly = harness(many(0), {
+      workflows: () => [{ id: "wf_1", name: "audit", status: "running", doneCount: 1, totalCount: 2, startedAt: 1, tokens: 0 }],
+    });
+    runsOnly.open();
+    expect(runsOnly.frame().join("\n")).not.toContain("SUBAGENTS");
+    expect(runsOnly.frame().join("\n")).toContain("WORKFLOWS");
+  });
+
+  it("windows a long roster on the cursor, clamped at both ends", () => {
+    const h = harness(many(30), {}, { cols: 120, rows: 10 });
+    h.open();
+    // Six body rows: the list is windowed, never the whole roster.
+    const names = (frame: string[]) => frame
+      .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+      .map(leftCell)
+      .join("\n");
+    expect(names(h.frame(120))).toContain("❯ ● agent-0");
+    expect(names(h.frame(120))).not.toContain("agent-6");
+    for (let i = 0; i < 29; i++) h.press(DOWN);
+    const tail = names(h.frame(120));
+    expect(tail).toContain("❯ ● agent-29");
+    expect(tail).not.toContain("agent-0");
+  });
+
+  it("flips a settling agent's glyph in place without reordering the roster", () => {
+    const records = [makeRecord({ id: "a1", alias: "alpha", startedAt: 1000 }), makeRecord({ id: "a2", alias: "beta", startedAt: 2000 })];
+    const h = harness(records);
+    h.open();
+    const before = h.frame();
+    const pointer = before.findIndex(l => l.includes("❯"));
+    expect(before[pointer]).toContain("● alpha");
+    records[0].status = "completed";
+    const after = h.frame();
+    expect(after[pointer]).toContain("✓ alpha");
+    // Derived grouping, not re-sorting: the row count and the row order hold.
+    expect(after.filter(l => l.startsWith("│")).length).toBe(before.filter(l => l.startsWith("│")).length);
+    expect(after.findIndex(l => l.includes("❯"))).toBe(pointer);
+  });
+});
+
+describe("P8 — the glyph set", () => {
+  it("maps every subagent state and every run state to the spec's glyphs", () => {
+    const states: Array<[string, string]> = [
+      ["running", "●"], ["queued", "○"], ["paused", "‖"],
+      ["completed", "✓"], ["error", "✗"], ["stopped", "·"], ["aborted", "·"],
+    ];
+    for (const [state, glyph] of states) {
+      expect(statusGlyph(state as never, theme), state).toBe(glyph);
+    }
+    // `steered` reuses the completed tick, as it did before the restyle.
+    expect(statusGlyph("steered" as never, theme)).toBe("✓");
+    const runs: Array<[string, string]> = [["running", "●"], ["paused", "‖"], ["completed", "✓"], ["error", "✗"]];
+    for (const [state, glyph] of runs) {
+      expect(workflowStatusGlyph(state as never, theme), state).toBe(glyph);
+    }
+  });
+
+  it("renders `‖` on a parked run row only; its owned agents keep their own states", () => {
+    const paused: FleetWorkflow[] = [{
+      id: "wf_1", name: "migrate-v2", status: "paused", doneCount: 1, totalCount: 2,
+      startedAt: Date.now() - 60_000, tokens: 500,
+    }];
+    const h = harness(
+      [makeRecord({ id: "r1", description: "schema tables" })],
+      {
+        workflows: () => paused,
+        workflowRun: () => ({
+          progress: [runAgent({ index: 0, label: "m-1", state: "start", recordId: "r1" })],
+          task: { status: "paused", workflowName: "migrate-v2", startTime: Date.now() - 60_000 },
+        }),
+      },
+    );
+    h.open();
+    h.press(DOWN); // the parked run row
+    expect(h.frame().join("\n")).toContain("‖ migrate-v2");
+    h.press("\r"); // W — the run's agent list keeps its own state mark
+    const pane = h.frame().filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER).map(rightCell).join("\n");
+    expect(pane).toContain("m-1");
+    expect(pane).not.toContain("‖ m-1");
+  });
+});
+
+describe("P8 — the R preview", () => {
+  it("renders the SL event grammar, never transcript blocks, and closes with the hint", () => {
+    const h = harness(
+      [makeRecord({
+        id: "a1",
+        description: "Find and fix the flaky tests",
+        session: { subscribe: () => () => {}, messages: [{ role: "user", content: "Find and fix the flaky tests" }] },
+      })],
+      { agentActivity: new Map([["a1", { turnCount: 2, activeTools: [], responseText: "3 unstable detected" } as never]]) },
+    );
+    h.open();
+    const rows = detailRows(h.frame());
+    const pane = rows.join("\n");
+    expect(pane).toContain("spawn");
+    expect(pane).toContain("still running");
+    // The compact preview never renders the transcript's blocks or its `▍` tail.
+    expect(pane).not.toContain("[User]");
+    expect(pane).not.toContain("[Assistant]");
+    expect(pane).not.toContain("▍");
+    expect(rows.filter(r => r.trim() !== "").at(-1)!.trimEnd()).toBe("(⏎ opens the full transcript)");
+  });
+
+  it("previews a selected run with its header block and the current phase's `❯`", () => {
+    const h = harness([makeRecord({ id: "a1" })], {
+      workflows: () => [{
+        id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 3,
+        startedAt: Date.now() - 60_000, tokens: 500,
+      }],
+      workflowRun: () => ({
+        progress: [
+          { type: "workflow_phase", index: 0, title: "discover" },
+          { type: "workflow_phase", index: 1, title: "migrate" },
+          runAgent({ index: 0, label: "m-1", state: "running", phaseIndex: 1, recordId: "r1" }),
+        ],
+        meta: { phases: [{ title: "discover" }, { title: "migrate" }, { title: "verify" }] },
+        task: { status: "running", workflowName: "migrate-v2", startTime: Date.now() - 60_000 },
+      }),
+    });
+    h.open();
+    h.press(DOWN); // onto the run row
+    const rows = detailRows(h.frame());
+    expect(rows[0].trimEnd()).toContain("workflow · 1/3 agents");
+    expect(rows[1].trimEnd()).toMatch(/^ +↳ phase 2 of 3/);
+    expect(rows[2].trim()).toBe("─".repeat(95));
+    expect(rows.join("\n")).toContain("❯ 2 migrate");
+    expect(rows.filter(r => r.trim() !== "").at(-1)!.trimEnd()).toBe("(⏎ opens the run page)");
+  });
+});
+
+describe("P8 — the footer band", () => {
+  /** The band's content at 120: `│ <116> │`. */
+  const bandOf = (frame: string[], width = 120) => {
+    const band = frame.at(-2) ?? "";
+    expect(band.length, "the band is one full-width row").toBe(width);
+    return band.slice(2, -2);
+  };
+  const slots = (content: string) => {
+    const at = content.search(/ {2,}/);
+    let end = at;
+    while (content[end] === " ") end++;
+    return { left: content.slice(0, at), gap: end - at, right: content.slice(end) };
+  };
+  const R_LEFT = ["⏎ transcript", "l log", "p pause", "c copy"];
+  const R_RIGHT = ["↑↓ select", "⇥ activity", "f popup", "Esc close"];
+
+  it("drops whole hints only, in the spec's order, as the band narrows", () => {
+    for (const cols of [64, 72, 80, 100, 120]) {
+      const h = harness([makeRecord({ id: "a1" })], {}, { cols, rows: 40 });
+      h.open();
+      const { left, gap, right } = slots(bandOf(h.frame(cols), cols));
+      expect(gap, `${cols}: at least two columns between the slots`).toBeGreaterThanOrEqual(2);
+      for (const hint of left ? left.split(" · ") : []) expect(R_LEFT, `${cols}: ${hint}`).toContain(hint);
+      for (const hint of right ? right.split(" · ") : []) expect(R_RIGHT, `${cols}: ${hint}`).toContain(hint);
+      // The escape anchor is the last thing to go.
+      expect(right, `${cols}: Esc pinned`).toContain("Esc close");
+      if (cols === 120) expect(left).toBe(R_LEFT.join(" · "));
+    }
+  });
+
+  it("keeps both slots flush: the right slot ends at the band's last content column", () => {
+    const h = harness([makeRecord({ id: "a1" })], {}, { cols: 120, rows: 40 });
+    h.open();
+    const band = (h.frame(120).at(-2) ?? "");
+    expect(band.slice(2, -2).length).toBe(116);
+    expect(band.slice(2, -2).trimEnd()).toBe(band.slice(2, -2));
+  });
+});
+
+describe("P8 — transcript grammar parity and refusal behavior", () => {
+  it("T and WA render the same block set from the same viewer; WA leads `↳` with the run", () => {
+    const messages = [
+      { role: "user", content: "Migrate the schema in db.ts to v2" },
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "The v1 tables are created in init(); migrate needs a dual-write shim." },
+        { type: "text", text: "Adding a dual-write shim around init()." },
+      ] },
+    ];
+    const h = harness(
+      [makeRecord({ id: "r1", description: "schema tables", status: "completed", result: "done", session: { subscribe: () => () => {}, messages } })],
+      {
+        workflows: () => [{
+          id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+          startedAt: Date.now() - 60_000, tokens: 500,
+        }],
+        workflowRun: () => runSource(),
+        agentActivity: new Map([["r1", { turnCount: 1, activeTools: [], responseText: "" } as never]]),
+      },
+    );
+    h.open();
+    h.press("\r"); // T
+    const transcript = detailRows(h.frame()).join("\n");
+    expect(transcript).toContain("[User]");
+    expect(transcript).toContain("Migrate the schema in db.ts to v2");
+    expect(transcript).toContain("[Assistant]");
+    expect(transcript).toContain("Adding a dual-write shim");
+    expect(transcript).toContain("✻ thinking");
+    expect(transcript).toContain("───");
+    h.press(ESC);
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("\r"); // WA
+    const embedded = detailRows(h.frame()).join("\n");
+    expect(embedded).toContain("[User]");
+    expect(embedded).toContain("[Assistant]");
+    expect(embedded).toContain("✻ thinking");
+    expect(embedded).toContain("───");
+    // The same agent on T has no parent run; on WA the run name leads the line.
+    expect(transcript).toContain("  ↳ —");
+    expect(embedded).toContain("  ↳ migrate-v2");
+  });
+
+  it("a live agent's transcript carries the `▍` tail on T and on WA", () => {
+    const h = harness(
+      [makeRecord({
+        id: "r1",
+        description: "schema tables",
+        session: { subscribe: () => () => {}, messages: [{ role: "user", content: "Migrate the schema in db.ts to v2" }] },
+      })],
+      {
+        workflows: () => [{
+          id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+          startedAt: Date.now() - 60_000, tokens: 500,
+        }],
+        workflowRun: () => runSource(),
+        agentActivity: new Map([["r1", { turnCount: 2, activeTools: new Map([["t1", "editing db.ts"]]), responseText: "" } as never]]),
+      },
+    );
+    h.open();
+    h.press("\r"); // T
+    expect(detailRows(h.frame()).join("\n")).toContain("▍");
+    h.press(ESC);
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("\r"); // WA
+    expect(detailRows(h.frame()).join("\n")).toContain("▍");
+  });
+
+  it("refuses `s` off a run row, arms `x` two-press, and leaves `p` on a run row alone", () => {
+    const stopWorkflow = vi.fn();
+    const pauseAgent = vi.fn(() => undefined);
+    const h = harness([makeRecord({ id: "a1" })], {
+      stopWorkflow,
+      pauseAgent,
+      workflows: () => [{
+        id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,
+        startedAt: Date.now() - 60_000, tokens: 500,
+      }],
+    });
+    h.open();
+    h.press("s"); // agent row: no run to stop
+    expect(stopWorkflow).not.toHaveBeenCalled();
+    h.press("x"); // agent row: the first press only arms
+    expect(h.deps.manager.abort).not.toHaveBeenCalled();
+    expect(h.frame().join("\n")).toContain("x again to STOP");
+    h.press("x");
+    expect(h.deps.manager.abort).toHaveBeenCalledWith("a1");
+    h.press(DOWN); // the run row
+    h.press("p"); // a run row has no agent to pause
+    expect(pauseAgent).not.toHaveBeenCalled();
+    h.press("s");
+    expect(stopWorkflow).toHaveBeenCalledWith("wf_1");
   });
 });

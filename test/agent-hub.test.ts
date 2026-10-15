@@ -792,3 +792,64 @@ describe("hub page keys through the band", () => {
     expect(h.frame().join("\n")).toContain("Esc close");
   });
 });
+
+describe("P8 — the escalation resize keeps state", () => {
+  /** The transcript pane's rows below the identity block, at 60 columns. */
+  const bodyRows = (frame: string[]) => frame
+    .filter(l => l.startsWith("│") && l.indexOf("│", 1) === 21)
+    .map(l => l.slice(23).replace(/ *│$/, ""))
+    .slice(3);
+  const band = (frame: string[]) => frame.at(-2) ?? "";
+
+  it("survives 59→60 columns and 15→16 rows: selection, scroll, page and expand intact", () => {
+    const messages = Array.from({ length: 60 }, (_, i) => ({ role: "user", content: `message number ${i}` }));
+    const h = harness([
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: 1000, status: "completed" }),
+      makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: 2000, session: { subscribe: () => () => {}, messages } }),
+      makeRecord({ id: "a3", alias: "gamma", description: "gamma task", startedAt: 3000, status: "completed" }),
+    ]);
+    h.open();
+    h.press("\x1b[B"); // select beta
+    expect(h.frame(120).join("\n")).toContain("❯ ● beta");
+
+    h.press("\r"); // T — the selected agent's transcript
+    h.frame(120);
+    // Scroll the viewer and expand in place, at a width that can show both.
+    h.press("\x1b[5~"); // PgUp
+    const scrolledAt120 = bodyRows(h.frame(120));
+    expect(scrolledAt120.join("\n")).not.toContain("message number 59"); // scrolled off the tail
+    h.press("o"); // expand — a view state, not a page
+    // The expanded band is the `c copy diff` one; at 120 the fitter has
+    // already dropped the `o collapse` hint itself (spec TD frame).
+    expect(band(h.frame(120))).toContain("c copy diff");
+
+    // The escalation: 60→59 columns (two panes → stacked) and 16→15 rows.
+    h.tui.terminal.columns = 60;
+    h.tui.terminal.rows = 16;
+    const before = bodyRows(h.frame(60)).slice(0, 3);
+    h.tui.terminal.columns = 59;
+    h.tui.terminal.rows = 15;
+    const stacked = h.frame(59);
+    expect(stacked[0]).not.toContain("┬");
+    expect(stacked.join("\n")).toContain("Esc roster"); // still page T
+    h.tui.terminal.columns = 60;
+    h.tui.terminal.rows = 16;
+    const wide = h.frame(60);
+    expect(wide[0]).toContain("┬");
+    expect(wide.join("\n")).toContain("Esc roster");
+    // The scrolled window survived the trip: the same rows open the pane.
+    expect(bodyRows(wide).slice(0, 3)).toEqual(before);
+
+    // Widen again: the expand state is still on, so the band still says so.
+    h.tui.terminal.columns = 120;
+    h.tui.terminal.rows = 20;
+    expect(band(h.frame(120))).toContain("c copy diff");
+    expect(band(h.frame(120))).not.toContain("m md");
+
+    // The roster selection survived the whole escalation.
+    h.press(ESC);
+    expect(h.frame(120).join("\n")).toContain("❯ ● beta");
+    // The hub's tick interval does not outlive the test.
+    h.components.at(-1)?.dispose?.();
+  });
+});
