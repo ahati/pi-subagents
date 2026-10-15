@@ -365,27 +365,33 @@ tokens/cost.
 Left: the roster, selection pinned to the run. Right: the run header, phases
 and the run's agents — the level the next `⏎` descends into.
 `↑↓` moves the `❯` across phases and run agents alike; it starts on the
-current phase.
+current phase. In `RUNNING WORKFLOW AGENTS`, a running agent with a record
+carries its live facts on the row — `turn <n>` and the record's token total,
+flush right beside the duration — and its last output line one dim row under
+it (the same `describeActivity` text the roster preview's live row uses);
+settled and queued rows carry neither. The 18-column masters keep the
+section's clamped label and the compact rows only.
 
 ```text
 ╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ SUBAGENTS          │ ● migrate-v2  workflow · 3/5 agents · 1m12s (running)                                           │
-│   ● explore        │   ↳ phase 2 of 4 — migrate · 2 agents in flight                                                 │
+│   ● explore        │   ↳ phase 2 of 4 — migrate · 1 agent in flight                                                  │
 │   ○ audit          │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
 │   ‖ refactor       │ PHASES                                                                                          │
-│   ✓ docs-gen       │ ✓ discover                                                                                  3/3 │
-│   ✗ crawl-old      │ ❯ 2 migrate                                                                                 1/2 │
-│ WORKFLOWS          │ 3 verify                                                                                      — │
-│ ❯ ● migrate-v2 3/5 │ 4 report                                                                                      — │
-│   ✓ batch-d… 12/12 │ ─────────────────────────────────────────────────────────────────────────────────────────────── │
-│                    │ RUN AGENTS                                                                                      │
-│                    │ ❯ ● m-1   schema tables                                                                     40s │
-│                    │ ● m-2   api endpoints                                                                       32s │
-│                    │ ✓ m-3   seed data                                                                          done │
-│                    │ ○ m-4   verify queries                                                                   queued │
-│                    │ ○ m-5   write report                                                                     queued │
+│   ✓ docs-gen       │    ✓ discover                                                                              1/1  │
+│   ✗ crawl-old      │  ❯ 2 migrate                                                                               1/2  │
+│ WORKFLOWS          │    3 verify                                                                                0/1  │
+│ ❯ ● migrate-v2 3/5 │    4 report                                                                                0/1  │
+│                    │                                                                                                 │
+│                    │ RUNNING WORKFLOW AGENTS                                                                         │
+│                    │    ✓ m-1                                                                                   35s  │
+│                    │    ⠋ m-2                                                              turn 3 · 63.4k tok · 32s  │
+│                    │      Editing api.ts — route handlers split                                                      │
+│                    │    ✓ m-3                                                                                   26s  │
+│                    │    ◌ m-4 · waiting 1s                                                                           │
+│                    │    ◌ m-5 · waiting 1s                                                                           │
 │ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │
-│ 3/5 agents · phase 2 of 4                           ↑↓ item · ⏎ agent · l run log · s stop run · f full · Esc roster │
+│ 3/5 agents · phase 2 of 4                          ↑↓ item · ⏎ agent · l run log · s stop run · f popup · Esc roster │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -455,7 +461,7 @@ events interleaved with its agents' spawns, edits and completions.
 │ ❯ 2 migrate        │ 12:01:18 run start: 5 agents, 4 phases                                                          │
 │ 3 verify           │ 12:01:19 m-1 spawned (discover)                                                                 │
 │ 4 report           │ 12:01:33 m-1 done — 3 tables found                                                              │
-│ RUN AGENTS         │ 12:01:34 m-2 spawned (migrate)                                                                  │
+│ RUNNING WORKFLOW … │ 12:01:34 m-2 spawned (migrate)                                                                  │
 │ ❯ ● m-1            │ 12:02:02 m-2: edit api.ts +120 −14                                                              │
 │   ● m-2            │ 12:02:10 m-3 done — seeds applied                                                               │
 │   ✓ m-3            │ 12:02:11 phase 2 still running — 2 agents in flight                                             │

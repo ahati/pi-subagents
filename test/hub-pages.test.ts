@@ -167,9 +167,9 @@ describe("hub pane invariant — detail is always on the right", () => {
     const body = h.frame().filter(l => l.startsWith("│"));
     expect(body.some(l => leftCell(l).includes("SUBAGENTS"))).toBe(true);
     expect(body.some(l => rightCell(l).includes("PHASES"))).toBe(true);
-    expect(body.some(l => rightCell(l).includes("RUN AGENTS"))).toBe(true);
+    expect(body.some(l => rightCell(l).includes("RUNNING WORKFLOW AGENTS"))).toBe(true);
     // The run's own panes never leak into the roster column.
-    expect(body.some(l => leftCell(l).includes("RUN AGENTS"))).toBe(false);
+    expect(body.some(l => leftCell(l).includes("RUNNING WORKFLOW AGENTS"))).toBe(false);
   });
 
   it("WA: the run's agent list is demoted into the left pane, the conversation is right", () => {
@@ -354,6 +354,29 @@ describe("the run's state mark and its item cursor", () => {
     expect(marks(pane)).toBe(1);
   });
 
+  it("a running run agent carries its live turn count, tokens and last output line", () => {
+    const activity = new Map([["r2", { activeTools: new Map(), toolUses: 2, responseText: "Editing api.ts — route handlers split", turnCount: 3 }]]);
+    const h = harness(
+      [
+        makeRecord({ id: "r1", parentAgentId: "main", description: "schema tables", status: "completed" }),
+        makeRecord({ id: "r2", parentAgentId: "main", description: "api endpoints", status: "running", lifetimeUsage: { input: 60_000, output: 3_400, cacheWrite: 0 } }),
+      ],
+      { workflows, workflowRun: () => phasedRunSource(), agentActivity: activity },
+    );
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // page W
+    const pane = runPane(h.frame());
+    // Live facts on the running row, flush right with the duration…
+    expect(pane).toContain("turn 3 · 63.4k tok");
+    // …and the last output line one dim row under it. The done row (m-1)
+    // carries neither — no turn count, no tail.
+    expect(pane).toContain("Editing api.ts — route handlers split");
+    expect(pane).not.toMatch(/m-1.*turn \d/);
+    // A running agent whose record is gone gets nothing: no record, no facts.
+    expect(pane.match(/turn \d/g)?.length).toBe(1);
+  });
+
   it("W seeds both marks on the current phase row and draws one glyph there", () => {
     const h = runHarness();
     h.open();
@@ -361,7 +384,7 @@ describe("the run's state mark and its item cursor", () => {
     h.press("\r"); // page W
     const pane = runPane(h.frame());
     expect(pane).toContain("❯ 2 migrate");
-    expect(pane).toContain("RUN AGENTS");
+    expect(pane).toContain("RUNNING WORKFLOW AGENTS");
     // The seeded item cursor sits on the same phase row, so it doubles nothing.
     expect(marks(pane)).toBe(1);
     // No agent row is selected until the cursor walks into the list.
@@ -455,7 +478,9 @@ describe("the run's state mark and its item cursor", () => {
       .join("\n");
     expect(left).toContain("PHASES");
     expect(left).toContain("❯ 2 migrate");
-    expect(left).toContain("RUN AGENTS");
+    // The 18-column master clamps the section label — the prefix is what
+    // survives there; the wide W pane pins the full label.
+    expect(left).toContain("RUNNING WORKFLOW");
     expect(left).toContain("❯ ✓ m-1");
   });
 });
@@ -1180,7 +1205,7 @@ describe("P10 — runId opens the run's page and the run controls live there", (
     // The master's ❯ is on the run row, and the right pane is the run's page.
     expect(frame.join("\n")).toContain("❯ ● migrate-v2");
     expect(frame.join("\n")).toContain("❯ 2 migrate");
-    expect(frame.join("\n")).toContain("RUN AGENTS");
+    expect(frame.join("\n")).toContain("RUNNING WORKFLOW AGENTS");
     expect(bandOf(frame)).toContain("Esc roster");
     // The item cursor is seeded on the CURRENT phase, not left at the top:
     // ⏎ opens migrate's first agent (m-2), not discover's (m-1). The string

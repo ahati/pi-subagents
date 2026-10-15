@@ -230,7 +230,9 @@ export function agentRow(options: {
   workflowActive: boolean;
   spinnerFrame: number;
   now: number;
-}): WorkflowCardLine {
+  /** Live facts for a running agent with a record: shown on the wide panes. */
+  live?: { turns?: number; tokens?: number; tail?: string };
+}): WorkflowCardLine[] {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.workflowActive);
   const head: WorkflowCardLine = [
@@ -243,7 +245,7 @@ export function agentRow(options: {
   ];
   // The narrow pane holds the label and nothing else; there is no room for a
   // stat tail, and clamping one would just spend columns on a truncated word.
-  if (options.compact) return clampLine(head, width);
+  if (options.compact) return [clampLine(head, width)];
 
   const model = formatModel(entry);
   if (model) head.push({ text: ` ${model}`, color: "dim" });
@@ -251,9 +253,19 @@ export function agentRow(options: {
     head.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
   }
   // The duration sits flush right, so a column of rows reads as a column of
-  // durations rather than as ragged text.
-  const duration = entry.durationMs ? [{ text: `${formatDuration(entry.durationMs)} `, color: "dim" as const }] : [];
-  return duration.length > 0 ? rightAlign(head, duration, width) : clampLine(head, width);
+  // durations rather than as ragged text. A running agent's live turn count
+  // and tokens ride the same right-aligned block.
+  const live = options.live;
+  const parts: string[] = [];
+  if (live?.turns !== undefined && live.turns > 0) parts.push(`turn ${live.turns}`);
+  if (live?.tokens) parts.push(`${formatCompactTokens(live.tokens)} tok`);
+  if (entry.durationMs) parts.push(formatDuration(entry.durationMs));
+  const tail: WorkflowCardLine = parts.length > 0 ? [{ text: `${parts.join(" · ")} `, color: "dim" }] : [];
+  const headRow = tail.length > 0 ? rightAlign(head, tail, width) : clampLine(head, width);
+  // The live tail's last output line, one dim line under the head — the same
+  // `describeActivity` text the roster preview's live row uses.
+  if (!live?.tail) return [headRow];
+  return [headRow, clampLine([{ text: "     ", color: "dim" }, { text: live.tail, color: "dim" }], width)];
 }
 
 /** The agent row's dot-separated tail. The model is not in it — it leads. */

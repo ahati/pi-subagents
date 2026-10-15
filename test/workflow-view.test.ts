@@ -97,7 +97,7 @@ describe("agentRow — one run agent, compact or detailed", () => {
       workflowActive: true,
       spinnerFrame: 0,
       now: 0,
-    }));
+    })[0]);
     expect(row).toContain("m-1");
     expect(row).toContain("❯");
     expect(row).not.toContain("40s");
@@ -113,7 +113,7 @@ describe("agentRow — one run agent, compact or detailed", () => {
       workflowActive: true,
       spinnerFrame: 0,
       now: 0,
-    }));
+    })[0]);
     expect(row).toContain("user retry");
     expect(row).toContain("attempt 2");
     expect(row).toContain("from resume journal");
@@ -154,7 +154,7 @@ describe("dialogRowGlyph (the row glyph mapping the run pages inherit)", () => {
       agentRow({ entry: entry({ label: "skipped", state: "error", skipped: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
       agentRow({ entry: entry({ label: "blocked", state: "error", blocked: true }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
       agentRow({ entry: entry({ label: "queued", state: "start", queuedAt: 1 }), selected: false, compact: true, width: 30, glyphs: UNICODE_DIALOG_GLYPHS, workflowActive: true, spinnerFrame: 0, now: 0 }),
-    ].map(r => r.map(s => s.text).join(""));
+    ].map(r => r.flat().map(s => s.text).join(""));
     expect(rows[0]).toContain("✓ done");
     expect(rows[1]).toContain("✗ skipped");
     expect(rows[2]).toContain("✗ blocked");

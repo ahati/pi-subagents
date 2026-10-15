@@ -98,6 +98,8 @@ function lifecycleRank(status: AgentRecord["status"]): number {
  */
 const ROSTER_SUBAGENTS_LABEL = "SUBAGENTS";
 const ROSTER_WORKFLOWS_LABEL = "WORKFLOWS";
+/** The run's agent section on W and the run-agent pages' master. */
+const RUN_AGENTS_LABEL = "RUNNING WORKFLOW AGENTS";
 
 /**
  * The run-state glyph for a roster workflow row, the same vocabulary the
@@ -1512,8 +1514,9 @@ export class AgentHub implements Component {
     const agentSel = item >= groups.length ? item - groups.length : undefined;
     const lines: PaneRow[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
     // The phase list windows into what is left beside its own header and a
-    // reserved RUN AGENTS block (blank + header + one agent row), so a long
-    // phase list can no longer push the agents off the pane's bottom.
+    // reserved RUNNING WORKFLOW AGENTS block (blank + header + one agent
+    // row), so a long phase list can no longer push the agents off the pane's
+    // bottom.
     const phaseCapacity = Math.max(0, capacity - 4);
     lines.push(
       ...phaseListRows({
@@ -1526,7 +1529,7 @@ export class AgentHub implements Component {
       }),
     );
     lines.push([]);
-    lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
+    lines.push(clampLine([{ text: RUN_AGENTS_LABEL, color: "muted", bold: true }], width));
     // With the cursor on a phase row there is no agent cursor to draw; the
     // list still windows around wherever it last was.
     const selection = agentSel ?? this.clampRunAgentIndex();
@@ -1534,7 +1537,7 @@ export class AgentHub implements Component {
     if (entries.length === 0) lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
     for (let i = slice.start; i < slice.end; i++) {
       lines.push(
-        agentRow({
+        ...agentRow({
           entry: entries[i],
           selected: i === agentSel,
           compact: false,
@@ -1543,6 +1546,7 @@ export class AgentHub implements Component {
           workflowActive: source.task.status === "running" || source.task.status === "paused",
           spinnerFrame: 0,
           now: Date.now(),
+          live: this.runAgentLive(entries[i]),
         }),
       );
     }
@@ -1552,6 +1556,23 @@ export class AgentHub implements Component {
   /** The phases' state mark for the pane being drawn, refreshed from the run. */
   private runPhaseMark(groups: readonly PhaseGroup[]): number {
     return currentPhaseIndex(groups);
+  }
+
+  /**
+   * A running run agent's live facts: turn count and tokens from its record
+   * and activity, and the last output line (`describeActivity`, the same text
+   * the roster preview's live row carries). Only a running agent has them.
+   */
+  private runAgentLive(entry: WorkflowAgentEntry): { turns?: number; tokens?: number; tail?: string } | undefined {
+    if (entry.recordId === undefined || displayState(entry, true) !== "running") return undefined;
+    const record = this.deps.manager.listAgents().find(a => a.id === entry.recordId);
+    const activity = this.deps.agentActivity.get(entry.recordId);
+    if (record === undefined && activity === undefined) return undefined;
+    return {
+      turns: activity?.turnCount,
+      tokens: record ? getLifetimeTotal(record.lifetimeUsage) : entry.tokens,
+      tail: describeActivity(activity?.activeTools ?? new Map(), activity?.responseText ?? ""),
+    };
   }
 
   /** The phase groups of the named run, or none when its detail source is gone. */
@@ -1589,12 +1610,12 @@ export class AgentHub implements Component {
     if (entries.length === 0) {
       lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
     } else {
-      if (phaseFirst && groups.length > 0) lines.push(heading("RUN AGENTS"));
+      if (phaseFirst && groups.length > 0) lines.push(heading(RUN_AGENTS_LABEL));
       const capacity = Math.max(1, phaseFirst ? rows - lines.length : rows - phaseBlock - lines.length);
       const slice = windowRange(selection, entries.length, capacity);
       for (let i = slice.start; i < slice.end; i++) {
         lines.push(
-          agentRow({
+          ...agentRow({
             entry: entries[i],
             selected: i === selection,
             compact: this.page !== "L",
@@ -1603,6 +1624,8 @@ export class AgentHub implements Component {
             workflowActive: source.task.status === "running" || source.task.status === "paused",
             spinnerFrame: 0,
             now: Date.now(),
+            // No live tail here: the 18-column master clamps it to noise —
+            // the run page's wide pane carries the live facts.
           }),
         );
       }
