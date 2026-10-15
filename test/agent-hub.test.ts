@@ -345,6 +345,39 @@ describe("agent hub page T — the roster beside the transcript", () => {
     expect(out).not.toContain("❯ ● beta");
   });
 
+  it("↓ walks off the last agent onto the run rows — arrows jump between agents and workflows", async () => {
+    const h = harness(
+      [makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 })],
+      {
+        workflows: () => [{
+          id: "wf_1", name: "migrate-v2", status: "running", doneCount: 2, totalCount: 5,
+          startedAt: Date.now() - 72_000, tokens: 500,
+        }],
+        workflowRun: () => ({
+          progress: [{ type: "workflow_phase", index: 0, title: "discover" }],
+          task: { status: "running", workflowName: "migrate-v2", startTime: Date.now() - 72_000 },
+        }),
+      },
+    );
+    h.open({ agentId: "a1" }); // the popup twin, on T
+    h.press(DOWN); // off the last agent, across the WORKFLOWS header
+    const roster = h.frame().join("\n");
+    // The page became the roster with the RUN selected: its overview preview
+    // and the run's own footer keys.
+    expect(roster).toContain("❯ ● migrate-v2");
+    expect(roster).toContain("⏎ open run");
+    expect(roster).not.toContain("Esc roster");
+    h.press("\r"); // ⏎ descends into the run
+    const run = h.frame().join("\n");
+    expect(run).toContain("PHASES");
+    expect(run).toContain("Esc roster");
+    // And ↑ from the roster walks back across the header without wrapping.
+    h.press(ESC);
+    h.press(UP);
+    const back = h.frame().join("\n");
+    expect(back).toContain("❯ ● alpha");
+  });
+
   it("↓ moves to the next agent's conversation, ↑ back, clamped at the ends", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),

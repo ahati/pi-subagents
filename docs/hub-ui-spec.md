@@ -277,7 +277,11 @@ instead: header block, phases (the current phase carries the `❯`), and the
 ## Page T — subagent transcript (nested level 1)
 
 Left: the roster stays, selection pinned. Right: the header block, then the
-full conversation. **TD** is this page with one rich block expanded.
+full conversation. **TD** is this page with one rich block expanded. `↑`/`↓`
+move the roster selection and the conversation follows; the walk crosses the
+`WORKFLOWS` header too — a run row has no transcript, so landing on one
+turns the page into the roster with the run selected (its overview and keys),
+where `⏎` opens the run.
 
 ```text
 ╭ Agents & Workflows ┬─────────────────────────────────────────────────────────────────────────────────────────────────╮

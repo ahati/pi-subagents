@@ -802,7 +802,10 @@ export class AgentHub implements Component {
     // back one level via the viewer's `onBack`, and the page keys arrive
     // through its `onUnhandledKey` hook. ↑/↓ belong to the pane beside the
     // transcript — the roster on T, the run's agent list on WA — so the right
-    // pane follows the cursor instead of the viewer scrolling under it. A page
+    // pane follows the cursor instead of the viewer scrolling under it. On T
+    // the walk crosses into WORKFLOWS: a run row has no transcript, so the
+    // page becomes the roster with the run selected (its overview and keys),
+    // and ⏎ opens the run. A page
     // with no viewer (a record whose session is gone) still pops on the quit
     // keys — a level up, never out of the window.
     if (this.page === "T" || this.page === "WA") {
@@ -1059,20 +1062,28 @@ export class AgentHub implements Component {
    * stray keypress at the end of the roster.
    */
   private moveRosterSelection(direction: 1 | -1): void {
+    // Steps one ROW at a time, group headers aside — the cursor crosses from
+    // SUBAGENTS into WORKFLOWS seamlessly, exactly as it does on the roster
+    // page. The caller decides what the new selection means for the page.
     const items = this.entries();
-    let next = this.selected;
-    for (;;) {
-      const candidate = next + direction;
-      if (candidate < 0 || candidate >= items.length) return;
-      next = candidate;
-      const entry = items[next];
-      if (entry.kind !== "agent") continue;
-      const fresh = this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record;
-      if (fresh.session) break;
-    }
+    const next = Math.min(items.length - 1, Math.max(0, this.selected + direction));
     if (next === this.selected) return;
     this.selected = next;
-    this.focusId = this.rosterRecordForCurrent()?.id;
+    const entry = items[next];
+    const agent = entry?.kind === "agent"
+      ? (this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record)
+      : undefined;
+    if (agent?.session) {
+      // A transcript subject: the right pane follows the cursor, the page
+      // stays on the conversation.
+      this.focusId = agent.id;
+    } else {
+      // A run row (or an agent with no session left) has no transcript —
+      // the roster page is what can show it, with the run's overview and
+      // its own footer keys; ⏎ descends from there.
+      this.page = "R";
+      this.focusId = undefined;
+    }
     this.stopArmed = false;
     this.requestRender();
   }
