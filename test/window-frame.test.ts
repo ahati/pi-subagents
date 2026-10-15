@@ -20,6 +20,8 @@ import {
   frameRow,
   hintLine,
   leftPaneWidth,
+  MASTER_LIST_WIDTH,
+  masterPaneGeometry,
   paneBodyHeight,
   paneGeometry,
   paneRightWidth,
@@ -59,6 +61,33 @@ describe("pane geometry", () => {
     // Comfortable widths take the cap, not a share of the terminal.
     expect(leftPaneWidth(100, 18)).toBe(18);
     expect(leftPaneWidth(200, 18)).toBe(18);
+  });
+});
+
+describe("master pane geometry", () => {
+  it("pins the hub's master at 18 content columns at every two-pane width", () => {
+    expect(MASTER_LIST_WIDTH).toBe(18);
+    for (const width of [60, 100, 120]) {
+      expect(masterPaneGeometry(width).listWidth, `w=${width}`).toBe(MASTER_LIST_WIDTH);
+    }
+    // The inspector's own policy still gives way at the tightest two-pane
+    // width; the hub's pin is what keeps its divider in one column.
+    expect(paneGeometry(60).listWidth).toBeLessThan(MASTER_LIST_WIDTH);
+  });
+
+  it("gives the master cell way rather than tearing a narrow window", () => {
+    const panes = masterPaneGeometry(12);
+    expect(panes.listWidth).toBeLessThan(MASTER_LIST_WIDTH);
+    expect(1 + panes.leftCellWidth + 1 + panes.rightCellWidth + 1).toBe(12);
+  });
+
+  it("partitions the width between the three bars and both cells", () => {
+    for (const width of [12, 24, 60, 100, 137]) {
+      for (const pad of [0, 1]) {
+        const panes = masterPaneGeometry(width, pad);
+        expect(panes.listWidth + panes.detailWidth + FRAME_BARS + 4 * pad, `w=${width} pad=${pad}`).toBe(width);
+      }
+    }
   });
 });
 

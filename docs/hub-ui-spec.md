@@ -20,7 +20,7 @@ pane invariant, the shared `ConversationViewer` behind **T**/**WA**, the 40×10
 refusal and the 40–59 stacked / ≥ 60 two-pane ladder, and per-row key dispatch
 (`test/hub-pages.test.ts`). Landed in the previous style and restyled by this
 rewrite: the half-width roster (`hubPaneGeometry`, description/stats columns)
-becomes the narrow 18-column master (`paneGeometry`); the window-title
+becomes the narrow 18-column master (`masterPaneGeometry`); the window-title
 breadcrumb is dropped (the title cell is 20 columns) — the header block names
 the item, and on run-agent pages the run name rides the `↳` line; the roster's
 transcript preview becomes the agent-log preview; the `❞` status strip is
@@ -43,11 +43,12 @@ pane bodies, header blocks, key lists — and nothing else. Acceptance rule: no
 layout arithmetic in a surface module.
 
 - **The split** — the master cell holds `MASTER_LIST_WIDTH` (18) content
-  columns via `paneGeometry`, fixed at every two-pane size. The master is
+  columns via `masterPaneGeometry`, fixed at every two-pane size. The master is
   identity (cursor, state glyph, name); the detail pane owns the width. At 120
   columns a split row is `│ <18> │ <95> │`. `hubPaneGeometry` (the half split)
   is retired — it existed to fit the description/stats columns the narrow
-  roster no longer carries.
+  roster no longer carries; the proportional `paneGeometry` keeps its cap where
+  its bytes are pinned: the inspector and the popup chat twin.
 - **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
   names both kinds and exactly fills the master cell, and the `┬` is where the
   divider lands. The bottom edge mirrors it with `┴`.
@@ -64,6 +65,10 @@ layout arithmetic in a surface module.
   (100 %); twins differ only in frame size, never in content or page. The
   footer names the twin you would get: `f full` in the popup, `f popup` in
   fullscreen. Frames in this document show the popup twin.
+- **Width is a parameter, not a cap** — 120 columns is the verification width
+  every frame here is drawn at; `renderWindow` stays width-parameterized, so a
+  twin redraws the same pages at the terminal's size and a narrower one wraps
+  its cells or drops whole hints instead of tearing.
 
 ## Pane invariant (the one rule that decides every layout)
 

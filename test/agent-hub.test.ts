@@ -10,9 +10,9 @@ const ESC = "\x1b";
 /** End of the pane list's left cell: `│ ` + 18-col pane + ` ` (before the `│`). */
 const CHAT_CELL_END = 21;
 
-const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
+const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-/** Visible text of a rendered line: ANSI stripped, fake theme markers stripped. */
+/** Visible text of a rendered line: ANSI stripped (agent badges), markers removed. */
 function plain(line: string): string {
   return line.replace(/\u001b\[[0-9;]*m/g, "").replace(/<\/?[a-zA-Z]+>|\*/g, "");
 }
@@ -132,22 +132,21 @@ describe("agent hub mouse wheel", () => {
 
   it("moves the roster selection and consumes the event", () => {
     const { h, component } = wheelHub([
-      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
-      makeRecord({ id: "a2", description: "beta task", startedAt: Date.now() - 2000 }),
-      makeRecord({ id: "a3", description: "gamma task" }),
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
+      makeRecord({ id: "a3", alias: "gamma", description: "gamma task" }),
     ]);
     expect(component.handleMouse({ type: "wheel", wheelDelta: 1 })).toEqual({ handled: true });
-    // Wide frame: the test theme's fake colour markers are zero-width in a
-    // real terminal but count here, and the roster pane is half the window.
-    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
+    // The roster is identity-only, so the pointer and the name are what move.
+    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
     component.handleMouse({ type: "wheel", wheelDelta: 1 });
-    expect(h.frame(240).join("\n")).toContain("▸ ● Agent gamma task");
+    expect(h.frame(240).join("\n")).toContain("❯ ● gamma");
     // Clamps at the end instead of wrapping.
     component.handleMouse({ type: "wheel", wheelDelta: 5 });
-    expect(h.frame(240).join("\n")).toContain("▸ ● Agent gamma task");
+    expect(h.frame(240).join("\n")).toContain("❯ ● gamma");
     // Wheel up.
     component.handleMouse({ type: "wheel", wheelDelta: -1 });
-    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
+    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
   });
 
   it("ignores non-wheel events and empty deltas", () => {
@@ -217,12 +216,12 @@ describe("agent hub mouse in regular TUI mode", () => {
 
   it("parses wheel bytes in the roster views to move the selection", () => {
     const h = harness([
-      makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
-      makeRecord({ id: "a2", description: "beta task" }),
+      makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
+      makeRecord({ id: "a2", alias: "beta", description: "beta task" }),
     ]);
     h.open();
     h.press(wheel(65)); // wheel down → next row
-    expect(h.frame(240).join("\n")).toContain("▸ ● Agent beta task");
+    expect(h.frame(240).join("\n")).toContain("❯ ● beta");
   });
 
   it("consumes non-wheel mouse reports without moving anything", () => {
@@ -358,8 +357,8 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
   it("advertises the pane keys in the footer instead of ←/→ cycling", () => {
     const h = harness([makeRecord({ id: "a1" })]);
     h.open({ agentId: "a1" });
-    // Wide frame: at default widths the test theme's fake color markers (real
-    // ANSI is zero-width) push the footer past its truncation point.
+    // A wide frame: the footer's fitter drops whole hints from the right, and
+    // this pins that the pane keys are what survives.
     const frame = h.frame(200).join("\n");
     expect(frame).toContain("↑↓ agent");
     expect(frame).toContain("Esc close");
@@ -382,8 +381,7 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     expect(completedLine).toBeGreaterThan(activeLine);
     expect(failedLine).toBeGreaterThan(completedLine);
     // The left cell of each group's first row carries that group's status
-    // glyph (the selected running row renders only its pointer here — the
-    // test theme's fake markers consume its width budget).
+    // glyph beside the pointer.
     const leftCell = (i: number) => lines[i].slice(0, CHAT_CELL_END);
     expect(leftCell(activeLine + 1)).toContain("❯");
     expect(leftCell(completedLine + 1)).toContain("✓");
@@ -636,6 +634,22 @@ describe("agent hub roster", () => {
     expect(notify).toHaveBeenCalledWith('Paused "Sleep then report 1".', "info");
   });
 
+  it("run rows keep the done/total counter and truncate the name into the 18-column cell", () => {
+    const h = harness([makeRecord({ id: "a1" })], {
+      workflows: () => [{
+        id: "wf_1", name: "migrate-v2-schema-rewrite", status: "running", doneCount: 3, totalCount: 5,
+        startedAt: Date.now() - 1000, tokens: 0,
+      }],
+    });
+    h.open();
+    h.press("\u001b[B"); // onto the run row
+    const row = h.frame().filter(l => l.startsWith("│")).find(l => l.includes("❯ ●"));
+    expect(row).toBeDefined();
+    // The master cell is 18 content columns: the name gives way, the counter
+    // does not. (Row bytes: `│ ` + the cell + ` │`.)
+    expect(row!.slice(1, 21)).toBe(" ❯ ● migrate-v… 3/5 ");
+  });
+
   it("Enter on a workflow row opens the run inspector and the hub stays up", async () => {
     const openWorkflow = vi.fn();
     const h = harness([makeRecord({ id: "a1" })], {
@@ -675,15 +689,15 @@ describe("agent hub roster", () => {
     const frame = h.frame(240).join("\n");
     expect(frame).toContain("SUBAGENTS");
     expect(frame).toContain("WORKFLOWS");
-    // The workflow row carries the run-state glyph and the done/total count.
+    // The workflow row carries the run-state glyph and its done/total counter.
     expect(frame).toContain("● audit");
-    expect(frame).toContain("1/2 agents · running");
+    expect(frame).toContain("1/2");
     // The cursor starts on the first agent, not on the SUBAGENTS header.
-    expect(frame).toContain("▸ ● Agent alpha task");
+    expect(frame).toContain("❯ ● Agent");
     // One ↓ crosses the WORKFLOWS header onto the run row — headers take no
     // cursor slot, so the very next press selects the workflow.
     h.press("\u001b[B");
-    expect(h.frame(240).join("\n")).toContain("▸ ● audit");
+    expect(h.frame(240).join("\n")).toContain("❯ ● audit");
   });
 
   it("Enter on an agent row opens its conversation", () => {
