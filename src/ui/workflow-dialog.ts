@@ -6,11 +6,11 @@
  *
  * ```
  * ╭ Phases ────────────┬──────────────────────────────────────╮
- * │ review-changes                         1/3 agents · 1m12s│
- * │ Review changed files across dimensions                   │
  * ├────────────────────┬ Verify · 1 agent ────────────────────┤
- * │  ❯ ✔ Review  3/3   │  ❯ ◌ verify:auth.ts · attempt 2  8s  │
- * │    2 Verify  1/2   │                                      │
+ * │  ❯ ✔ Review  3/3   │ ● review-changes  workflow · 1/3 ag… │
+ * │    2 Verify  1/2   │   ↳ phase 2 of 3 — Verify · 1 agent  │
+ * │    3 Report     —  │ ──────────────────────────────────── │
+ * │                    │  ❯ ◌ verify:auth.ts · attempt 2  8s  │
  * ├────────────────────┴──────────────────────────────────────┤
  * │ ↑↓ select · ⏎ open · f filter · x stop · esc close        │
  * ╰────────────────────┴──────────────────────────────────────╯
@@ -18,7 +18,10 @@
  *
  * The master pane is named in the top edge, the hub's ` Agents ` placement;
  * both cells carry a padding column; the rule titles the detail pane alone and
- * the seam closes at a `┴`.
+ * the seam closes at a `┴`. The detail cell opens with the run's identity
+ * block — the header line, the `↳` line and the header rule under them — from
+ * the same derivation the hub's run pages draw, so the two surfaces cannot
+ * name the same run differently.
  *
  * Enter on a phase swaps the panes — that phase's agents move left and the
  * right becomes the agent's Prompt / Activity / Outcome detail. Enter on an
@@ -74,11 +77,14 @@ import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
   displayState,
+  elapsedMs,
   flattenRunAgents,
   formatDuration,
   header,
   isLive,
   type PhaseGroup,
+  runIdentity,
+  runStatusMark,
   type WorkflowAgentEntry,
   type WorkflowDisplayState,
   type WorkflowEntry,
@@ -139,15 +145,13 @@ export const DEFAULT_PANE_BODY_ROWS = 22;
 export const MIN_PANE_BODY_ROWS = 6;
 /**
  * The rows the window draws around its panes, counted from the rows the layout
- * actually contributes: the top and bottom edges, the run's name row, its
- * subtext row when the run has one, the titled rule, the band rule and the
- * footer. The shell subtracts this from the overlay's share of the terminal to
- * get its body height, so the whole window lands under the same cap the hub's
- * overlay clips at — and a surface that grows a header row cannot leave the
- * basis stale, which is what a fixed constant did.
+ * actually contributes: the top and bottom edges, the titled rule, the band
+ * rule and the footer. The identity block is not among them — it rides inside
+ * the detail cell, opening the body — so the shell subtracts this from the
+ * overlay's share of the terminal to get the body height, identity included.
  */
-export function dialogChromeRows(subtext: string): number {
-  return 6 + (subtext === "" ? 0 : 1);
+export function dialogChromeRows(): number {
+  return 5;
 }
 
 export { leftPaneWidth };
@@ -560,18 +564,25 @@ const fullRow = (content: WorkflowCardLine): WindowRow => ({ kind: "full", cells
  */
 export function phaseListRows(options: {
   groups: readonly PhaseGroup[];
+  /** The state mark: the phase the run is on (the inspector's own selection). */
   selectedPhase: number;
+  /**
+   * The item cursor's phase row, when the cursor is on a phase — **W**'s
+   * flattened phases+agents walk. Where it coincides with the state mark the
+   * row still carries one `❯`: they are two reasons for the same glyph.
+   */
+  cursor?: number;
   capacity: number;
   width: number;
   glyphs: WorkflowDialogGlyphs;
 }): WorkflowCardLine[] {
-  const { groups, selectedPhase, capacity, width, glyphs } = options;
+  const { groups, selectedPhase, cursor, capacity, width, glyphs } = options;
   const rows: WorkflowCardLine[] = [];
   const digits = String(groups.length).length;
-  const visible = windowRange(selectedPhase, groups.length, capacity);
+  const visible = windowRange(cursor ?? selectedPhase, groups.length, capacity);
   for (let i = visible.start; i < Math.min(visible.end, groups.length); i++) {
     const group = groups[i];
-    const selected = i === selectedPhase;
+    const selected = i === selectedPhase || i === cursor;
     const color: WorkflowCardColor =
       selected ? "accent"
       : group.status === "done" ? "success"
@@ -723,6 +734,55 @@ function rowStatSegments(entry: WorkflowAgentEntry): string[] {
   return entry.tokens ? [`${formatCompactTokens(entry.tokens)} tok`] : [];
 }
 
+/* ------------------------------------------------------------------------- *
+ * The detail cell's identity block
+ * ------------------------------------------------------------------------- */
+
+/** A detail-cell row: content cells, or the frame's header-rule marker. */
+type DetailRow = WorkflowCardLine | { kind: "headerRule" };
+
+/** The one marker value the block and the row loop agree on by identity. */
+const HEADER_RULE: DetailRow = { kind: "headerRule" };
+
+const isHeaderRule = (row: DetailRow | undefined): row is { kind: "headerRule" } =>
+  row !== undefined && !Array.isArray(row);
+
+/**
+ * The identity block the detail cell opens with: the run's header line, its
+ * `↳` line and the header rule — the three rows every right pane opens with,
+ * from the same `runIdentity` derivation the hub's run pages draw, so the
+ * inspector's levels and the hub's run pages cannot drift apart.
+ */
+function runIdentityBlock(
+  input: WorkflowDialogInput,
+  view: ResolvedWorkflowDialog,
+  now: number,
+  width: number,
+): DetailRow[] {
+  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now);
+  const identity = runIdentity({
+    name: head.name,
+    status: input.task.status,
+    groups: view.groups,
+    doneCount: head.doneCount,
+    totalCount: head.totalCount,
+    elapsedMs: elapsedMs(input.task, now),
+  });
+  const mark = runStatusMark(input.task.status);
+  return [
+    clampLine(
+      [
+        { text: `${mark.glyph} `, color: mark.role },
+        { text: identity.name, color: "toolTitle", bold: true },
+        { text: `  ${identity.details}`, color: "dim" },
+      ],
+      width,
+    ),
+    clampLine([{ text: `  ↳ ${identity.subtext}`, color: "dim" }], width),
+    HEADER_RULE,
+  ];
+}
+
 /**
  * Build the dialog.
  *
@@ -748,23 +808,6 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
 
   const rows: WindowRow[] = [];
 
-  // ---- The header rows the window wraps: the run's name with the counters
-  // flush right (the hub puts its counts on the title line), and the
-  // description under it.
-  const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, now);
-  rows.push(
-    fullRow(
-      rightAlign(
-        [{ text: head.name, color: "toolTitle", bold: true }],
-        head.stats ? [{ text: `${head.stats} `, color: "dim" }] : [],
-        width - 6,
-      ),
-    ),
-  );
-  if (head.subtext) {
-    rows.push(fullRow([{ text: head.subtext, color: "dim" }]));
-  }
-
   // The master/detail split and both cells' content widths come from the
   // shared window, so the divider sits in the hub's column at every level and
   // the cells read clear of the bars.
@@ -773,6 +816,13 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const rightWidth = panes.detailWidth;
   const inPhases = state.level === "phases";
   const entry = view.selectedEntry;
+  // ---- The detail cell's identity block: the run's header line, its `↳`
+  // line and the rule under them — the three rows every right pane opens
+  // with, from the same derivation the hub's run pages use. It rides inside
+  // the cell, so the left pane's rows continue beside it.
+  const identity = runIdentityBlock(input, view, now, rightWidth);
+  // The rows left for the detail cell's own content under that block.
+  const contentCapacity = Math.max(0, capacity - identity.length);
 
   // ---- The pane listing phases, shown only at the overview level.
   const phaseRows = phaseListRows({
@@ -784,13 +834,14 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   });
 
   // ---- The pane listing this phase's agents. It is the right pane at the
-  // overview level and the left pane in the subview, so it is built once.
+  // overview level and the left pane in the subview, so it is built once — at
+  // the tighter capacity, which is what the right pane has under its identity.
   const agentPaneWidth = inPhases ? rightWidth : leftWidth;
   const agentRows: WorkflowCardLine[] = [];
   if (view.visibleAgents.length === 0) {
     agentRows.push(clampLine([{ text: `   ${WORKFLOW_DIALOG_COPY.noAgents}`, color: "dim" }], agentPaneWidth));
   } else {
-    const agents = windowRange(view.clampedAgent, view.visibleAgents.length, capacity);
+    const agents = windowRange(view.clampedAgent, view.visibleAgents.length, contentCapacity);
     for (let i = agents.start; i < Math.min(agents.end, view.visibleAgents.length); i++) {
       agentRows.push(
         agentRow({
@@ -885,12 +936,12 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
   const agentPaneTitle = agentPaneTitleFor(state.filter, phaseTitle, view.visibleAgents.length);
   const leftRows = inPhases ? phaseRows : agentRows;
-  const rightRows = inPhases ? agentRows : detailRows;
+  const detailCell: DetailRow[] = [...identity, ...(inPhases ? agentRows : detailRows)];
   // Tall enough for whichever pane holds more, and no taller — unless the
   // caller named a height, in which case the window fills it and the panes
   // pad out below their last row, so the dialog does not resize as the
   // selection moves.
-  const bodyRows = provided ? capacity : Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length));
+  const bodyRows = provided ? capacity : Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, detailCell.length));
   // The rule that names the detail pane; the panes' cells between the shared
   // bars; the seam; the hints. The master pane is named in the top edge, the
   // way the hub names its ` Agents ` list, so the rule titles only the pane
@@ -900,7 +951,9 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
     right: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
   });
   for (let row = 0; row < bodyRows; row++) {
-    rows.push({ kind: "split", left: leftRows[row], right: rightRows[row] });
+    const left = leftRows[row];
+    const right = detailCell[row];
+    rows.push(isHeaderRule(right) ? { kind: "headerRule", left } : { kind: "split", left, right: right ?? [] });
   }
   // The panes end at the band rule; the divider's `┴` is in it and the bottom
   // edge below is plain — the hub's window, to the row.
@@ -1270,19 +1323,13 @@ export class WorkflowDialog implements Component {
     return paneBodyHeight({
       terminalRows: this.tui.terminal?.rows,
       viewportPct: this.viewportPct(),
-      // Counted from the header rows the run actually draws, so the window
-      // fills the overlay's box exactly and P6's identity block needs no
-      // constant bump.
-      chromeRows: dialogChromeRows(this.subtext()),
+      // Counted from the rows the window draws around its panes: the identity
+      // block now rides inside the detail cell, so it is part of the body the
+      // ceiling leaves over rather than a constant bump here.
+      chromeRows: dialogChromeRows(),
       min: MIN_PANE_BODY_ROWS,
       fallbackRows: DEFAULT_PANE_BODY_ROWS,
     });
-  }
-
-  /** The run's subtext row, when the header draws one. */
-  private subtext(): string {
-    const { task, meta } = this.source();
-    return meta?.description ?? task.description ?? task.summary ?? "";
   }
 
   invalidate(): void {
@@ -1344,7 +1391,7 @@ export class WorkflowDialog implements Component {
           Math.max(
             20,
             this.viewportPct() -
-              Math.ceil((dialogChromeRows(this.subtext()) * 100) / Math.max(1, this.tui.terminal.rows)),
+              Math.ceil((dialogChromeRows() * 100) / Math.max(1, this.tui.terminal.rows)),
           ),
         onBack: () => this.leaveLog(),
         // ↑/↓ are the pane list's selection keys, so the viewer must not
@@ -1473,11 +1520,11 @@ export class WorkflowDialog implements Component {
    *
    * ```
    * ╭ Verify · 2 agents ──┬────────────────────────╮
-   * │ review-changes         2/3 agents · 40s      │
-   * │ Verify the auth flow                         │
-   * ├─────────────────────┬ verify:auth.ts ────────┤
-   * │  ❯ ◌ verify:auth.ts │ (live conversation)    │
-   * │    ✓ plan           │                        │
+   * ├─────────────────────┬ ● review-changes  work… ┤
+   * │  ❯ ◌ verify:auth.ts │   ↳ phase 1 of 2 · …    │
+   * │    ✓ plan           │ ─────────────────────   │
+   * │                     │ (live conversation)     │
+   * │                     │ (two more rows)         │
    * ├─────────────────────┴────────────────────────┤
    * │ ↑↓ agent · p pause · x stop · esc back ·     │
    * │   c copy · f expand                          │
@@ -1525,26 +1572,19 @@ export class WorkflowDialog implements Component {
     }
     const leftText = styleWorkflowCardLines(leftRows, th);
 
-    const head = header(input.task, input.meta, view.groups, input.agentCount ?? 0, Date.now());
     const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
     const agentPaneTitle = agentPaneTitleFor(this.state.filter, phaseTitle, view.visibleAgents.length);
+    // The same identity block the segment levels open with, in the same cell:
+    // the log level's own copy of the header is gone — one builder, three
+    // levels — and its rows ride through the same styling pass at the end.
+    const identity = runIdentityBlock(input, view, Date.now(), panes.detailWidth);
+    const chatTop = identity.length;
 
-    const rows: WindowRow[] = [
-      fullRow(
-        rightAlign(
-          [{ text: head.name, color: "toolTitle", bold: true }],
-          head.stats ? [{ text: `${head.stats} `, color: "dim" }] : [],
-          contentWidth - 6,
-        ),
-      ),
-    ];
-    if (head.subtext) rows.push(fullRow([{ text: head.subtext, color: "dim" }]));
-    rows.push({ kind: "titles", right: entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents });
+    const rows: WindowRow[] = [{ kind: "titles", right: entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents }];
     for (let i = 0; i < bodyRows; i++) {
-      // The viewer's rows are already styled strings: they ride through the
-      // window's cell as one colourless cell, exactly as the hub's chat pane
-      // hands them over.
-      rows.push({ kind: "split", left: [{ text: leftText[i] ?? "" }], right: [{ text: chat[i] ?? "" }] });
+      const left: WorkflowCardLine = [{ text: leftText[i] ?? "" }];
+      const right = i < chatTop ? identity[i] : [{ text: chat[i - chatTop] ?? "" }];
+      rows.push(isHeaderRule(right) ? { kind: "headerRule", left } : { kind: "split", left, right });
     }
     rows.push({ kind: "band" });
 

@@ -115,6 +115,11 @@ in full — the fitter may drop hints at narrower widths.
 | **SAL** — run-agent log | `l` in WA | `<N> lines · <P>% · x stop` | `↑↓ scroll · c copy tail · p pause agent · f full · Esc back` |
 | **L** — run log | `l` in W | `<N> lines · <P>% · s stop run` | `↑↓ scroll · c copy tail · f full · Esc back` |
 
+On **W**, **WA** and **SAL** the per-agent `s skip` and `r retry` keys exist
+only in the inspector (`WorkflowDialog`, `onSkipAgent`/`onRetryAgent`); the hub
+has no skip/retry wires for a run's children, so those pages' slots carry only
+the keys above.
+
 **TD** is a view state of the page it sits in, not a nesting level. The
 activity view (`2`, `⇥`) stays a single-pane legacy table with its own
 one-list footer (`↑↓ select · Enter open · x stop · p pause · f popup ·

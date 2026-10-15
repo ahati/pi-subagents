@@ -26,7 +26,19 @@ import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
-import { buildPhaseGroups, currentPhaseIndex, displayState, elapsedMs, flattenRunAgents, formatDuration, type PhaseGroup, type WorkflowAgentEntry } from "../workflow/progress.js";
+import {
+  buildPhaseGroups,
+  currentPhaseIndex,
+  displayState,
+  elapsedMs,
+  flattenRunAgents,
+  formatDuration,
+  type PhaseGroup,
+  runIdentity,
+  runStatusMark,
+  runStatusWord,
+  type WorkflowAgentEntry,
+} from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
@@ -96,32 +108,8 @@ const ROSTER_WORKFLOWS_LABEL = "WORKFLOWS";
  * subagent rows use: running `●`, paused `‖`, completed `✓`, failed/killed `✗`.
  */
 export function workflowStatusGlyph(status: FleetWorkflow["status"], th: Theme): string {
-  switch (status) {
-    case "running":
-      return th.fg("accent", "●");
-    case "paused":
-      return th.fg("dim", "‖");
-    case "completed":
-      return th.fg("success", "✓");
-    // failed / killed
-    default:
-      return th.fg("error", "✗");
-  }
-}
-
-/** The word a workflow row's status tail uses, one per run state. */
-function workflowStatusWord(status: FleetWorkflow["status"]): string {
-  switch (status) {
-    case "running":
-      return "running";
-    case "paused":
-      return "paused";
-    case "completed":
-      return "completed";
-    // failed / killed
-    default:
-      return "failed";
-  }
+  const { glyph, role } = runStatusMark(status);
+  return th.fg(role, glyph);
 }
 
 /** Result of a wheel dispatch — structural subset of pi-tui's mouse types. */
@@ -399,28 +387,21 @@ export function runHeaderLines(input: {
   now?: number;
 }): WorkflowCardLine[] {
   const { groups, run, th, width } = input;
-  const active = run.status === "running" || run.status === "paused";
-  const state = workflowStatusWord(run.status);
-  const elapsed = formatDuration(elapsedMs({ startTime: run.startedAt, endTime: run.completedAt }, input.now ?? Date.now()));
-  const flight = groups.reduce((count, group) => count + group.agents.filter(entry => displayState(entry, true) === "running").length, 0);
-  const subtext = groups.length === 0 ? state
-    : !active ? `${groups.length} phase${groups.length === 1 ? "" : "s"} · ${state}`
-    : runPhaseSubtext(groups, flight);
+  const identity = runIdentity({
+    name: run.name,
+    status: run.status,
+    groups,
+    doneCount: run.doneCount,
+    totalCount: run.totalCount,
+    elapsedMs: elapsedMs({ startTime: run.startedAt, endTime: run.completedAt }, input.now ?? Date.now()),
+  });
   return [
     clampLine([
-      { text: `${workflowStatusGlyph(run.status, th)} ${th.bold(run.name)}` },
-      { text: `  workflow · ${run.doneCount}/${run.totalCount} agents · ${elapsed} (${state})`, color: "dim" },
+      { text: `${workflowStatusGlyph(run.status, th)} ${th.bold(identity.name)}` },
+      { text: `  ${identity.details}`, color: "dim" },
     ], width),
-    clampLine([{ text: th.fg("dim", `  ↳ ${subtext}`) }], width),
+    clampLine([{ text: th.fg("dim", `  ↳ ${identity.subtext}`) }], width),
   ];
-}
-
-/** `phase 2 of 4 — migrate · 2 agents in flight`, a live run's `↳` line. */
-function runPhaseSubtext(groups: readonly PhaseGroup[], flight: number): string {
-  const current = currentPhaseIndex(groups);
-  const parts = [`phase ${current + 1} of ${groups.length} — ${groups[current].title}`];
-  if (flight > 0) parts.push(`${flight} agent${flight === 1 ? "" : "s"} in flight`);
-  return parts.join(" · ");
 }
 
 /**
@@ -546,8 +527,14 @@ export class AgentHub implements Component {
   private runId: string | undefined;
   /** Cursor in the run's agent list, on WA/SAL/L. */
   private runAgentSel = 0;
-  /** Cursor in the run's phase list, on **L**. */
+  /** The run's current phase — the PHASES state mark, re-derived on every draw. */
   private runPhaseSel = 0;
+  /**
+   * The item cursor on **W**: an index into the run's flattened sequence of
+   * phases followed by agents. Separate from the state mark because the two
+   * answer different questions — where the run is, and what `⏎` would open.
+   */
+  private runItemSel = 0;
   /** For a log opened straight from the roster: what `esc` returns to. */
   private logBack: HubPage = "T";
   /** Log pages' scroll offset, reset when none is up. */
@@ -772,10 +759,11 @@ export class AgentHub implements Component {
     // The log pages (SL/SAL/L): scroll, copy, pause, stop, back.
     if ((this.page === "SL" || this.page === "SAL" || this.page === "L") && this.handleLogKey(data)) return;
 
-    // **W**: ↑↓ moves the item cursor in the run pane, ⏎ descends to its agent.
+    // **W**: ↑↓ moves the item cursor across the run's phases and agents, ⏎
+    // descends into the agent the cursor addresses.
     if (this.page === "W") {
-      if (matchesKey(data, "down")) { this.moveRunSelection(1); return; }
-      if (matchesKey(data, "up")) { this.moveRunSelection(-1); return; }
+      if (matchesKey(data, "down")) { this.moveRunItem(1); return; }
+      if (matchesKey(data, "up")) { this.moveRunItem(-1); return; }
       if (matchesKey(data, "enter")) { this.enterPage(this.entries()); return; }
       if (matchesKey(data, "l")) { this.pushLogPage(); return; }
       if (matchesKey(data, "s")) { this.stopRun(); return; }
@@ -1505,7 +1493,9 @@ export class AgentHub implements Component {
 
   /**
    * **W**: the run's phases followed by its agents — the level the next `⏎`
-   * descends into. Rows come from the inspector's own builders.
+   * descends into. Rows come from the inspector's own builders. The `❯` on a
+   * phase is the state mark (where the run is); the item cursor is drawn only
+   * where it sits, and the row where the two coincide carries one glyph.
    */
   private runPaneLines(width: number, rows: number): PaneRow[] {
     const run = this.currentRun();
@@ -1516,25 +1506,37 @@ export class AgentHub implements Component {
     const capacity = this.bodyRows(rows, false);
     const glyphs = UNICODE_DIALOG_GLYPHS;
     const groups = buildPhaseGroups(source.progress, source.meta?.phases);
+    const entries = flattenRunAgents(source.progress, source.meta?.phases);
+    const mark = this.runPhaseMark(groups);
+    const item = this.clampRunItemIndex(groups, entries);
+    const agentSel = item >= groups.length ? item - groups.length : undefined;
     const lines: PaneRow[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
     // The phase list windows into what is left beside its own header and a
     // reserved RUN AGENTS block (blank + header + one agent row), so a long
     // phase list can no longer push the agents off the pane's bottom.
     const phaseCapacity = Math.max(0, capacity - 4);
     lines.push(
-      ...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: phaseCapacity, width, glyphs }),
+      ...phaseListRows({
+        groups,
+        selectedPhase: mark,
+        cursor: item < groups.length ? item : undefined,
+        capacity: phaseCapacity,
+        width,
+        glyphs,
+      }),
     );
     lines.push([]);
     lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
-    const entries = flattenRunAgents(source.progress, source.meta?.phases);
-    const selection = this.clampRunAgentIndex();
+    // With the cursor on a phase row there is no agent cursor to draw; the
+    // list still windows around wherever it last was.
+    const selection = agentSel ?? this.clampRunAgentIndex();
     const slice = windowRange(selection, entries.length, Math.max(1, capacity - lines.length));
     if (entries.length === 0) lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
     for (let i = slice.start; i < slice.end; i++) {
       lines.push(
         agentRow({
           entry: entries[i],
-          selected: i === selection,
+          selected: i === agentSel,
           compact: false,
           width,
           glyphs,
@@ -1547,6 +1549,12 @@ export class AgentHub implements Component {
     return this.identityPane(identity, padLines(lines, capacity));
   }
 
+  /** The phases' state mark for the pane being drawn, refreshed from the run. */
+  private runPhaseMark(groups: readonly PhaseGroup[]): number {
+    this.runPhaseSel = currentPhaseIndex(groups);
+    return this.runPhaseSel;
+  }
+
   /** The phase groups of the named run, or none when its detail source is gone. */
   private runGroups(id: string): PhaseGroup[] {
     const source = this.runSource(id);
@@ -1554,40 +1562,56 @@ export class AgentHub implements Component {
   }
 
   /**
-   * The run's agent list, with the run's phases above it on **L** — the
-   * parent level a run page demotes into its left pane.
+   * The run's agent list, with the run's phases beside it on **L** (above) and
+   * on the run-agent pages (beneath) — the parent level those pages demote into
+   * the left cell. The phases carry the run's state mark on every one of them.
    */
   private runLeftLines(width: number, rows: number): WorkflowCardLine[] {
     const source = this.runSource();
     if (!source) return [clampLine([{ text: this.theme.fg("dim", "run detail unavailable") }], width)];
     const glyphs = UNICODE_DIALOG_GLYPHS;
     const groups = buildPhaseGroups(source.progress, source.meta?.phases);
+    const mark = this.runPhaseMark(groups);
+    const entries = flattenRunAgents(source.progress, source.meta?.phases);
     const selection = this.clampRunAgentIndex();
     const lines: WorkflowCardLine[] = [];
-    if (this.page === "L") {
-      lines.push(...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: rows, width, glyphs }));
+    const heading = (title: string) => clampLine([{ text: title, color: "muted", bold: true }], width);
+    // On L the phases lead the run's agents; on the run-agent pages they sit
+    // beneath them, reserved so a long agent list cannot push them off.
+    const phaseFirst = this.page === "L";
+    if (phaseFirst && groups.length > 0) {
+      lines.push(heading("PHASES"));
+      lines.push(
+        ...phaseListRows({ groups, selectedPhase: mark, capacity: Math.max(0, rows - lines.length - 2), width, glyphs }),
+      );
       if (lines.length < rows) lines.push([]);
     }
-    const entries = flattenRunAgents(source.progress, source.meta?.phases);
+    const phaseBlock = groups.length > 0 ? groups.length + 2 : 0;
     if (entries.length === 0) {
       lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
-      return lines;
+    } else {
+      if (phaseFirst && groups.length > 0) lines.push(heading("RUN AGENTS"));
+      const capacity = Math.max(1, phaseFirst ? rows - lines.length : rows - phaseBlock - lines.length);
+      const slice = windowRange(selection, entries.length, capacity);
+      for (let i = slice.start; i < slice.end; i++) {
+        lines.push(
+          agentRow({
+            entry: entries[i],
+            selected: i === selection,
+            compact: this.page !== "L",
+            width,
+            glyphs,
+            workflowActive: source.task.status === "running" || source.task.status === "paused",
+            spinnerFrame: 0,
+            now: Date.now(),
+          }),
+        );
+      }
     }
-    const capacity = Math.max(1, rows - lines.length);
-    const slice = windowRange(selection, entries.length, capacity);
-    for (let i = slice.start; i < slice.end; i++) {
-      lines.push(
-        agentRow({
-          entry: entries[i],
-          selected: i === selection,
-          compact: this.page !== "L",
-          width,
-          glyphs,
-          workflowActive: source.task.status === "running" || source.task.status === "paused",
-          spinnerFrame: 0,
-          now: Date.now(),
-        }),
-      );
+    if (!phaseFirst && groups.length > 0) {
+      if (lines.length < rows) lines.push([]);
+      lines.push(heading("PHASES"));
+      lines.push(...phaseListRows({ groups, selectedPhase: mark, capacity: Math.max(0, rows - lines.length), width, glyphs }));
     }
     return lines;
   }
@@ -1616,7 +1640,7 @@ export class AgentHub implements Component {
       }
       if (state === "skipped") lines.push(clampLine([{ text: `${stamp(entry.lastProgressAt ?? Date.now())} ${entry.label} skipped`, color: "dim" }], width));
     }
-    if (!active) lines.push(clampLine([{ text: `${stamp(run.completedAt ?? Date.now())} run ${workflowStatusWord(run.status)}`, color: "muted" }], width));
+    if (!active) lines.push(clampLine([{ text: `${stamp(run.completedAt ?? Date.now())} run ${runStatusWord(run.status)}`, color: "muted" }], width));
     return padLines(this.scrollTail(lines, this.logScroll, rows), rows);
   }
 
@@ -1772,7 +1796,7 @@ export class AgentHub implements Component {
     return false;
   }
 
-  /** One step in the run's agent list — `WA`'s left pane, and `W`'s item cursor. */
+  /** One step in the run's agent list — `WA`'s left pane. */
   private moveRunSelection(delta: 1 | -1): void {
     if (this.runAgents().length === 0) return;
     const next = Math.min(this.runAgents().length - 1, Math.max(0, this.clampRunAgentIndex() + delta));
@@ -1782,6 +1806,24 @@ export class AgentHub implements Component {
     // render, and an armed stop must not carry over to it.
     this.stopArmed = false;
     if (this.page === "WA") this.chatRecordId = undefined;
+    this.requestRender();
+  }
+
+  /**
+   * One step in **W**'s item sequence — the phases, then the run's agents.
+   * Leaving the phases for the agents also moves the agent cursor, since that
+   * is the row `⏎` opens and the pages below remember.
+   */
+  private moveRunItem(delta: 1 | -1): void {
+    const groups = this.pageGroups();
+    const entries = this.runAgents();
+    const length = groups.length + entries.length;
+    if (length === 0) return;
+    const next = Math.min(length - 1, Math.max(0, this.clampRunItemIndex(groups, entries) + delta));
+    if (next === this.runItemSel) return;
+    this.runItemSel = next;
+    if (next >= groups.length) this.runAgentSel = next - groups.length;
+    this.stopArmed = false;
     this.requestRender();
   }
 
@@ -1821,7 +1863,10 @@ export class AgentHub implements Component {
       if (entry.kind === "workflow") {
         this.runId = entry.workflow.id;
         this.runAgentSel = 0;
-        this.runPhaseSel = 0;
+        // D8: both marks start where the run is — the state mark on the
+        // current phase and the item cursor on that same phase row.
+        this.runPhaseSel = currentPhaseIndex(this.runGroups(entry.workflow.id));
+        this.runItemSel = this.runPhaseSel;
         this.page = "W";
         this.requestRender();
         return;
@@ -1837,15 +1882,14 @@ export class AgentHub implements Component {
       return;
     }
     if (this.page === "W") {
-      const record = this.selectedRunRecord();
+      const record = this.selectedItemRecord();
       if (!record?.session) {
         this.deps.notify?.("That agent has no conversation to open.", "info");
         return;
       }
       this.page = "WA";
       this.requestRender();
-    }
-  }
+    }  }
 
   /** `esc`: exactly one nesting level up. */
   private popPage(): void {
@@ -1899,6 +1943,45 @@ export class AgentHub implements Component {
     const max = Math.max(0, this.runAgents().length - 1);
     this.runAgentSel = Math.min(Math.max(0, this.runAgentSel), max);
     return this.runAgentSel;
+  }
+
+  /** The phase groups of the page's run, live. */
+  private pageGroups(): PhaseGroup[] {
+    const source = this.runSource() ?? EMPTY_RUN_SOURCE;
+    return buildPhaseGroups(source.progress, source.meta?.phases);
+  }
+
+  /** Clamp **W**'s item cursor into `phases ++ agents`. */
+  private clampRunItemIndex(
+    groups: readonly PhaseGroup[] = this.pageGroups(),
+    entries: readonly WorkflowAgentEntry[] = this.runAgents(),
+  ): number {
+    const max = Math.max(0, groups.length + entries.length - 1);
+    this.runItemSel = Math.min(Math.max(0, this.runItemSel), max);
+    return this.runItemSel;
+  }
+
+  /**
+   * The agent **W**'s item cursor addresses, as an index into the run's
+   * flattened agents: the row itself on an agent row, and on a phase row the
+   * first agent of that phase (nothing, when the phase has none).
+   */
+  private itemAgentIndex(): number | undefined {
+    const groups = this.pageGroups();
+    const entries = this.runAgents();
+    const item = this.clampRunItemIndex(groups, entries);
+    if (item >= groups.length) return item - groups.length < entries.length ? item - groups.length : undefined;
+    if (groups[item].agents.length === 0) return undefined;
+    let offset = 0;
+    for (let i = 0; i < item; i++) offset += groups[i].agents.length;
+    return offset;
+  }
+
+  /** The record **W**'s item cursor opens. */
+  private selectedItemRecord(): AgentRecord | undefined {
+    const index = this.itemAgentIndex();
+    const recordId = index === undefined ? undefined : this.runAgents()[index]?.recordId;
+    return recordId === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === recordId);
   }
 
   /** The run's agents, flattened across phases, in run order. */
