@@ -59,7 +59,7 @@ import {
 const FINISHED_LINGER_MS = 4000;
 /** Re-render cadence so elapsed/activity/stats tick while the hub is open. */
 const TICK_MS = 200;
-/** Roster never renders fewer body rows than this, even on tiny terminals. */
+/** The legacy activity table's body floor — the hub window derives its body from the frame. */
 const MIN_BODY_ROWS = 3;
 
 /** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
@@ -213,9 +213,13 @@ const TD_DROPPED_HINT = "o expand";
 /** The hub window's refuse/single-pane/two-pane thresholds (spec size ladder). */
 const HUB_MIN_WIDTH = 40;
 const HUB_MIN_ROWS = 10;
-const HUB_FULL_ROWS = 16;
-/** The status strip's prefix — `describeActivity`'s output follows it. */
-const STATUS_PREFIX = "❞";
+/**
+ * The rows the hub's window spends on chrome: the top edge, the band rule, the
+ * footer row and the bottom edge. The body takes every row left over, one less
+ * while the filter row is up; at the 10-row floor that arithmetic already gives
+ * the spec's six-row body.
+ */
+const HUB_CHROME_ROWS = 4;
 /**
  * The window's title: the constant ` Agents & Workflows `, which fills the
  * 20-column master cell exactly. The header block, never the title, names the
@@ -1126,8 +1130,8 @@ export class AgentHub implements Component {
 
   /**
    * The unified window: the roster (or a run's agent list) on the left, the
-   * current page's detail on the right, the constant window title, a full-width
-   * status strip, and the page's own footer.
+   * current page's detail on the right, the constant window title, and the
+   * page's own footer band.
    *
    * The detail pane opens with its identity block on every page; on run-agent
    * pages the `↳` line leads with the run name.
@@ -1141,12 +1145,13 @@ export class AgentHub implements Component {
     if (this.filterInput || this.filterText) {
       header.push({ kind: "full", cells: [{ text: this.filterLine(windowInnerWidth(width)) }] });
     }
-    // The first thing height scarcity drops, then the blank row, then the
-    // summaries — the spec's degradation order.
-    const showStatus = terminalRows >= HUB_FULL_ROWS;
-    const showBlank = terminalRows >= 12;
-    const chrome = header.length + 4 + (showStatus ? 1 : 0) + (showBlank ? 1 : 0);
-    const bodyRows = Math.max(MIN_BODY_ROWS, terminalRows - chrome);
+    // The window's chrome is fixed — top edge, band rule, footer, bottom edge —
+    // and the filter row is the one row that joins it. The body takes all the
+    // rest, so the frame fills the terminal exactly: a floor on the body would
+    // draw past it, and the six-row floor the spec asks for at 10 rows is what
+    // this subtraction already gives.
+    const chrome = HUB_CHROME_ROWS + (header.length > 0 ? 1 : 0);
+    const bodyRows = Math.max(1, terminalRows - chrome);
 
     const body: WindowRow[] = [];
     // A log page's readout is captured as its pane renders; clear it so a page
@@ -1170,8 +1175,6 @@ export class AgentHub implements Component {
     }
 
     const rows: WindowRow[] = [...header, ...body];
-    if (showBlank) rows.push({ kind: "full", cells: [{ text: "" }] });
-    if (showStatus) rows.push({ kind: "full", cells: [{ text: this.statusStrip(windowInnerWidth(width)) }] });
     rows.push({ kind: "band" }, { kind: "full", cells: [{ text: this.pageFooter(windowInnerWidth(width)) }] });
 
     return paintWindow(
@@ -1185,33 +1188,6 @@ export class AgentHub implements Component {
       }),
       this.theme,
     );
-  }
-
-  /**
-   * The status strip: the focused item's last activity, from the SAME
-   * `describeActivity` the agent widget's subtext uses, prefixed with `❞` and
-   * truncated at the window edge.
-   */
-  private statusStrip(width: number): string {
-    const th = this.theme;
-    const record = this.focusedRecord();
-    let doing: string | undefined;
-    if (record) {
-      const activity = this.deps.agentActivity.get(record.id);
-      if (record.status === "running" || record.status === "queued" || record.status === "paused") {
-        doing = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
-      } else {
-        doing = record.status;
-      }
-    } else {
-      const run = this.currentRun();
-      if (run) {
-        const source = this.runSource(run.id);
-        const live = source ? flattenRunAgents(source).filter(e => displayState(e, true) === "running") : [];
-        doing = live.length > 0 ? `${live.length} agent${live.length === 1 ? "" : "s"} in flight` : workflowStatusWord(run.status);
-      }
-    }
-    return truncateToWidth(`${th.fg("accent", STATUS_PREFIX)} ${th.fg("dim", doing ?? "idle")}`, width);
   }
 
   /**
@@ -1641,7 +1617,8 @@ export class AgentHub implements Component {
    * An agent's event log — the compact timestamped companion to the
    * transcript, from what the record and its live activity know: spawn, turns,
    * tool calls, completion with tokens and cost. The trailing line is the live
-   * activity — the same text the `❞` strip shows until its removal lands.
+   * activity (`describeActivity`), which is where the removed `❞` strip's
+   * information lives now.
    */
   private agentLogLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
@@ -1879,7 +1856,8 @@ export class AgentHub implements Component {
     if (this.page === "R") return this.rosterRecordForCurrent();
     if (this.page === "T" || this.page === "SL") return fresh(this.chatRecordId);
     if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
-    // W / L: the run's most recently active agent — the status strip's subject.
+    // W / L: the run's most recently active agent — the subject the run pages'
+    // copy and pause keys act on (nothing here is a page's own identity).
     const entries = flattenRunAgents(this.runSource() ?? EMPTY_RUN_SOURCE);
     const live = entries.filter(e => displayState(e, true) === "running");
     return fresh((live.at(-1) ?? entries.at(-1))?.recordId);

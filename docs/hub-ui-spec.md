@@ -246,7 +246,9 @@ seamlessly; the list windows through `windowRange` (centered on the cursor,
 clamped at both ends). Run rows append their `<done>/<total>` counter flush
 right; the name truncates first, the counter survives. Glyphs: `●` running,
 `○` queued, `‖` paused, `✓` completed, `✗` failed, `·` stopped; runs reuse
-`● ‖ ✓ ✗`. `/` filters the roster; the wheel scrolls it.
+`● ‖ ✓ ✗`. `/` filters the roster; the wheel scrolls it. While the filter input
+is open or a filter is applied, a full-width filter row sits directly under the
+top edge — never a split row — and costs the body one row.
 
 The preview pane is the item's **agent log** — the same event grammar as
 **SL** — closed by the `(⏎ opens the full transcript)` hint. It is the
@@ -482,7 +484,7 @@ two-pane size and the detail pane takes the rest.
 | 60–99 cols | Same grammar; detail wraps at its width; footer degrades by the fitter |
 | 40–59 cols | **Single-pane stacked mode**: the roster takes the full width; `⏎` pushes the right pane's content as a full-width page (header block + `esc` pops) |
 | < 40 cols or < 10 rows | The window refuses to open: `ctx.ui.notify("Agent hub needs a terminal ≥ 40×10")` — no partial frame is drawn |
-| height 10–15 (any width) | Body floors at six rows; diff boxes keep their shape, older hunks scroll |
+| height 10–15 (any width) | Body floors at six rows — five while the filter row is up; diff boxes keep their shape, older hunks scroll |
 
 Escalation back up is automatic on resize; selection, scroll, page and expand
 state are preserved through every resize.
