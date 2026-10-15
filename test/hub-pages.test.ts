@@ -275,6 +275,138 @@ describe("the header block every right pane opens with", () => {
   });
 });
 
+/** A four-phase run with agents in two of them, for the state mark and cursor. */
+function phasedRunSource(): WorkflowDialogSource {
+  return {
+    progress: [
+      { type: "workflow_phase", index: 0, title: "discover" },
+      { type: "workflow_phase", index: 1, title: "migrate" },
+      runAgent({ index: 0, label: "m-1", state: "done", phaseIndex: 0, recordId: "r1" }),
+      runAgent({ index: 1, label: "m-2", state: "running", phaseIndex: 1, recordId: "r2" }),
+      runAgent({ index: 2, label: "m-3", state: "running", phaseIndex: 1, recordId: "r3" }),
+    ],
+    meta: { phases: [{ title: "discover" }, { title: "migrate" }, { title: "verify" }, { title: "report" }] },
+    task: { status: "running", workflowName: "migrate-v2", startTime: Date.now() - 60_000 },
+  };
+}
+
+describe("the run's state mark and its item cursor", () => {
+  const workflows = (): FleetWorkflow[] => [{
+    id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 3,
+    startedAt: Date.now() - 60_000, tokens: 500,
+  }];
+  // One roster agent, so the single ↓ from the roster lands on the run row.
+  const runHarness = () => harness(
+    [makeRecord({ id: "r1", description: "schema tables" })],
+    { workflows, workflowRun: () => phasedRunSource() },
+  );
+  /** The split rows' right cells — where the run's phases and agents live. */
+  const runPane = (frame: string[]) => frame
+    .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+    .map(rightCell)
+    .join("\n");
+  const marks = (pane: string) => pane.split("❯").length - 1;
+
+  it("R2 previews the run with the current phase's `❯` and nothing else", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN); // onto the run row
+    const pane = runPane(h.frame());
+    expect(pane).toContain("PHASES");
+    expect(pane).toContain("❯ 2 migrate");
+    expect(marks(pane)).toBe(1);
+  });
+
+  it("W seeds both marks on the current phase row and draws one glyph there", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // page W
+    const pane = runPane(h.frame());
+    expect(pane).toContain("❯ 2 migrate");
+    expect(pane).toContain("RUN AGENTS");
+    // The seeded item cursor sits on the same phase row, so it doubles nothing.
+    expect(marks(pane)).toBe(1);
+    // No agent row is selected until the cursor walks into the list.
+    expect(pane).not.toContain("❯ ✓ m-1");
+  });
+
+  it("↓ from the seed moves the cursor to the next phase row, a second `❯`", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press(DOWN); // off the current phase and onto the next one
+    const pane = runPane(h.frame());
+    // The state mark stays where the run is; the cursor is the row below it.
+    expect(pane).toContain("❯ 2 migrate");
+    expect(pane).toContain("❯ 3 verify");
+    expect(marks(pane)).toBe(2);
+  });
+
+  it("↓ walks the item cursor into the agents, leaving the state mark on the phase", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    for (let i = 0; i < 3; i++) h.press(DOWN); // phases 2, 3, then agent m-1
+    const pane = runPane(h.frame());
+    // Two marks, two rows: where the run is, and what `⏎` would open.
+    expect(pane).toContain("❯ 2 migrate");
+    expect(pane).toContain("❯ ✓ m-1");
+    expect(marks(pane)).toBe(2);
+    expect(pane).not.toContain("❯ 3 verify");
+  });
+
+  it("⏎ opens the agent the cursor addresses, not the run's first row", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    for (let i = 0; i < 3; i++) h.press(DOWN); // onto m-1
+    h.press("\r"); // WA
+    expect(h.frame().join("\n")).toContain("waiting for first message");
+    expect(h.frame().join("\n")).toContain("Esc back");
+  });
+
+  it("WA's left pane keeps the agent cursor and marks the run's phase beneath it", () => {
+    // Both of the current phase's agents need a record: Enter on the seeded
+    // phase row opens that phase's first agent, not the run's first row.
+    const h = harness(
+      [makeRecord({ id: "r1" }), makeRecord({ id: "r2" })],
+      { workflows, workflowRun: () => phasedRunSource() },
+    );
+    h.open();
+    h.press(DOWN);
+    h.press(DOWN); // past both agents, onto the run row
+    h.press("\r"); // W
+    h.press("\r"); // WA — migrate's first agent (m-2)
+    const left = h.frame()
+      .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+      .map(leftCell)
+      .join("\n");
+    expect(left).toContain("❯ ✓ m-1");
+    expect(left).toContain("PHASES");
+    expect(left).toContain("❯ 2 migrate");
+  });
+
+  it("L marks the current phase and keeps the agent cursor on the run's list", () => {
+    const h = runHarness();
+    h.open();
+    h.press(DOWN);
+    h.press("\r"); // W
+    h.press("l"); // L
+    const left = h.frame()
+      .filter(l => l.startsWith("│") && l.indexOf("│", 1) === DIVIDER)
+      .map(leftCell)
+      .join("\n");
+    expect(left).toContain("PHASES");
+    expect(left).toContain("❯ 2 migrate");
+    expect(left).toContain("RUN AGENTS");
+    expect(left).toContain("❯ ✓ m-1");
+  });
+});
+
 describe("page footers, headers and esc", () => {
   const workflows = (): FleetWorkflow[] => [{
     id: "wf_1", name: "migrate-v2", status: "running", doneCount: 1, totalCount: 2,

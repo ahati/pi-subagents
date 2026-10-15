@@ -272,11 +272,12 @@ describe("one window for both surfaces", () => {
     // The pointer is the phase pane's — read the master cell, not the agent
     // row beside it, which carries a `\u276f` of its own.
     const master = body.map(line => line.split("\u2502")[1] ?? "");
-    // Seven body rows: a 19-row terminal at the popup's 70% ceiling is 13
-    // rows, minus the six chrome rows this run's window draws (two edges, the
-    // name row, the titled rule, the band rule and the footer).
-    expect(body).toHaveLength(7);
-    expect(master.findIndex(cell => cell.includes("\u276f"))).toBe(3); // three rows above, three below
+    // Eight body rows: a 19-row terminal at the popup's 70% ceiling is 13
+    // rows, minus the five chrome rows this run's window draws (two edges, the
+    // titled rule, the band rule and the footer — the identity block rides
+    // inside the detail cell).
+    expect(body).toHaveLength(8);
+    expect(master.findIndex(cell => cell.includes("\u276f"))).toBe(4); // four rows above, three below
     expect(master.at(-1)).toContain("P13");
     expect(master.some(cell => cell.includes("P8"))).toBe(true);
     instance.dispose();

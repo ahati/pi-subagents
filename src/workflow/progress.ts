@@ -418,6 +418,9 @@ export interface WorkflowHeader {
   name: string;
   subtext: string;
   stats: string;
+  /** The counters {@link stats} spells: agents finished, agents scheduled. */
+  doneCount: number;
+  totalCount: number;
 }
 
 /**
@@ -458,7 +461,91 @@ export function header(
     name: task.workflowName ?? meta?.name ?? task.summary ?? task.description ?? "workflow",
     subtext: meta?.description ?? task.description ?? task.summary ?? "",
     stats: `${doneAgents}/${totalAgents} ${plural(totalAgents, "agent")} · ${formatDuration(elapsedMs(task, now))}${suffix}`,
+    doneCount: doneAgents,
+    totalCount: totalAgents,
   };
+}
+
+/** The run-state glyph and the colour role it carries, one per run state. */
+export function runStatusMark(status: WorkflowRunStatus): {
+  glyph: string;
+  role: "accent" | "dim" | "success" | "error";
+} {
+  switch (status) {
+    case "running":
+      return { glyph: "●", role: "accent" };
+    case "paused":
+      return { glyph: "‖", role: "dim" };
+    case "completed":
+      return { glyph: "✓", role: "success" };
+    // failed / killed
+    default:
+      return { glyph: "✗", role: "error" };
+  }
+}
+
+/** The word a run's status tail uses, one per run state. */
+export function runStatusWord(status: WorkflowRunStatus): string {
+  switch (status) {
+    case "running":
+      return "running";
+    case "paused":
+      return "paused";
+    case "completed":
+      return "completed";
+    // failed / killed
+    default:
+      return "failed";
+  }
+}
+
+/** The run identity block's two text lines, before any surface styles them. */
+export interface RunIdentity {
+  /** The run's name. */
+  name: string;
+  /** The header line's dim tail: `workflow · 3/5 agents · 1m12s (running)`. */
+  details: string;
+  /** The `↳` line's text: where the run is, or why it stopped. */
+  subtext: string;
+}
+
+/**
+ * Compose the run identity block's text — the header line's tail and the `↳`
+ * line — so the hub's run pages (R2/W/L) and the inspector's detail cell draw
+ * the same block from the same derivation instead of two drifting copies.
+ */
+export function runIdentity(input: {
+  name: string;
+  status: WorkflowRunStatus;
+  groups: readonly PhaseGroup[];
+  doneCount: number;
+  totalCount: number;
+  elapsedMs: number;
+}): RunIdentity {
+  const { groups } = input;
+  const state = runStatusWord(input.status);
+  const active = input.status === "running" || input.status === "paused";
+  const subtext =
+    groups.length === 0 ? state
+    : !active ? `${groups.length} phase${groups.length === 1 ? "" : "s"} · ${state}`
+    : runPhaseSubtext(groups);
+  return {
+    name: input.name,
+    details: `workflow · ${input.doneCount}/${input.totalCount} agents · ${formatDuration(input.elapsedMs)} (${state})`,
+    subtext,
+  };
+}
+
+/** `phase 2 of 4 — migrate · 2 agents in flight`, a live run's `↳` line. */
+function runPhaseSubtext(groups: readonly PhaseGroup[]): string {
+  const current = currentPhaseIndex(groups);
+  const flight = groups.reduce(
+    (count, group) => count + group.agents.filter(entry => displayState(entry, true) === "running").length,
+    0,
+  );
+  const parts = [`phase ${current + 1} of ${groups.length} — ${groups[current].title}`];
+  if (flight > 0) parts.push(`${flight} agent${flight === 1 ? "" : "s"} in flight`);
+  return parts.join(" · ");
 }
 
 /* ------------------------------------------------------------------------- *

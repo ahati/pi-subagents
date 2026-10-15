@@ -111,6 +111,11 @@ const trimTrailing = (rows: string[]): string[] => {
 
 const leftRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.left));
 const rightRows = (lines: string[]): string[] => trimTrailing(cells(lines).map(row => row.right));
+/**
+ * The detail cell's rows under its identity block — the header line, the `↳`
+ * line and the rule the pane opens with, which the hub's run pages draw too.
+ */
+const rightBody = (lines: string[]): string[] => rightRows(lines).slice(3);
 
 /**
  * The two pane titles: the master pane's from the window's top edge — the hub's
@@ -170,7 +175,7 @@ describe("dialog glyph mapping", () => {
   });
 
   it("keys off the derived display state, not the raw entry state", () => {
-    const rows = rightRows(dialog({ progress: live }));
+    const rows = rightBody(dialog({ progress: live }));
     expect(rows[0]).toContain("✓ done");
     expect(rows[1]).toContain("✗ failed");
     expect(rows[2]).toContain("✗ skipped");
@@ -200,7 +205,7 @@ describe("dialog glyph mapping", () => {
   });
 
   it("draws ◌ for an agent still live when the run stopped", () => {
-    const rows = rightRows(
+    const rows = rightBody(
       dialog({
         progress: [agentEntry({ index: 0, label: "cutoff", state: "progress", startedAt: START })],
         task: { status: "killed", startTime: START },
@@ -286,8 +291,8 @@ describe("phases pane", () => {
   });
 
   it("swaps the agent list when the phase selection moves", () => {
-    expect(rightRows(dialog({ progress, meta }))[0]).toContain(" a");
-    expect(rightRows(dialog({ progress, meta, state: { selectedPhase: 1 } }))[0]).toContain(" b");
+    expect(rightBody(dialog({ progress, meta }))[0]).toContain(" a");
+    expect(rightBody(dialog({ progress, meta, state: { selectedPhase: 1 } }))[0]).toContain(" b");
   });
 
   it("names the selected phase and its agent count on the right pane", () => {
@@ -322,7 +327,7 @@ describe("state filter", () => {
     // The count is of what survived, so the title has to say which filter or
     // "2 agents" would read as the whole phase.
     expect(paneTitles(lines).right).toBe("Phase 0 · 2 running");
-    const rows = rightRows(lines);
+    const rows = rightBody(lines);
     expect(rows).toHaveLength(2);
     expect(rows.join("\n")).not.toContain("one");
     expect(rows.join("\n")).toContain("two");
@@ -331,7 +336,7 @@ describe("state filter", () => {
   it("reports a filter that matches nothing, and says so in the list", () => {
     const lines = dialog({ progress, state: { filter: "blocked" } });
     expect(paneTitles(lines).right).toBe("Phase 0 · 0 blocked");
-    expect(rightRows(lines).map(row => row.trim())).toEqual([WORKFLOW_DIALOG_COPY.noAgents]);
+    expect(rightBody(lines).map(row => row.trim())).toEqual([WORKFLOW_DIALOG_COPY.noAgents]);
     expect(WORKFLOW_DIALOG_COPY.noAgents).toBe("No agents");
   });
 
@@ -381,7 +386,7 @@ describe("sub-status annotations", () => {
   });
 
   it("puts the annotations on the row ahead of the card's stat tail", () => {
-    const rows = rightRows(
+    const rows = rightBody(
       dialog({
         progress: [
           agentEntry({
@@ -508,7 +513,7 @@ describe("per-agent detail", () => {
     const lines = detail({ progress: [] });
     expect(lines.join("\n")).not.toContain("Prompt");
     expect(lines.join("\n")).not.toContain("Outcome");
-    expect(rightRows(lines).map(row => row.trim()).filter(Boolean)).toEqual([]);
+    expect(rightBody(lines).map(row => row.trim()).filter(Boolean)).toEqual([]);
     expect(leftRows(lines).map(row => row.trim())).toEqual([WORKFLOW_DIALOG_COPY.noAgents]);
   });
 });
@@ -796,7 +801,9 @@ describe("frame height", () => {
     const small = bodyHeight({ progress: phased(3) });
     const large = bodyHeight({ progress: phased(12) });
     expect(large).toBeGreaterThan(small);
-    expect(large).toBe(12);
+    // The three identity rows ride inside the body, so a twelve-agent run
+    // needs twelve content rows plus those three.
+    expect(large).toBe(15);
   });
 
   it("stops growing at the cap, however large the run", () => {
@@ -974,24 +981,38 @@ describe("replayed rows", () => {
 });
 
 describe("header", () => {
-  it("carries the shared N/M agents · elapsed line and the run's subtext", () => {
+  it("opens the detail cell with the run's identity block, not a full-width header", () => {
     const lines = dialog({
       progress: [
-        agentEntry({ index: 0, state: "done" }),
-        agentEntry({ index: 1, state: "start", startedAt: START }),
+        agentEntry({ index: 0, label: "a", state: "done" }),
+        agentEntry({ index: 1, label: "b", state: "start", startedAt: START }),
       ],
       meta: { name: "review-changes", description: "Review changed files" },
       now: START + 72_000,
     });
-    // The window's top edge, then the run's name with the counters flush
-    // right on the header row and the description under it — the tool's name
-    // is the card's job, not the dialog's.
     // The window's top edge names the master pane and splits at the pane bar;
-    // the run's identity rides the header row under it.
+    // the run's identity block — header line, `↳` line and the rule under
+    // them — opens the detail cell, the way the hub's run pages open theirs.
     expect(lines[0]).toMatch(/^\u256d Phases \u2500+\u252c\u2500+\u256e$/);
-    expect(lines[1]).toContain("review-changes");
-    expect(lines[1]).toContain("1/2 agents \u00b7 1m12s");
-    expect(lines[2]).toContain("Review changed files");
+    const rows = cells(lines).map(row => row.right);
+    expect(rows[0]).toContain("●");
+    expect(rows[0]).toContain("review-changes");
+    expect(rows[0]).toContain("workflow · 1/2 agents · 1m12s");
+    expect(rows[0]).toContain("(running)");
+    // A live run reports where it is, not its description: the identity block
+    // is the same derivation the hub's `↳ phase n of m` line uses.
+    expect(rows[1]).toContain("↳ phase 1 of 1 — Phase 0 · 1 agent in flight");
+    expect(rows[2].trim()).toBe("─".repeat(95));
+    // The left cell beside the block carries the pane's own rows, not a header.
+    expect(cells(lines).map(row => row.left).join("\n")).not.toContain("review-changes");
+  });
+
+  it("marks the run's state with the roster's glyph vocabulary", () => {
+    const settled = dialog({ progress: [agentEntry({ index: 0, state: "done" })], task: { status: "killed", startTime: START, endTime: START + 10 } });
+    const rows = cells(settled).map(row => row.right);
+    expect(rows[0]).toContain("✗");
+    expect(rows[0]).toContain("(failed)");
+    expect(rows[1]).toContain("↳ 1 phase · failed");
   });
 });
 
@@ -1036,14 +1057,15 @@ describe("WorkflowDialog component", () => {
   it("themes the layout and keeps its line count", () => {
     const { dialog: instance } = harness();
     const rendered = instance.render(86);
-    // The shell derives the pane height from the terminal (40 rows x 70% - 6
-    // chrome rows: the run has no subtext here), so the plain layout must be
-    // given the same height to produce the same window.
+    // The shell derives the pane height from the terminal (40 rows x 70% - 5
+    // chrome rows, the identity block riding inside the body), so the plain
+    // layout must be given the same height to produce the same window.
     expect(rendered).toHaveLength(
-      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: 22 }).length,
+      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: 23 }).length,
     );
     expect(rendered[0]).toContain("\u256d");
-    expect(rendered[1]).toContain("<toolTitle>*wf*</toolTitle>");
+    // The identity block opens the detail cell, under the titled rule.
+    expect(rendered[2]).toContain("<toolTitle>*wf*</toolTitle>");
     expect(rendered.join("\n")).toContain("<success>✓</success>");
     instance.dispose();
   });
