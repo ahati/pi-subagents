@@ -394,7 +394,7 @@ export function paneGeometry(width: number, listWidth = MASTER_LIST_WIDTH, pad =
  * over. {@link paneGeometry}'s third-of-the-cells cap would shave the master to
  * 17 at 60 columns — the two-pane floor — before the two agree again from 61
  * up; that proportional policy
- * stays where its bytes are pinned — the inspector and the popup chat twin.
+ * stays where its bytes are pinned — the inspector.
  */
 export function masterPaneGeometry(width: number, pad = PANE_PADDING): PaneGeometry {
   const available = Math.max(2, width - FRAME_BARS - 4 * pad);

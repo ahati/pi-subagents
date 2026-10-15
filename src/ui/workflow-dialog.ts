@@ -28,7 +28,7 @@
  * right becomes the agent's Prompt / Activity / Outcome detail. Enter on an
  * agent with a conversation descends to the third level: the agent's live
  * `ConversationViewer` embedded frameless in the right pane, the same surface
- * the agent hub's chat view shows. Esc walks back one level at a time.
+ * the agent hub's transcript pages show. Esc walks back one level at a time.
  *
  * The window is the hub's, to the column: the edges, rows, rules and footer
  * come from the shared renderer, the pane split from the shared geometry. It is
@@ -395,7 +395,7 @@ export interface WorkflowDialogActions {
 /**
  * What the third level needs to embed one agent's live conversation.
  *
- * The same knobs the agent hub hands its chat viewer, resolved against the
+ * The same knobs the agent hub hands its transcript viewer, resolved against the
  * session the dialog runs in. Absent from the constructor — a bare layout test,
  * or a caller that does not want the level — the level does not exist: Enter at
  * the detail level falls through, and the footer never advertises it.
@@ -1516,7 +1516,7 @@ export class WorkflowDialog implements Component {
 
   /**
    * The log level, drawn as themed strings — the viewer renders strings, so
-   * this bypasses the segment layout entirely, the way the hub's chat view
+   * this bypasses the segment layout entirely, the way the hub's transcript pages
    * bypasses its table renderer. Same window, same rows:
    *
    * ```

@@ -1,20 +1,18 @@
 /**
- * agent-hub.ts — Full-screen agent hub overlay (oh-my-pi style), pi-subagents-hub data.
+ * agent-hub.ts — the unified Agents & Workflows window, pi-subagents data.
  *
- * One full-terminal overlay (`ctx.ui.custom` with `width: "100%"`,
- * `maxHeight: "100%"`), three views:
+ * One window at two frame sizes — the fullscreen twin (`ctx.ui.custom` with
+ * `width: "100%"`, `maxHeight: "100%"`) and the popup twin (90 % × 70 %),
+ * swapped by `f`. Both draw the same pages at the same size-independent
+ * layout; the popup differs in frame size only.
  *
- * - Table view: every top-level agent of this session plus workflow runs, as
- *   an identity-only roster — cursor, state glyph, name — with a run row's
- *   `done/total` counter flush right. `/` filters, `x` stops (two-press), `Enter`
- *   opens the agent's conversation or the workflow inspector, `1`/`2`/Tab
- *   switch views, `q`/Esc closes the hub.
- * - Activity view: one line per agent describing what it is doing right now.
- * - Chat view: two panes, the workflow inspector's layout — the agent list on
- *   the left (↑/↓ move the selection and the stream follows), the selected
- *   agent's live `ConversationViewer` on the right. The viewer's quit keys come
- *   "back" to the table instead of closing the overlay, so the hub is one
- *   continuous surface: roster → transcript → roster → close.
+ * - Table view: the page model's window — the roster master (grouped
+ *   subagents + workflow runs, identity-only rows, `/` filters, `x` stops with
+ *   a two-press arm) beside the current page's detail pane (roster preview,
+ *   transcript, run overview, logs). `⏎` descends, `esc` ascends, `l` opens a
+ *   log, `p` pauses/resumes, `c` copies.
+ * - Activity view (`2`, `⇥`): one line per agent describing what it is doing
+ *   right now.
  *
  * Purely a UI layer over the same runtime the fleet list drives: AgentManager
  * records, the activity tracker, workflow runs. All behavior — steering,
@@ -41,7 +39,7 @@ import {
 } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
+import { ConversationViewer, type ViewerBackgroundAction } from "./conversation-viewer.js";
 import { copyRecordResult } from "./copy-result.js";
 import type { FleetWorkflow } from "./fleet-list.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
@@ -50,7 +48,7 @@ import {
   type FooterHint,
   footerBand,
   masterPaneGeometry,
-  paneGeometry,
+  paneBodyHeight,
   renderWindow,
   TWO_PANE_MIN_WIDTH,
   UNICODE_PANE_BOX,
@@ -74,8 +72,8 @@ const TICK_MS = 200;
 /** The legacy activity table's body floor — the hub window derives its body from the frame. */
 const MIN_BODY_ROWS = 3;
 
-/** Lifecycle group of an agent for the chat pane's list: 0 active, 1 completed, 2 failed. */
-function chatGroupRank(status: AgentRecord["status"]): number {
+/** Lifecycle group of an agent for the legacy activity table: 0 active, 1 completed, 2 failed. */
+function lifecycleRank(status: AgentRecord["status"]): number {
   switch (status) {
     case "running":
     case "queued":
@@ -90,9 +88,6 @@ function chatGroupRank(status: AgentRecord["status"]): number {
       return 2;
   }
 }
-
-/** Pane labels for the three lifecycle groups, in rank order. */
-const CHAT_GROUP_LABELS = ["ACTIVE", "COMPLETED", "FAILED"] as const;
 
 /**
  * The roster's top-level group headers, in display order. The subagents
@@ -125,7 +120,7 @@ interface MouseTerminalHost {
   terminal?: { write?(data: string): void };
 }
 
-type HubView = "table" | "activity" | "chat";
+type HubView = "table" | "activity";
 
 /**
  * The window's pages — the spec's one-window model. `R` is the roster; every
@@ -419,8 +414,12 @@ const HEADER_RULE: PaneRow = { kind: "headerRule" };
 
 const isHeaderRule = (row: PaneRow | undefined): row is { kind: "headerRule" } => row !== undefined && !Array.isArray(row);
 
-/** Overlay geometry for the popup panel — the familiar windowed viewer size. */
-const POPUP_OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` };
+/** Overlay geometry for the popup twin — the windowed 90 % × 70 % panel. */
+const POPUP_WIDTH_PCT = 90;
+const POPUP_HEIGHT_PCT = 70;
+/** The rows a host with no terminal reported is assumed to have (bare tests). */
+const HUB_FALLBACK_ROWS = 24;
+const POPUP_OVERLAY_OPTIONS = { anchor: "center", width: `${POPUP_WIDTH_PCT}%`, maxHeight: `${POPUP_HEIGHT_PCT}%` };
 /** Overlay geometry for the full-screen hub. */
 const FULLSCREEN_OVERLAY_OPTIONS = { anchor: "center", width: "100%", maxHeight: "100%" };
 
@@ -433,36 +432,55 @@ interface HubResumeState {
   /** Selection index into the (filtered) roster. */
   selected: number;
   filterText: string;
-  chatRecordId: string | undefined;
+  /** The current page — the reopen is a frame-size change, never a page change. */
+  page?: HubPage | undefined;
+  /** The page's subject record (T/SL), kept across the loop back. */
+  focusId?: string | undefined;
+  /** The run a W/WA/L page is showing; kept across the loop back. */
+  runId?: string | undefined;
+  /** Cursors and scroll a reopened window picks up where the old one left off. */
+  runAgentSel?: number;
+  runItemSel?: number;
+  logScroll?: number;
 }
 
 export interface AgentHubInitial {
-  /** Start on this agent's conversation (the fleet Enter-on-agent flow). */
+  /** Start on this agent's transcript page (the fleet Enter-on-agent flow). */
   agentId?: string;
-  /** Start windowed. Defaults to true when `agentId` is given, else false. */
+  /**
+   * Start in the popup twin's frame (90 % × 70 %). Defaults to true when
+   * `agentId` is given, else false. The frame size is all it decides — the
+   * pages, their keys and their content are the same in both twins.
+   */
   popup?: boolean;
 }
 
 /**
- * Open the agent hub. **The default surface is the windowed popup** — the same
- * panel the fleet list always opened, now with the detailed log and an `f` key
- * that expands to the full-screen hub (roster + activity + chat). Opening
- * without an `agentId` starts full-screen on the roster instead, since a popup
- * with no conversation to show has nothing to draw.
+ * Open the agent hub. **The default surface is the full-screen twin** — the
+ * window at terminal size, starting on the roster. Given an `agentId` it opens
+ * the popup twin (90 % × 70 %) on that agent's transcript page instead, which
+ * is the fleet list's Enter-on-agent flow.
  *
- * pi resolves an overlay's geometry once, at creation, so the toggle closes
- * the overlay and reopens it in the other mode; this loop owns that cycle and
- * carries view/selection/filter/chat state across. Resolves when the hub
+ * pi resolves an overlay's geometry once, at creation, so `f` closes the
+ * overlay and reopens it in the other frame; this loop owns that cycle and
+ * carries page/selection/filter/scroll state across. Resolves when the hub
  * closes for good.
  */
 export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: AgentHubInitial): Promise<undefined> {
+  const target = initial?.agentId;
+  // Any record the manager knows can be the page's subject — the run-owned
+  // children the inspector opens are not roster rows, but they have a
+  // transcript. A stale id falls back to the roster, which is always drawable.
+  const known = target != null && deps.manager.listAgents().some(a => a.id === target);
   const resume: HubResumeState = {
-    view: initial?.agentId != null ? "chat" : "table",
-    selected: 0,
+    view: "table",
+    selected: Math.max(0, known ? hubEntryIndex(deps, target) : 0),
     filterText: "",
-    chatRecordId: initial?.agentId,
+    // The popup opens on the agent's transcript page.
+    page: known ? "T" : "R",
+    focusId: known ? target : undefined,
   };
-  let popup = initial?.popup ?? initial?.agentId != null;
+  let popup = initial?.popup ?? target != null;
   for (;;) {
     const result = await ui.custom<HubResult>(
       (tui, theme, keybindings, done) =>
@@ -471,31 +489,20 @@ export async function openAgentHub(ui: HubUICtx, deps: AgentHubDeps, initial?: A
     );
     if (result !== "toggle") return undefined;
     popup = !popup;
-    if (popup && resume.view !== "chat") {
-      // Popup draws a conversation, nothing else — target the roster selection.
-      const agent = pickChatAgent(deps, resume);
-      if (!agent) popup = false; // nothing to show; stay full-screen
-      else {
-        resume.view = "chat";
-        resume.chatRecordId = agent.id;
-      }
-    }
   }
 }
 
-/** The agent a popup expansion from the roster would show: the selection, else the next openable agent below it. */
-function pickChatAgent(deps: AgentHubDeps, resume: HubResumeState): AgentRecord | undefined {
-  // The same order the roster draws: the subagents section first, then the
-  // runs — the index is into that list, not into a workflows-first one.
+/**
+ * The roster index of `agentId` — the order `entries()` draws: the subagents
+ * section first (stable launch order), then the runs. `-1` when the agent has
+ * no roster row.
+ */
+function hubEntryIndex(deps: AgentHubDeps, agentId: string): number {
   const entries: HubEntry[] = [
     ...hubAgents(deps).map(record => ({ kind: "agent" as const, record })),
     ...hubWorkflows(deps).map(workflow => ({ kind: "workflow" as const, workflow })),
   ];
-  for (let i = Math.max(0, resume.selected); i < entries.length; i++) {
-    const e = entries[i];
-    if (e.kind === "agent" && e.record.session) return e.record;
-  }
-  return undefined;
+  return entries.findIndex(e => e.kind === "agent" && e.record.id === agentId);
 }
 
 export class AgentHub implements Component {
@@ -506,25 +513,16 @@ export class AgentHub implements Component {
   private filterInput: Input | undefined;
   /** Two-press confirm guard for the stop key, mirroring the viewer. */
   private stopArmed = false;
-  /** Chat view state — one viewer instance per opened agent. */
-  private chatViewer: ConversationViewer | undefined;
+  /** The embedded conversation viewer while a transcript page is up. */
+  private viewer: ConversationViewer | undefined;
   /**
-   * The rows a page's right pane budgeted for its viewer body this frame. The
-   * embedded viewer reads it through its `viewportRows` option, so its
-   * capacity matches the frame's arithmetic instead of an overlay ceiling.
+   * The rows the current page's right pane budgeted for its viewer body this
+   * frame. The embedded viewer reads it through its `viewportRows` option, so
+   * its capacity matches the frame's arithmetic instead of an overlay ceiling.
    */
-  private chatViewportRows = 1;
-  /** The embedded conversation viewer while the hub is on its chat view. */
-  get chatView(): ConversationViewer | undefined { return this.chatViewer; }
-  private chatRecordId: string | undefined;
-  /**
-   * Whether the embedded viewer renders frameless — true in the two-pane
-   * layout (the shared border spans the list too), false on the narrow
-   * fallback where the conversation stands alone with its own box. Read by
-   * the viewer's `frameless` option at render time, so `renderChat` flips it
-   * per frame before delegating.
-   */
-  private chatFrameless = true;
+  private viewerRows = 1;
+  /** The record the transcript/log pages are pinned to (their subject). */
+  private focusId: string | undefined;
   /** Windowed popup vs full-screen hub; flipped by `f` via the reopen loop. */
   private readonly popup: boolean;
   /** The current page — the roster, or one nesting level below it. */
@@ -571,16 +569,21 @@ export class AgentHub implements Component {
     this.view = this.resume.view;
     this.selected = this.resume.selected;
     this.filterText = this.resume.filterText;
-    this.chatRecordId = this.resume.chatRecordId;
-    // Resumed on a conversation full-screen: that is page T, the roster beside
-    // the transcript. (Windowed, the conversation is the popup's whole frame.)
-    if (this.view === "chat" && !this.popup) this.page = "T";
-    if (this.view === "chat") {
-      const record = this.chatRecordId
-        ? this.deps.manager.listAgents().find(a => a.id === this.chatRecordId)
-        : undefined;
-      if (record?.session) this.enterChat(record);
-      else this.view = "table"; // agent gone between modes — fall back to the roster
+    // The reopen carries the page itself: `f` is a frame-size change, so a
+    // window resumed on T/W stays there. The viewer is built lazily by
+    // `ensureViewer` on the first render of a transcript page.
+    this.page = this.resume.page ?? "R";
+    this.focusId = this.resume.focusId;
+    this.runId = this.resume.runId;
+    this.runAgentSel = this.resume.runAgentSel ?? 0;
+    this.runItemSel = this.resume.runItemSel ?? 0;
+    this.logScroll = this.resume.logScroll ?? 0;
+    // A window resumed on page T builds its viewer now, not on the first
+    // render: the page's keys are handled by delegating to the viewer, and
+    // input can arrive before the first frame.
+    if (this.page === "T" && this.focusId !== undefined) {
+      const record = this.deps.manager.listAgents().find(a => a.id === this.focusId);
+      if (record) this.ensureViewer(record);
     }
     this.tick = setInterval(() => {
       if (!this.disposed) this.tui.requestRender();
@@ -613,16 +616,20 @@ export class AgentHub implements Component {
 
   /**
    * One wheel movement, from whichever route delivered it (fullscreen mouse
-   * dispatch, or regular-mode input parsing). Conversation views scroll the
-   * embedded viewer — so follow-the-tail behaves exactly as with ↑/↓ — and
-   * roster views move the selection a row per logical line. Consumed by the
-   * caller either way: an unhandled wheel would scroll the transcript
-   * underneath the overlay.
+   * dispatch, or regular-mode input parsing). The page decides what scrolls:
+   * the transcript pages scroll the embedded viewer, the log pages their own
+   * window, and every other page moves the roster selection a row per logical
+   * line. Consumed by the caller either way: an unhandled wheel would scroll
+   * the transcript underneath the overlay.
    */
   private applyWheel(delta: number): void {
-    if (this.view === "chat" && this.chatViewer) {
-      this.chatViewer.scrollBy(delta);
+    if ((this.page === "T" || this.page === "WA") && this.viewer) {
+      this.viewer.scrollBy(delta);
       this.requestRender();
+      return;
+    }
+    if (this.page === "SL" || this.page === "SAL" || this.page === "L") {
+      this.scrollLog(Math.sign(delta) * Math.max(1, Math.round(Math.abs(delta))));
       return;
     }
     const steps = Math.max(1, Math.round(Math.abs(delta)));
@@ -637,8 +644,8 @@ export class AgentHub implements Component {
   dispose(): void {
     this.disposed = true;
     clearInterval(this.tick);
-    this.chatViewer?.dispose();
-    this.chatViewer = undefined;
+    this.viewer?.dispose();
+    this.viewer = undefined;
     // Hand the wheel back to the terminal (native scrollback, text selection).
     if (this.mouseCaptured) {
       disableTerminalMouse(this.tui as unknown as MouseTerminalHost);
@@ -729,26 +736,22 @@ export class AgentHub implements Component {
       return;
     }
 
-    // Chat view (the popup): the embedded viewer owns everything, exactly as
-    // it did as a standalone overlay — including its quit keys.
-    if (this.view === "chat" && this.popup) {
-      this.chatViewer?.handleInput(data);
-      this.tui.requestRender();
-      return;
-    }
-
     // The transcript pages own their keys through the same viewer; `esc` walks
     // back one level via the viewer's `onBack`, and the page keys arrive
-    // through its `onUnhandledKey` hook. A page with no viewer (a record whose
-    // session is gone) still pops on the quit keys — a level up, never out of
-    // the window.
+    // through its `onUnhandledKey` hook. ↑/↓ belong to the pane beside the
+    // transcript — the roster on T, the run's agent list on WA — so the right
+    // pane follows the cursor instead of the viewer scrolling under it. A page
+    // with no viewer (a record whose session is gone) still pops on the quit
+    // keys — a level up, never out of the window.
     if (this.page === "T" || this.page === "WA") {
-      if (this.page === "WA" && (matchesKey(data, "down") || matchesKey(data, "up"))) {
-        this.moveRunSelection(matchesKey(data, "down") ? 1 : -1);
+      if (matchesKey(data, "down") || matchesKey(data, "up")) {
+        const direction = matchesKey(data, "down") ? 1 : -1;
+        if (this.page === "WA") this.moveRunSelection(direction);
+        else this.moveRosterSelection(direction);
         return;
       }
-      if (this.chatViewer) {
-        this.chatViewer.handleInput(data);
+      if (this.viewer) {
+        this.viewer.handleInput(data);
         this.tui.requestRender();
         return;
       }
@@ -787,9 +790,8 @@ export class AgentHub implements Component {
       this.requestRender();
       return;
     }
-    // `f` from the roster expands into the windowed panel on the selected
-    // conversation (no-op when the selection has no openable agent). From chat
-    // the same key arrives via the viewer's `onUnhandledKey` hook.
+    // `f` swaps the frame size (popup ⇄ full-screen) and nothing else: the
+    // page, its selection and its scroll all cross the reopen.
     if (matchesKey(data, "f")) {
       this.requestToggle();
       return;
@@ -856,12 +858,17 @@ export class AgentHub implements Component {
     this.tui.requestRender();
   }
 
-  /** Write UI state back to the shared resume object for a reopen with the other mode. */
+  /** Write UI state back to the shared resume object for a reopen with the other frame size. */
   private syncResume(): void {
     this.resume.view = this.view;
     this.resume.selected = this.selected;
     this.resume.filterText = this.filterText;
-    this.resume.chatRecordId = this.chatRecordId;
+    this.resume.page = this.page;
+    this.resume.focusId = this.focusId;
+    this.resume.runId = this.runId;
+    this.resume.runAgentSel = this.runAgentSel;
+    this.resume.runItemSel = this.runItemSel;
+    this.resume.logScroll = this.logScroll;
   }
 
   private close(): void {
@@ -870,17 +877,11 @@ export class AgentHub implements Component {
     this.done(undefined);
   }
 
-  /** `f`: flip popup ↔ full-screen. pi sizes overlays once, so this resolves
-   *  the overlay with `"toggle"` and `openAgentHub` reopens us resized, with
-   *  state carried through the shared resume object. */
+  /** `f`: flip the frame size — popup ↔ full-screen, same page. pi sizes
+   *  overlays once, so this resolves the overlay with `"toggle"` and
+   *  `openAgentHub` reopens us resized, with state carried through the shared
+   *  resume object. */
   private requestToggle(): void {
-    if (this.view !== "chat") {
-      // Expanding the roster into a popup targets the selected conversation.
-      const agent = pickChatAgent(this.deps, this.resume);
-      if (!agent) return;
-      this.view = "chat";
-      this.chatRecordId = agent.id;
-    }
     this.syncResume();
     this.onToggle();
   }
@@ -910,149 +911,31 @@ export class AgentHub implements Component {
     this.requestRender();
   }
 
-  /** Switch to the chat view for `record`, embedding the detailed-log viewer. */
-  private enterChat(record: AgentRecord): void {
-    this.chatViewer?.dispose();
-    this.chatViewer = undefined;
-    this.view = "chat";
-    this.chatRecordId = record.id;
-    // Only the popup builds its viewer here. The full-screen chat is page T of
-    // the hub window, and its viewer is `ensureViewer`'s to build — with the
-    // identity/footer suppressed and the frame's budget — so pre-building it
-    // would leak a second identity block and the popup's keys onto the page.
-    if (!this.popup) return;
-    this.chatViewer = new ConversationViewer(
-      this.tui,
-      record.session!,
-      record,
-      this.deps.agentActivity.get(record.id),
-      this.theme,
-      // With `onBack` set the viewer's quit keys never reach `done`; treat it
-      // as a hard close (e.g. a host-requested teardown).
-      result => this.done(result),
-      () => {
-        if (this.deps.manager.abort(record.id)) {
-          this.deps.notify?.(`Stopped "${record.description}".`, "info");
-        }
-      },
-      this.keybindings as ViewerKeybindings | undefined,
-      message => this.deps.manager.steer(record.id, message),
-      this.deps.showCost,
-      this.deps.viewerMarkdown,
-      this.deps.onViewerMarkdown,
-      this.deps.scrollbarMode?.() ?? "auto",
-      this.deps.backgroundAction?.(record, message => this.deps.notify?.(message, "info")),
-      {
-        // Viewport tracks the mode live: popup caps at the windowed height,
-        // full-screen uses the whole terminal.
-        maxHeightPct: () => (this.popup ? VIEWPORT_HEIGHT_PCT : 100),
-        // Popup has no roster behind it — Esc closes. Full-screen walks back.
-        onBack: () => (this.popup ? this.close() : this.leaveChat()),
-        backHint: () => (this.popup ? "↑↓ agent · c copy · p pause · Esc close · f expand" : "↑↓ agent · c copy · p pause · Esc back · f popup"),
-        // ↑/↓ are repurposed by the pane list, so the viewer must not
-        // advertise them as scroll keys.
-        scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
-        // The shared frame spans the pane list too, so the viewer contributes
-        // its header/rules/content/footer — not a box of its own. Flipped off
-        // per render when the terminal is too narrow for the side pane.
-        frameless: () => this.chatFrameless,
-        // The hub's extra keys ride through the viewer's key stream: `f`
-        // flips popup/full-screen, ↑/↓ move the pane list's selection and the
-        // stream follows, `c` copies the shown agent's response. The composer
-        // check inside the viewer runs first, so a steering message still
-        // receives its arrow keys and its "c"s.
-        onUnhandledKey: data => {
-          if (matchesKey(data, "f")) {
-            this.requestToggle();
-            return true;
-          }
-          if (matchesKey(data, "c")) {
-            this.copyChatResult();
-            return true;
-          }
-          if (matchesKey(data, "p")) {
-            this.pauseResumeChat();
-            return true;
-          }
-          if (matchesKey(data, "up")) {
-            this.moveChatSelection(-1);
-            return true;
-          }
-          if (matchesKey(data, "down")) {
-            this.moveChatSelection(1);
-            return true;
-          }
-          return false;
-        },
-      },
-    );
-    this.requestRender();
-  }
-
-  private leaveChat(): void {
-    this.chatViewer?.dispose();
-    this.chatViewer = undefined;
-    this.chatRecordId = undefined;
-    this.view = "table";
-    // The table view is the roster: the page pops with the view, so the next
-    // `esc` closes the hub rather than popping an orphaned transcript page.
-    this.page = "R";
+  /**
+   * ↑/↓ on **T**: move the roster's selection and let the right pane follow —
+   * the old popup's `↑↓ agent` expressed in the page model. Run rows are
+   * skipped (only agents have a transcript) and the move clamps at the ends;
+   * the list is visible next to the user, so wrapping would only break the
+   * spatial model. Staying put is a no-op, so scroll position survives a
+   * stray keypress at the end of the roster.
+   */
+  private moveRosterSelection(direction: 1 | -1): void {
+    const items = this.entries();
+    let next = this.selected;
+    for (;;) {
+      const candidate = next + direction;
+      if (candidate < 0 || candidate >= items.length) return;
+      next = candidate;
+      const entry = items[next];
+      if (entry.kind !== "agent") continue;
+      const fresh = this.deps.manager.listAgents().find(a => a.id === entry.record.id) ?? entry.record;
+      if (fresh.session) break;
+    }
+    if (next === this.selected) return;
+    this.selected = next;
+    this.focusId = this.rosterRecordForCurrent()?.id;
     this.stopArmed = false;
-    this.clampSelection();
     this.requestRender();
-  }
-
-  /**
-   * The chat pane's list, grouped by lifecycle — active, then completed, then
-   * failed — earliest-launched within each group. The list is what the user
-   * navigates spatially, so an agent finishing must not reshuffle it out from
-   * under the pointer: the selection is re-derived from `chatRecordId` on
-   * every move and render (see `chatSelIndex`), and the group move merely
-   * relocates the same agent, with the pointer following it.
-   */
-  private chatAgents(): AgentRecord[] {
-    return this.entries()
-      .filter(e => e.kind === "agent" && !!e.record.session)
-      .map(e => (e as AgentEntry).record)
-      .sort((a, b) => chatGroupRank(a.status) - chatGroupRank(b.status) || a.startedAt - b.startedAt);
-  }
-
-  /** The pane list's cursor, derived from the agent being shown. */
-  private chatSelIndex(agents: AgentRecord[]): number {
-    return Math.max(0, agents.findIndex(a => a.id === this.chatRecordId));
-  }
-
-  /**
-   * ↑/↓ in the conversation: move the pane list's selection and retarget the
-   * stream to that agent. Clamps at the ends — the list is visible next to the
-   * user, so wrapping would only break the spatial model. Re-entering the same
-   * agent is a no-op so scroll position survives a stray keypress.
-   */
-  private moveChatSelection(direction: 1 | -1): void {
-    const agents = this.chatAgents();
-    if (agents.length === 0) return;
-    const next = Math.min(agents.length - 1, Math.max(0, this.chatSelIndex(agents) + direction));
-    if (next === this.chatSelIndex(agents)) return;
-    const record = agents[next];
-    if (record.id === this.chatRecordId) return;
-    const fresh = this.deps.manager.listAgents().find(a => a.id === record.id) ?? record;
-    if (fresh.session) this.enterChat(fresh);
-  }
-
-  /**
-   * `c`: copy the shown agent's response to the system clipboard — the one
-   * implementation in `copyRecordResult`, shared with the workflow inspector's
-   * log level.
-   */
-  /** `p` in the chat pane: pause/resume the agent being viewed. */
-  private pauseResumeChat(): void {
-    const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
-    if (record) this.pauseResumeAgent(record);
-  }
-
-  private copyChatResult(): void {
-    const record = this.deps.manager.listAgents().find(a => a.id === this.chatRecordId);
-    if (record) copyRecordResult(record, (message, type) => this.deps.notify?.(message, type));
   }
 
   /** Two-press stop on the selected agent, mirroring the viewer's `x`. */
@@ -1105,14 +988,22 @@ export class AgentHub implements Component {
   // ---- Rendering ----
 
   render(width: number): string[] {
-    const terminalRows = this.tui.terminal?.rows ?? 24;
+    const terminalRows = this.tui.terminal?.rows ?? HUB_FALLBACK_ROWS;
     if (width < HUB_MIN_WIDTH || terminalRows < HUB_MIN_ROWS) {
       this.refuseSize();
       return [];
     }
-    if (this.view === "chat" && this.popup && this.chatViewer) return this.renderChat(width);
     if (this.view === "activity") return this.renderActivityWindow(width, terminalRows);
     return this.renderHubPage(width, terminalRows);
+  }
+
+  /**
+   * Terminal share the window fills: the popup twin's 70 % (pi resolves the
+   * overlay's `maxHeight` at creation and clips whatever is taller), the
+   * fullscreen twin's 100 %.
+   */
+  private viewportPct(): number {
+    return this.popup ? POPUP_HEIGHT_PCT : 100;
   }
 
   /**
@@ -1145,12 +1036,18 @@ export class AgentHub implements Component {
       header.push({ kind: "full", cells: [{ text: this.filterLine(windowInnerWidth(width)) }] });
     }
     // The window's chrome is fixed — top edge, band rule, footer, bottom edge —
-    // and the filter row is the one row that joins it. The body takes all the
-    // rest, so the frame fills the terminal exactly: a floor on the body would
-    // draw past it, and the six-row floor the spec asks for at 10 rows is what
-    // this subtraction already gives.
+    // and the filter row is the one row that joins it. The body takes every
+    // row the twin's viewport leaves, so the frame fills the overlay exactly: a
+    // floor on the body would draw past it, and the six-row floor the spec asks
+    // for at 10 rows is what this subtraction already gives.
     const chrome = HUB_CHROME_ROWS + (header.length > 0 ? 1 : 0);
-    const bodyRows = Math.max(1, terminalRows - chrome);
+    const bodyRows = paneBodyHeight({
+      terminalRows,
+      viewportPct: this.viewportPct(),
+      chromeRows: chrome,
+      min: 1,
+      fallbackRows: HUB_FALLBACK_ROWS - HUB_CHROME_ROWS,
+    });
 
     const body: WindowRow[] = [];
     // A log page's readout is captured as its pane renders; clear it so a page
@@ -1228,7 +1125,7 @@ export class AgentHub implements Component {
 
   /** The embedded viewer's band state, when a page is showing one. */
   private viewerBand(): { text: string; expanded: boolean; stopArmed: boolean } | undefined {
-    return this.page === "T" || this.page === "WA" ? this.chatViewer?.bandReadout() : undefined;
+    return this.page === "T" || this.page === "WA" ? this.viewer?.bandReadout() : undefined;
   }
 
   /**
@@ -1237,7 +1134,7 @@ export class AgentHub implements Component {
    * **W** the run's counters; **R** has none (its left slot is actions).
    */
   private pageReadout(): string | undefined {
-    if (this.page === "T" || this.page === "WA") return this.chatViewer?.bandReadout().text || undefined;
+    if (this.page === "T" || this.page === "WA") return this.viewer?.bandReadout().text || undefined;
     if (this.page === "SL" || this.page === "SAL" || this.page === "L") {
       const log = this.logReadout;
       return log ? `${log.lines} lines · ${log.percent}%` : undefined;
@@ -1259,7 +1156,16 @@ export class AgentHub implements Component {
 
   /** The legacy activity list, still reachable with `2` — the roster's sibling view. */
   private renderActivityWindow(width: number, terminalRows: number): string[] {
-    const rows = Math.max(MIN_BODY_ROWS, terminalRows - 4);
+    // Its own frame spends the same four rows around the list (title, two dim
+    // rules, footer), so the shared budget applies unchanged — and the twin's
+    // ceiling keeps the footer inside the popup overlay.
+    const rows = paneBodyHeight({
+      terminalRows,
+      viewportPct: this.viewportPct(),
+      chromeRows: HUB_CHROME_ROWS,
+      min: MIN_BODY_ROWS,
+      fallbackRows: HUB_FALLBACK_ROWS - HUB_CHROME_ROWS,
+    });
     return paintWindow(
       renderWindow({
         width,
@@ -1269,7 +1175,7 @@ export class AgentHub implements Component {
           { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
           ...this.renderActivity(rows),
           { kind: "full", cells: [{ text: "─".repeat(width), color: "dim" }] },
-          { kind: "full", cells: [{ text: "↑↓ select · Enter open · x stop · p pause · 1 agents · f popup · q close" }] },
+          { kind: "full", cells: [{ text: `↑↓ select · Enter open · x stop · p pause · 1 agents · f ${this.popup ? "full" : "popup"} · q close` }] },
         ],
         ellipsis: "…",
       }),
@@ -1282,91 +1188,6 @@ export class AgentHub implements Component {
     const agents = this.agentRecords();
     const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
     return truncateToWidth(`${th.bold("Agents & Workflows")} ${th.fg("dim", `· activity · ${agents.length} agents · ${running} active`)}`, width);
-  }
-
-  /**
-   * The chat view's two-pane layout inside one overall frame — the workflow
-   * inspector's shape, so the border spans the agent list too:
-   *
-   * ```
-   * ╭ Agents ───────┬──────────────────────────────────╮
-   * │ ACTIVE        │ ● Agent (twin)  task · 12s · 3t  │
-   * │ ❯ ● Agent     │ ──────────────────────────────── │
-   * │ COMPLETED     │ (live conversation)              │
-   * │   ✓ explore   │                                  │
-   * │ FAILED        │                                  │
-   * │   ✗ plan      │                                  │
-   * ╰───────────────┴──────────────────────────────────╯
-   * ```
-   *
-   * The viewer renders frameless at the reduced width (it is
-   * width-parameterized), the list pads to its pane width, and the two zip
-   * line-by-line between the shared borders. Below
-   * {@link TWO_PANE_MIN_WIDTH} the list pane is dropped and the conversation
-   * stands alone in its own framed box rather than being squeezed to
-   * unreadable.
-   */
-  private renderChat(width: number): string[] {
-    if (width < TWO_PANE_MIN_WIDTH) {
-      this.chatFrameless = false; // conversation alone → its own frame
-      return this.chatViewer!.render(width);
-    }
-    this.chatFrameless = true;
-    const th = this.theme;
-    // The split is the shared window's: the list cell, the conversation cell
-    // and the three bars partition the width exactly.
-    const panes = paneGeometry(width);
-    const chat = this.chatViewer!.render(panes.detailWidth);
-    if (chat.length === 0) return chat; // viewer bailed on width; nothing to frame
-
-    const agents = this.chatAgents();
-    const sel = this.chatSelIndex(agents);
-
-    // Display list: a dim group header whenever the lifecycle group changes,
-    // then each agent row. Only non-empty groups get a header — an empty
-    // "FAILED" label is noise, and the header appearing when an agent fails is
-    // itself the signal.
-    const items: Array<{ kind: "header"; label: string } | { kind: "agent"; record: AgentRecord; selected: boolean }> = [];
-    let lastRank = -1;
-    for (let i = 0; i < agents.length; i++) {
-      const record = agents[i];
-      const rank = chatGroupRank(record.status);
-      if (rank !== lastRank) {
-        items.push({ kind: "header", label: CHAT_GROUP_LABELS[rank] });
-        lastRank = rank;
-      }
-      items.push({ kind: "agent", record, selected: i === sel });
-    }
-
-    // Window the rows to the conversation's height, centered on the selection.
-    const rows = chat.length;
-    const selAt = Math.max(0, items.findIndex(item => item.kind === "agent" && item.selected));
-    const slice = windowRange(selAt, items.length, rows);
-
-    const body: WindowRow[] = [];
-    for (let i = 0; i < rows; i++) {
-      const item = items[slice.start + i];
-      const left: WorkflowCardLine = item == null
-        ? []
-        : item.kind === "header"
-          ? [{ text: item.label, color: "dim" }]
-          : [{ text: this.renderChatRow(item.record, item.selected) }];
-      body.push({ kind: "split", left, right: [{ text: chat[i] ?? "" }] });
-    }
-    return paintWindow(
-      renderWindow({ width, box: UNICODE_PANE_BOX, panes, title: " Agents ", rows: body }),
-      th,
-    );
-  }
-
-  /** One row of the chat pane's list: `❯ ● name`, matching the inspector's. */
-  private renderChatRow(record: AgentRecord, selected: boolean): string {
-    const th = this.theme;
-    const marker = selected ? th.fg("accent", "❯") : " ";
-    const name = renderAgentRecordName(record, th, selected
-      ? { fallbackColor: "text", bold: true }
-      : { fallbackColor: "muted" });
-    return `${marker} ${statusGlyph(record.status, th)} ${name}`;
   }
 
   private filterLine(width: number): string {
@@ -1498,7 +1319,7 @@ export class AgentHub implements Component {
     const capacity = this.bodyRows(rows, false);
     // The frame budgeted this many rows for the body; the viewer renders
     // exactly that many and the host wraps them in the identity block.
-    this.chatViewportRows = capacity;
+    this.viewerRows = capacity;
     const body: PaneRow[] = viewer.render(width).map((text): PaneRow => [{ text }]);
     return this.identityPane(this.agentIdentity(record, width), padLines(body, capacity));
   }
@@ -1758,11 +1579,11 @@ export class AgentHub implements Component {
 
   /** The viewer for `record`, rebuilt only when the target changes. */
   private ensureViewer(record: AgentRecord): ConversationViewer | undefined {
-    if (this.chatViewer && this.chatRecordId === record.id && !this.popup) return this.chatViewer;
+    if (this.viewer && this.focusId === record.id) return this.viewer;
     if (!record.session) return undefined;
-    this.chatViewer?.dispose();
-    this.chatRecordId = record.id;
-    this.chatViewer = new ConversationViewer(
+    this.viewer?.dispose();
+    this.focusId = record.id;
+    this.viewer = new ConversationViewer(
       this.tui,
       record.session,
       record,
@@ -1786,7 +1607,7 @@ export class AgentHub implements Component {
         // the viewer contributes body rows only — one identity block per pane.
         identity: false,
         footer: false,
-        viewportRows: () => this.chatViewportRows,
+        viewportRows: () => this.viewerRows,
         onBack: () => this.popPage(),
         backHint: () => "↑↓ scroll · esc back · f full",
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
@@ -1794,7 +1615,7 @@ export class AgentHub implements Component {
         onUnhandledKey: data => this.pageUnhandledKey(data),
       },
     );
-    return this.chatViewer;
+    return this.viewer;
   }
 
   /** The viewer keys that belong to the PAGE, not to the viewer. */
@@ -1820,7 +1641,7 @@ export class AgentHub implements Component {
     // A new agent is a new page subject: the viewer rebuilds on the next
     // render, and an armed stop must not carry over to it.
     this.stopArmed = false;
-    if (this.page === "WA") this.chatRecordId = undefined;
+    if (this.page === "WA") this.focusId = undefined;
     this.requestRender();
   }
 
@@ -1890,7 +1711,7 @@ export class AgentHub implements Component {
         this.deps.notify?.(`Agent is ${record?.status ?? "gone"} — no session available.`, "info");
         return;
       }
-      this.chatRecordId = record.id;
+      this.focusId = record.id;
       this.page = "T";
       this.requestRender();
       return;
@@ -1918,15 +1739,11 @@ export class AgentHub implements Component {
     this.page = from === "SL" && this.logBack === "R" ? "R" : PAGE_PARENT[from]!;
     this.logScroll = 0;
     this.stopArmed = false;
-    // The full-screen chat is page T of the hub window; once the roster is
-    // back, the chat-view routing must not outlive the page — applyWheel's
-    // chat branch would otherwise scroll the transcript nobody is looking at.
-    if (!this.popup && this.view === "chat" && this.page === "R") this.view = "table";
     // Back on the roster the pointer is what the right pane follows; deeper, the
     // pinned record stays the page's subject.
     if (this.page === "R" || this.page === "T") {
       const record = this.page === "R" ? this.rosterRecordForCurrent() : this.focusedRecord();
-      this.chatRecordId = record?.id;
+      this.focusId = record?.id;
     }
     if (this.page === "W") {
       // The item cursor follows the agent WA was showing, so the ❯ the run
@@ -1940,7 +1757,7 @@ export class AgentHub implements Component {
   private focusedRecord(): AgentRecord | undefined {
     const fresh = (id: string | undefined) => (id === undefined ? undefined : this.deps.manager.listAgents().find(a => a.id === id));
     if (this.page === "R") return this.rosterRecordForCurrent();
-    if (this.page === "T" || this.page === "SL") return fresh(this.chatRecordId);
+    if (this.page === "T" || this.page === "SL") return fresh(this.focusId);
     if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
     // W / L: the run's most recently active agent — the subject the run pages'
     // copy and pause keys act on (nothing here is a page's own identity).
@@ -2030,7 +1847,7 @@ export class AgentHub implements Component {
     if (this.page === "R") {
       const record = this.rosterRecordForCurrent();
       if (!record) return;
-      this.chatRecordId = record.id;
+      this.focusId = record.id;
       this.logBack = "R";
       this.page = "SL";
     } else if (this.page === "T") {
@@ -2148,7 +1965,7 @@ export class AgentHub implements Component {
     // failed); the roster itself is launch-stable, so re-rank agents here only.
     const items = [...this.entries()].sort((a, b) => {
       if (a.kind !== "agent" || b.kind !== "agent") return 0;
-      return chatGroupRank(a.record.status) - chatGroupRank(b.record.status)
+      return lifecycleRank(a.record.status) - lifecycleRank(b.record.status)
         || a.record.startedAt - b.record.startedAt;
     });
     if (items.length === 0) {

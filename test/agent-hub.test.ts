@@ -7,9 +7,6 @@ import { type AgentActivity } from "../src/ui/agent-widget.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const ESC = "\x1b";
-/** End of the pane list's left cell: `│ ` + 18-col pane + ` ` (before the `│`). */
-const CHAT_CELL_END = 21;
-
 const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
 /** Visible text of a rendered line: ANSI stripped (agent badges), markers removed. */
@@ -130,7 +127,7 @@ describe("agent hub mouse wheel", () => {
     return { h, component };
   }
 
-  it("moves the roster selection after an f toggle and esc back — the chat routing must not outlive the page", async () => {
+  it("moves the roster selection after an f toggle and esc back — a page viewer must not eat the wheel", async () => {
     const h = harness([
       makeRecord({ id: "a1", alias: "alpha", description: "alpha task", startedAt: Date.now() - 5000 }),
       makeRecord({ id: "a2", alias: "beta", description: "beta task", startedAt: Date.now() - 2000 }),
@@ -174,7 +171,7 @@ describe("agent hub mouse wheel", () => {
     expect(component.handleMouse({ type: "wheel" })).toBeUndefined();
   });
 
-  it("scrolls the conversation in the chat view", () => {
+  it("scrolls the transcript on page T", () => {
     const messages = Array.from({ length: 40 }, (_, i) => ({
       role: "user",
       content: `message number ${i}`,
@@ -259,20 +256,29 @@ describe("agent hub mouse in regular TUI mode", () => {
   });
 });
 
-describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
+describe("agent hub page T — the roster beside the transcript", () => {
   const DOWN = "\x1b[B";
   const UP = "\x1b[A";
 
-  it("renders the pane list beside the conversation", () => {
+  it("renders the roster master beside the transcript, in both twins", async () => {
     const h = harness([
       makeRecord({ id: "a1", description: "alpha task", startedAt: Date.now() - 5000 }),
       makeRecord({ id: "a2", description: "beta task" }),
     ]);
     h.open({ agentId: "a1" });
     const frame = h.frame().join("\n");
-    expect(frame).toContain("Agents");
+    // One window: the constant title, the roster master, the transcript page.
+    expect(frame).toContain(" Agents & Workflows ");
+    expect(frame).toContain("SUBAGENTS");
     expect(frame).toContain("alpha task");
     expect(frame).toContain("waiting for first message");
+    // The full-screen twin draws the same page — `f` is a frame size, not a view.
+    h.press("f");
+    await h.flush();
+    const wide = h.frame().join("\n");
+    expect(wide).toContain(" Agents & Workflows ");
+    expect(wide).toContain("alpha task");
+    expect(wide).toContain("waiting for first message");
   });
 
   it("wraps both panes in one overall border", () => {
@@ -283,10 +289,12 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     h.open({ agentId: "a1" });
     const frame = h.frame();
     // One shared frame: the pane list sits inside the border, the tee marks
-    // the pane junction, and the last line closes it.
+    // the pane junction, the band rule ends the divider, and the last line
+    // closes the window plain.
     expect(frame[0].startsWith("╭")).toBe(true);
     expect(frame[0]).toContain("┬");
-    expect(frame.at(-1)).toContain("┴");
+    expect(frame.at(-3)).toContain("┴"); // top edge + body + band rule + footer
+    expect(frame.at(-1)!.indexOf("┴")).toBe(-1);
     expect(frame.at(-1)!.endsWith("╯")).toBe(true);
     const pointerRow = frame.find(l => l.includes("❯"))!;
     expect(pointerRow.startsWith("│")).toBe(true); // the list is inside the frame
@@ -344,8 +352,9 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     // (eec6c4a) restored delivery; this pins the hub-side delegation.
     const h = harness([makeRecord({ id: "a1", description: "alpha task" })]);
     h.open({ agentId: "a1" });
-    const viewer = (h.components.at(-1) as any)?.chatViewer as { expanded: boolean } | undefined;
-    expect(viewer, "chat pane entered — the embedded viewer exists").toBeDefined();
+    h.frame(); // the page builds its viewer on the first render
+    const viewer = (h.components.at(-1) as any)?.viewer as { expanded: boolean } | undefined;
+    expect(viewer, "page T entered — the embedded viewer exists").toBeDefined();
     expect(viewer!.expanded).toBe(false);
 
     h.press("\x0f"); // legacy ctrl+o
@@ -379,65 +388,22 @@ describe("agent hub ↑/↓ agent selection (two-pane chat)", () => {
     expect(h.components.length).toBe(before); // same viewer instance, scroll kept
   });
 
-  it("advertises the pane keys in the footer instead of ←/→ cycling", () => {
+  it("advertises the page's keys in the band and names the twin it would swap to", async () => {
     const h = harness([makeRecord({ id: "a1" })]);
     h.open({ agentId: "a1" });
     // A wide frame: the footer's fitter drops whole hints from the right, and
-    // this pins that the pane keys are what survives.
-    const frame = h.frame(200).join("\n");
-    expect(frame).toContain("↑↓ agent");
-    expect(frame).toContain("Esc close");
-    expect(frame).not.toContain("←→ agent");
-  });
-
-  it("groups the pane list by lifecycle: active, completed, failed", () => {
-    // start times deliberately out of group order — grouping must win over age
-    const h = harness([
-      makeRecord({ id: "a1", description: "running task", startedAt: Date.now() - 5000, status: "running" }),
-      makeRecord({ id: "a2", description: "done task", startedAt: Date.now() - 9000, status: "completed" }),
-      makeRecord({ id: "a3", description: "broken task", startedAt: Date.now() - 7000, status: "error" }),
-    ]);
-    h.open({ agentId: "a1" });
-    const lines = h.frame();
-    const activeLine = lines.findIndex(l => l.includes("ACTIVE"));
-    const completedLine = lines.findIndex(l => l.includes("COMPLETED"));
-    const failedLine = lines.findIndex(l => l.includes("FAILED"));
-    expect(activeLine).toBeGreaterThanOrEqual(0);
-    expect(completedLine).toBeGreaterThan(activeLine);
-    expect(failedLine).toBeGreaterThan(completedLine);
-    // The left cell of each group's first row carries that group's status
-    // glyph beside the pointer.
-    const leftCell = (i: number) => lines[i].slice(0, CHAT_CELL_END);
-    expect(leftCell(activeLine + 1)).toContain("❯");
-    expect(leftCell(completedLine + 1)).toContain("✓");
-    expect(leftCell(failedLine + 1)).toContain("✗");
-  });
-
-  it("omits empty groups from the pane list", () => {
-    const h = harness([makeRecord({ id: "a1", status: "running" })]);
-    h.open({ agentId: "a1" });
-    const frame = h.frame().join("\n");
-    expect(frame).toContain("ACTIVE");
-    expect(frame).not.toContain("COMPLETED");
-    expect(frame).not.toContain("FAILED");
-  });
-
-  it("keeps the pointer on an agent that moves groups when it finishes", () => {
-    const records = [
-      makeRecord({ id: "a1", description: "the watched one", startedAt: Date.now() - 9000, status: "running" }),
-      makeRecord({ id: "a2", description: "the other one", startedAt: Date.now() - 5000, status: "running" }),
-    ];
-    const h = harness(records);
-    h.open({ agentId: "a1" });
-    const before = h.frame();
-    const activeLine = before.findIndex(l => l.includes("ACTIVE"));
-    expect(before.findIndex(l => l.includes("❯"))).toBeGreaterThan(activeLine);
-    // The watched agent finishes: it relocates under COMPLETED, pointer follows.
-    records[0].status = "completed";
-    const after = h.frame();
-    const completedLine = after.findIndex(l => l.includes("COMPLETED"));
-    const pointerLine = after.findIndex(l => l.includes("❯"));
-    expect(pointerLine).toBe(completedLine + 1); // first row under COMPLETED — the pointer followed it there
+    // this pins that the page keys are what survives.
+    const popup = h.frame(200).join("\n");
+    expect(popup).toContain("l log");
+    expect(popup).toContain("c copy");
+    expect(popup).toContain("f full"); // the popup would give the fullscreen twin
+    expect(popup).toContain("Esc roster");
+    expect(popup).not.toContain("←→ agent");
+    h.press("f");
+    await h.flush();
+    const wide = h.frame(200).join("\n");
+    expect(wide).toContain("f popup"); // ...and back
+    expect(wide).toContain("Esc roster");
   });
 
   it("c copies a completed agent's response to the clipboard", async () => {
@@ -485,6 +451,19 @@ describe("agent hub open modes", () => {
     expect(frame).not.toContain("1 Agents");
   });
 
+  it("sizes the popup frame to the overlay's 70% ceiling — band and footer included", () => {
+    const h = harness([makeRecord()]);
+    h.open({ agentId: "a1" });
+    // pi clips the overlay at floor(terminalRows × 70%); the window budgets its
+    // body against the same ceiling, so the last line is the bottom edge, not
+    // the middle of the transcript.
+    const frame = h.frame();
+    expect(frame.length).toBe(28); // 40 rows × 70%
+    expect(frame[0]).toContain("┬");
+    expect(frame.at(-1)).toContain("╯");
+    h.components.at(-1)?.dispose?.();
+  });
+
   it("opens full-screen on the roster when no agent is given (/agents entry)", () => {
     const h = harness([makeRecord()]);
     h.open();
@@ -523,12 +502,12 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(h.frame().join("\n")).toContain("waiting for first message");
   });
 
-  it("Esc in the full-screen chat returns to the roster; Esc there closes", async () => {
+  it("Esc on page T returns to the roster; Esc there closes", async () => {
     const h = harness([makeRecord({ id: "a1" })]);
     const opened = h.open({ agentId: "a1" });
     h.press("f");
     await h.flush();
-    h.press(ESC); // chat → roster
+    h.press(ESC); // T → roster
     expect(h.frame().join("\n")).toContain("Agents & Workflows");
     expect(h.settled()).toBe(false);
     h.press(ESC); // roster → close
@@ -537,12 +516,50 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(await opened.promise).toBeUndefined();
   });
 
-  it("f from the roster expands into the selected agent's conversation", async () => {
+  it("f from the roster is a frame-size change only — the roster page stays up", async () => {
     const h = harness([makeRecord({ id: "a1", description: "the one" })]);
     h.open(); // full-screen roster
     h.press("f");
     await h.flush();
     expect(h.optionSets[1]?.overlayOptions).toMatchObject({ width: "90%", maxHeight: "70%" });
+    const frame = h.frame().join("\n");
+    // Same page in the popup frame: the roster master and its agent-log
+    // preview, not a transcript the user did not ask for.
+    expect(frame).toContain("SUBAGENTS");
+    expect(frame).toContain("(⏎ opens the full transcript)");
+    expect(frame).not.toContain("waiting for first message");
+  });
+
+  it("page T's keys are the page's, in the popup twin too — l, c, p and x all land", () => {
+    const pauseAgent = vi.fn(() => undefined);
+    const notify = vi.fn();
+    const h = harness([makeRecord({ id: "a1", status: "running" })], { pauseAgent, notify });
+    h.open({ agentId: "a1" }); // the popup twin, on T
+    h.press("l"); // the page's log key, not the viewer's
+    expect(h.frame().join("\n")).toContain("Esc back");
+    h.press(ESC); // back to T
+    h.press("p");
+    expect(pauseAgent).toHaveBeenCalledWith("a1");
+    h.press("c"); // the page's copy resolves the page's agent
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("still running"), "info");
+    h.press("x"); // two-press stop, armed by the page
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.frame().join("\n")).toContain("x again to STOP");
+    h.press("x");
+    expect(h.manager.abort).toHaveBeenCalledWith("a1");
+  });
+
+  it("f from page T keeps the page — popup and fullscreen show the same transcript", async () => {
+    const h = harness([makeRecord({ id: "a1" })]);
+    h.open({ agentId: "a1" }); // popup on T
+    h.press("f");
+    await h.flush();
+    expect(h.optionSets[1]?.overlayOptions).toMatchObject({ width: "100%", maxHeight: "100%" });
+    const wide = h.frame().join("\n");
+    expect(wide).toContain("waiting for first message");
+    expect(wide).toContain("Esc roster");
+    h.press("f");
+    await h.flush();
     expect(h.frame().join("\n")).toContain("waiting for first message");
   });
 
