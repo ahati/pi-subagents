@@ -1077,3 +1077,96 @@ describe("ConversationViewer", () => {
     });
   });
 });
+
+describe("ConversationViewer embedded chrome (host-composed identity and band)", () => {
+  const plainTheme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+
+  /** An embedded viewer with every option passed explicitly. */
+  function embedded(options: any, messages: any[] = [], over: Partial<AgentRecord> = {}, activity?: any) {
+    return new ConversationViewer(
+      mockTui(24, 60), mockSession(messages), mockRecord(over), activity, plainTheme, vi.fn(),
+      undefined, undefined, undefined, undefined, undefined, undefined, "auto", undefined,
+      { frameless: true, ...options },
+    );
+  }
+
+  it("renders exactly `viewportRows` content rows and no chrome of its own", () => {
+    const viewer = embedded(
+      { identity: false, footer: false, viewportRows: 4 },
+      [{ role: "user", content: "hello" }],
+    );
+    const lines = viewer.render(60);
+    expect(lines).toHaveLength(4);
+    const out = lines.join("\n");
+    // No header block, no rule, no footer row — the host's frame owns them.
+    expect(out).not.toContain("↳");
+    expect(out).not.toContain("─");
+    expect(out).not.toContain("m md");
+    expect(out).not.toContain("Esc close");
+    expect(lines[0].trim()).toBe("[User]");
+    expect(lines[1].trim()).toBe("hello");
+  });
+
+  it("keeps the body budget when the terminal is tall, so the host's pane arithmetic decides", () => {
+    const viewer = embedded(
+      { identity: false, footer: false, viewportRows: () => 7 },
+      [{ role: "user", content: "hello" }],
+    );
+    expect(viewer.render(60)).toHaveLength(7);
+  });
+
+  it("suppresses identity but keeps the footer when only the identity is the host's", () => {
+    const viewer = embedded({ identity: false, viewportRows: 3 }, [{ role: "user", content: "hi" }]);
+    const out = viewer.render(60).join("\n");
+    expect(out).not.toContain("↳");
+    expect(out).toContain("Esc close");
+  });
+
+  it("draws a prebuilt identity block in place of its own, then the rule", () => {
+    const viewer = embedded(
+      { identity: ["● prebuilt name", "  ↳ prebuilt run"], viewportRows: 4 },
+      [{ role: "user", content: "hi" }],
+    );
+    const lines = viewer.render(60);
+    expect(lines[0]).toContain("● prebuilt name");
+    expect(lines[1]).toContain("  ↳ prebuilt run");
+    expect(lines[2]).toContain("─");
+    expect(lines[3]).toContain("[User]");
+    expect(lines.join("\n")).not.toContain("test agent");
+  });
+
+  it("leads the `↳` line with the parent run name, falling back to model-only", () => {
+    const [withRun, withoutRun] = [
+      embedded({ parentName: () => "migrate-v2" }, [], { invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" } }),
+      embedded({ parentName: () => undefined }, [], { invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" } }),
+    ];
+    expect(withRun.render(60).join("\n")).toContain("↳ migrate-v2 · anthropic/claude-sonnet-4-6 · worktree");
+    expect(withoutRun.render(60).join("\n")).toContain("↳ anthropic/claude-sonnet-4-6 · worktree");
+  });
+
+  it("keeps the composer usable when the host owns the footer", () => {
+    const tui = mockTui(24, 60);
+    const viewer = new ConversationViewer(
+      tui, mockSession([{ role: "user", content: "hi" }]), mockRecord(), undefined, plainTheme, vi.fn(),
+      undefined, undefined, vi.fn(), undefined, undefined, undefined, "auto", undefined,
+      { frameless: true, identity: false, footer: false, viewportRows: () => 6 },
+    );
+    viewer.handleInput("\r"); // Enter opens the composer
+    const lines = viewer.render(60);
+    const out = lines.join("\n");
+    // The body keeps its budget and the composer still claims its two rows.
+    expect(lines).toHaveLength(8);
+    expect(out).toContain("Enter send");
+    expect(out).toContain("Esc cancel");
+    expect(out).not.toContain("m md");
+  });
+
+  it("puts the live activity tail directly under the last content row", () => {
+    const activity = { activeTools: new Map([["t1", "running tests…"]]), responseText: "", turnCount: 1 };
+    const viewer = embedded({ viewportRows: 8 }, [{ role: "user", content: "hi" }], {}, activity);
+    const lines = viewer.render(60);
+    const tail = lines.findIndex(l => l.includes("▍"));
+    expect(tail).toBeGreaterThan(0);
+    expect(lines[tail - 1].trim()).not.toBe("");
+  });
+});

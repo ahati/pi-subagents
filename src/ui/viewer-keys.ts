@@ -45,6 +45,9 @@ export function createViewerKeys(keybindings?: ViewerKeybindings): ViewerKeys {
     scrollDown: (data) => matches(data, "tui.select.down", "down") || matchesKey(data, "j"),
     pageUp: (data) => matches(data, "tui.select.pageUp", "pageUp") || matchesKey(data, "shift+up"),
     pageDown: (data) => matches(data, "tui.select.pageDown", "pageDown") || matchesKey(data, "shift+down"),
-    expand: (data) => matches(data, "app.tools.expand", "ctrl+o"),
+    // Plain `o` is the alias the band advertises (`o expand` / `o collapse`);
+    // ctrl+o stays the resolved binding, the key pi's built-in renderers print
+    // in their own collapsed previews.
+    expand: (data) => matches(data, "app.tools.expand", "ctrl+o") || matchesKey(data, "o"),
   };
 }

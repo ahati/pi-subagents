@@ -308,7 +308,7 @@ describe("detailed agentic log (omp-style rendering)", () => {
     expect(out).toContain("file1");
     expect(out).toContain("file4");
     expect(out).not.toContain("file5\n"); // beyond the preview window
-    expect(out).toContain("+2 lines (m for full)");
+    expect(out).toContain("+2 lines (o/ctrl+o for full)");
   });
 
   it("does not also render a consumed result as a standalone [Result] block", () => {
@@ -351,7 +351,7 @@ describe("detailed agentic log (omp-style rendering)", () => {
       OK_RESULT,
     ], {}, () => "all");
     expect(out).toContain("file6");
-    expect(out).not.toContain("(m for full)");
+    expect(out).not.toContain("(o/ctrl+o for full)");
   });
 
   it("still renders orphaned results as the legacy [Result] block", () => {

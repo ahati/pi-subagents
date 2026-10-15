@@ -125,6 +125,15 @@ describe("viewer-keys", () => {
     expect(keys.expand("x")).toBe(false);
   });
 
+  it("binds plain `o` as the alias the band advertises, manager or not", () => {
+    // ctrl+o stays the resolved binding; `o` is the alias the hub's band prints.
+    expect(createViewerKeys().expand("o")).toBe(true);
+    expect(createViewerKeys(createExpandKeybindings()).expand("o")).toBe(true);
+    const remapped = createViewerKeys(createExpandKeybindings("ctrl+e"));
+    expect(remapped.expand("o")).toBe(true);
+    expect(remapped.expand(CTRL_E)).toBe(true);
+  });
+
   it("resolves app.tools.expand through a manager that defines it", () => {
     const keys = createViewerKeys(createExpandKeybindings());
     expect(keys.expand(CTRL_O)).toBe(true);
@@ -212,6 +221,14 @@ describe("ConversationViewer expand toggle (ctrl+o)", () => {
     viewer.handleInput(CTRL_O);
     expect(expanded(viewer)).toBe(true);
     viewer.handleInput(CTRL_O);
+    expect(expanded(viewer)).toBe(false);
+  });
+
+  it("toggles expanded on plain `o`, the band's advertised alias", () => {
+    const viewer = createLiveViewer();
+    viewer.handleInput("o");
+    expect(expanded(viewer)).toBe(true);
+    viewer.handleInput("o");
     expect(expanded(viewer)).toBe(false);
   });
 
