@@ -26,7 +26,7 @@ import { renderAgentRecordName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
-import { buildPhaseGroups, currentPhaseIndex, displayState, elapsedMs, formatDuration, type PhaseGroup, type WorkflowAgentEntry } from "../workflow/progress.js";
+import { buildPhaseGroups, currentPhaseIndex, displayState, elapsedMs, flattenRunAgents, formatDuration, type PhaseGroup, type WorkflowAgentEntry } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
 import { buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
@@ -1524,7 +1524,7 @@ export class AgentHub implements Component {
     );
     lines.push([]);
     lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
-    const entries = flattenRunAgents(source);
+    const entries = flattenRunAgents(source.progress, source.meta?.phases);
     const selection = this.clampRunAgentIndex();
     const slice = windowRange(selection, entries.length, Math.max(1, capacity - lines.length));
     if (entries.length === 0) lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
@@ -1566,7 +1566,7 @@ export class AgentHub implements Component {
       lines.push(...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: rows, width, glyphs }));
       if (lines.length < rows) lines.push([]);
     }
-    const entries = flattenRunAgents(source);
+    const entries = flattenRunAgents(source.progress, source.meta?.phases);
     if (entries.length === 0) {
       lines.push(clampLine([{ text: `   ${WORKFLOW_NO_AGENTS}`, color: "dim" }], width));
       return lines;
@@ -1599,7 +1599,7 @@ export class AgentHub implements Component {
     const lines: WorkflowCardLine[] = [
       clampLine([{ text: `${stamp(run.startedAt)} run start: ${run.totalCount} agent${run.totalCount === 1 ? "" : "s"}`, color: "muted" }], width),
     ];
-    for (const entry of flattenRunAgents(source)) {
+    for (const entry of flattenRunAgents(source.progress, source.meta?.phases)) {
       const state = displayState(entry, active);
       if (entry.startedAt != null) {
         lines.push(clampLine([{ text: `${stamp(entry.startedAt)} ${entry.label} spawned${entry.phaseTitle ? ` (${entry.phaseTitle})` : ""}`, color: "dim" }], width));
@@ -1865,7 +1865,8 @@ export class AgentHub implements Component {
     if (this.page === "WA" || this.page === "SAL") return this.selectedRunRecord();
     // W / L: the run's most recently active agent — the subject the run pages'
     // copy and pause keys act on (nothing here is a page's own identity).
-    const entries = flattenRunAgents(this.runSource() ?? EMPTY_RUN_SOURCE);
+    const source = this.runSource() ?? EMPTY_RUN_SOURCE;
+    const entries = flattenRunAgents(source.progress, source.meta?.phases);
     const live = entries.filter(e => displayState(e, true) === "running");
     return fresh((live.at(-1) ?? entries.at(-1))?.recordId);
   }
@@ -1896,7 +1897,8 @@ export class AgentHub implements Component {
 
   /** The run's agents, flattened across phases, in run order. */
   private runAgents(): readonly WorkflowAgentEntry[] {
-    return flattenRunAgents(this.runSource() ?? EMPTY_RUN_SOURCE);
+    const source = this.runSource() ?? EMPTY_RUN_SOURCE;
+    return flattenRunAgents(source.progress, source.meta?.phases);
   }
 
   /** The record behind the run's selected agent row. */
@@ -2077,11 +2079,6 @@ const EMPTY_RUN_SOURCE: WorkflowDialogSource = {
 
 /** The inspector's empty-agents copy, so both surfaces say it the same way. */
 const WORKFLOW_NO_AGENTS = "No agents";
-
-/** A run's agents in run order, flattened across its phase groups. */
-function flattenRunAgents(source: WorkflowDialogSource): WorkflowAgentEntry[] {
-  return buildPhaseGroups(source.progress, source.meta?.phases).flatMap(group => group.agents);
-}
 
 /** A pane's lines, cut or padded to the body height so both cells stay level. */
 function padLines(lines: readonly PaneRow[], rows: number): PaneRow[] {

@@ -55,7 +55,7 @@ function input(over: DialogOverrides): WorkflowDialogInput {
     ...over.task,
   };
   return {
-    width: 86,
+    width: 120,
     now: START + 1000,
     ...over,
     task,
@@ -160,10 +160,10 @@ describe("dialog glyph mapping", () => {
   ];
 
   it("maps every one of the seven display states to its glyph and colour", () => {
-    expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✔", color: "success" });
-    expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "error" });
-    expect(dialogRowGlyph("skipped", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "dim" });
-    expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✘", color: "warning" });
+    expect(dialogRowGlyph("done", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✓", color: "success" });
+    expect(dialogRowGlyph("failed", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "error" });
+    expect(dialogRowGlyph("skipped", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "dim" });
+    expect(dialogRowGlyph("blocked", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "✗", color: "warning" });
     expect(dialogRowGlyph("queued", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
     expect(dialogRowGlyph("interrupted", UNICODE_DIALOG_GLYPHS)).toEqual({ text: "◌", color: "dim" });
     expect(dialogRowGlyph("running", UNICODE_DIALOG_GLYPHS, 3)).toEqual({ text: SPINNER[3], color: "dim" });
@@ -171,10 +171,10 @@ describe("dialog glyph mapping", () => {
 
   it("keys off the derived display state, not the raw entry state", () => {
     const rows = rightRows(dialog({ progress: live }));
-    expect(rows[0]).toContain("✔ done");
-    expect(rows[1]).toContain("✘ failed");
-    expect(rows[2]).toContain("✘ skipped");
-    expect(rows[3]).toContain("✘ blocked");
+    expect(rows[0]).toContain("✓ done");
+    expect(rows[1]).toContain("✗ failed");
+    expect(rows[2]).toContain("✗ skipped");
+    expect(rows[3]).toContain("✗ blocked");
     // All four above are `state: "done" | "error"` inline; only the dialog
     // splits the last three apart, and only it can draw ◌ for the queued row.
     expect(rows[4]).toContain("◌ queued");
@@ -183,10 +183,10 @@ describe("dialog glyph mapping", () => {
 
   it("renders blocked distinctly from skipped despite sharing the cross", () => {
     const lines = styled({ progress: live });
-    expect(lines.find(l => l.includes("skipped"))).toContain("<dim>✘</dim>");
-    expect(lines.find(l => l.includes("blocked"))).toContain("<warning>✘</warning>");
-    expect(lines.find(l => l.includes("failed"))).toContain("<error>✘</error>");
-    expect(lines.find(l => l.includes(">done"))).toContain("<success>✔</success>");
+    expect(lines.find(l => l.includes("skipped"))).toContain("<dim>✗</dim>");
+    expect(lines.find(l => l.includes("blocked"))).toContain("<warning>✗</warning>");
+    expect(lines.find(l => l.includes("failed"))).toContain("<error>✗</error>");
+    expect(lines.find(l => l.includes(">done"))).toContain("<success>✓</success>");
   });
 
   it("does not use the card's ⟳ for a running row — it spins, and queues draw ◌", () => {
@@ -214,7 +214,7 @@ describe("dialog glyph mapping", () => {
       expect(visibleWidth(ASCII_DIALOG_GLYPHS[key]), key).toBe(1);
     }
     const joined = dialog({ progress: live, ascii: true }).join("\n");
-    expect(joined).not.toMatch(/[✔✘◌❯▸]/);
+    expect(joined).not.toMatch(/[✓✗◌❯▸]/);
     expect(joined).toContain("√ done");
     expect(joined).toContain("o queued");
   });
@@ -241,11 +241,11 @@ describe("phases pane", () => {
     const rows = leftRows(dialog({ progress, meta }));
     // Review is fully done → tick. Verify is still running → its NUMBER, not a
     // glyph. Report never started → its number too.
-    expect(rows[0]).toContain("✔ Review");
+    expect(rows[0]).toContain("✓ Review");
     expect(rows[1]).toContain("2 Verify");
     expect(rows[2]).toContain("3 Report");
-    expect(rows[1]).not.toContain("✔");
-    expect(rows[1]).not.toContain("✘");
+    expect(rows[1]).not.toContain("✓");
+    expect(rows[1]).not.toContain("✗");
   });
 
   it("shows a cross once a phase has a failure", () => {
@@ -257,7 +257,7 @@ describe("phases pane", () => {
         ],
       }),
     );
-    expect(rows[0]).toContain("✘ Review");
+    expect(rows[0]).toContain("✗ Review");
   });
 
   it("points at the selected phase and accents it, leaving the others alone", () => {
@@ -269,13 +269,20 @@ describe("phases pane", () => {
     expect(rows[2]).toContain("<dim>");
   });
 
-  it("leaves a declared-but-unseen phase without a count", () => {
-    // The narrow pane has no room for "Not started yet"; an absent count says
-    // the same thing, and the phase's number already marks it as pending.
+  it("leaves a declared-but-unseen phase with a dim dash instead of a count", () => {
+    // The narrow pane has no room for "Not started yet"; the dash says the
+    // same thing, and the phase's number already marks it as pending.
     const rows = leftRows(dialog({ progress, meta }));
     expect(rows[2]).toContain("Report");
+    expect(rows[2]).toContain("—");
     expect(rows[2]).not.toMatch(/\d\/\d/);
     expect(rows[0]).toContain("1/1");
+  });
+
+  it("dims the dash and colours the count", () => {
+    const rows = leftRows(styled({ progress, meta }));
+    expect(rows[2]).toContain("<dim>— </dim>");
+    expect(rows[0]).toContain("<accent>1/1 </accent>");
   });
 
   it("swaps the agent list when the phase selection moves", () => {
@@ -850,8 +857,8 @@ describe("width", () => {
     // The overlay hands the component its own box width (the popup's 90% or
     // the full-screen 100%), and the frame's border and padding are drawn
     // inside it — so the frame is exactly that wide, not six columns less.
-    expect(workflowDialogContentWidth(86)).toBe(86);
-    expect(Math.max(...dialog({ progress: wide, width: 86 }).map(visibleWidth))).toBe(86);
+    expect(workflowDialogContentWidth(100)).toBe(100);
+    expect(Math.max(...dialog({ progress: wide, width: 100 }).map(visibleWidth))).toBe(100);
   });
 
   it("floors the content width at 12 rather than going negative", () => {
@@ -895,48 +902,54 @@ describe("pane rules", () => {
     agentEntry({ index: 2, label: "row-three", phaseIndex: 1, state: "start" }),
   ];
   const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
+  const band = (lines: string[]) => lines.filter(line => line.startsWith("\u2502 \u2500"));
 
-  it("draws the titled rule under the header and the plain one above the footer", () => {
+  it("draws the titled rule under the header and the band rule above the footer", () => {
     // The master pane is named in the top edge (asserted below), so the rule
-    // titles the detail pane alone and the seam closes with a `┴`.
-    expect(rules(dialog({ progress, width: 86 }))).toEqual([
-      "├────────────────────┬ Verify · 2 agents ────────────────────────────────────────────┤",
-      "├────────────────────┴───────────────────────────────────────────────────────────────┤",
+    // titles the detail pane alone. The panes end at the band rule, whose `┴`
+    // is where the divider stops; the bottom edge below it is plain — the
+    // hub's window, to the row.
+    expect(rules(dialog({ progress, width: 120 }))).toEqual([
+      "├────────────────────┬ Verify · 2 agents ──────────────────────────────────────────────────────────────────────────────┤",
+    ]);
+    expect(rules(dialog({ progress, width: 100 }))).toEqual([
+      "├────────────────────┬ Verify · 2 agents ──────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(dialog({ progress, width: 60 }))).toEqual([
       "├───────────────────┬ Verify · 2 agents ───────────────────┤",
-      "├───────────────────┴──────────────────────────────────────┤",
     ]);
     expect(rules(dialog({ progress, width: 40 }))).toEqual([
       "├─────────────┬ Verify · 2 agents ─────┤",
-      "├─────────────┴────────────────────────┤",
     ]);
-    // A cell narrower than the title cuts it rather than tearing the frame.
     expect(rules(dialog({ progress, width: 30 }))).toEqual([
       "├─────────┬ Verify · 2 agen… ┤",
-      "├─────────┴──────────────────┤",
+    ]);
+    // The band rule closes the panes: the divider's `┴` is in it and the
+    // bottom edge below it is plain.
+    expect(band(dialog({ progress, width: 120 }))).toEqual([
+      "│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │",
     ]);
   });
 
   it("themes the rule's three regions: dim lead, bold title, border rule", () => {
     // The three regions are the detail cell's: dim lead, bold title, border
     // rule; the master cell is untitled here and all border.
-    expect(styled({ progress, width: 86 }).filter(line => line.includes("\u251c"))).toEqual([
-      "<border>├</border><border>────────────────────</border><border>┬</border><dim> </dim><muted>*Verify · 2 agents*</muted><border> ────────────────────────────────────────────</border><border>┤</border>",
-      "<border>├</border><border>────────────────────</border><border>┴</border><border>───────────────────────────────────────────────────────────────</border><border>┤</border>",
+    expect(styled({ progress, width: 120 }).filter(line => line.includes("\u251c"))).toEqual([
+      "<border>├</border><border>────────────────────</border><border>┬</border><dim> </dim><muted>*Verify · 2 agents*</muted><border> ──────────────────────────────────────────────────────────────────────────────</border><border>┤</border>",
     ]);
   });
 
   it("swaps the rule for the ASCII tier with the rest of the frame", () => {
-    const ascii = dialog({ progress, width: 86, ascii: true });
-    expect(ascii[0]).toBe("+ Phases ------------+---------------------------------------------------------------+");
-    expect(ascii.at(-1)).toBe("+--------------------+---------------------------------------------------------------+");
+    const ascii = dialog({ progress, width: 120, ascii: true });
+    expect(ascii[0]).toBe("+ Phases ------------+-------------------------------------------------------------------------------------------------+");
+    // The band rule's tee and the plain bottom edge, both in the ASCII tier.
+    expect(ascii.at(-3)).toBe("| -------------------+------------------------------------------------------------------------------------------------ |");
+    expect(ascii.at(-1)).toBe("+----------------------------------------------------------------------------------------------------------------------+");
     const rules = ascii.filter(line => line.startsWith("+--"));
     expect(rules).toEqual([
-      "+--------------------+ Verify · 2 agents --------------------------------------------+",
-      "+--------------------+---------------------------------------------------------------+",
-      // The bottom edge, split like the top one.
-      "+--------------------+---------------------------------------------------------------+",
+      "+--------------------+ Verify · 2 agents ------------------------------------------------------------------------------+",
+      // The bottom edge, plain under the band's `+` tee.
+      "+----------------------------------------------------------------------------------------------------------------------+",
     ]);
   });
 });
@@ -1023,15 +1036,15 @@ describe("WorkflowDialog component", () => {
   it("themes the layout and keeps its line count", () => {
     const { dialog: instance } = harness();
     const rendered = instance.render(86);
-    // The shell derives the pane height from the terminal (40 rows x 70% - 7
-    // chrome rows), so the plain layout must be given the same height to
-    // produce the same window.
+    // The shell derives the pane height from the terminal (40 rows x 70% - 6
+    // chrome rows: the run has no subtext here), so the plain layout must be
+    // given the same height to produce the same window.
     expect(rendered).toHaveLength(
-      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: 21 }).length,
+      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: 22 }).length,
     );
     expect(rendered[0]).toContain("\u256d");
     expect(rendered[1]).toContain("<toolTitle>*wf*</toolTitle>");
-    expect(rendered.join("\n")).toContain("<success>✔</success>");
+    expect(rendered.join("\n")).toContain("<success>✓</success>");
     instance.dispose();
   });
 

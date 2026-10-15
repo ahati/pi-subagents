@@ -15,13 +15,15 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
-import { paneGeometry, splitEdge, UNICODE_PANE_BOX } from "../src/ui/window-frame.js";
+import { frameEdge, paneGeometry, UNICODE_PANE_BOX } from "../src/ui/window-frame.js";
 import type { WorkflowDialogLogDeps } from "../src/ui/workflow-dialog.js";
 import { WorkflowDialog } from "../src/ui/workflow-dialog.js";
 
 const START = 1_700_000_000_000;
-/** The width the overlay host asks the component to render at. */
-const RENDER_WIDTH = 100;
+/** The width the overlay host asks the component to render at — the spec's. */
+const RENDER_WIDTH = 120;
+/** The one older width the fits-everything case still pins. */
+const NARROW_HOST = 100;
 
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -108,24 +110,30 @@ describe("workflow dialog window alignment across levels", () => {
     }
   });
 
-  it("draws the same rule line at every level, byte for byte", () => {
+  it("draws the same rule lines at every level, byte for byte", () => {
     // Captured from the render, so this is the no-drift proof: the segment
     // levels and the log level's string path draw one window, and their bytes
     // cannot drift. The master pane is named in the top edge, so the rule
-    // titles the detail pane alone and the seam closes with a `┴`.
+    // titles the detail pane alone; the band rule closes the panes, the
+    // divider's `┴` in it, and the bottom edge below is plain.
     const rules = (lines: string[]) => lines.filter(line => line.startsWith("\u251c"));
+    const bands = (lines: string[]) => lines.filter(line => line.startsWith("\u2502 \u2500"));
     expect(rules(frames.phases!)).toEqual([
-      "├────────────────────┬ Verify · 1 agent ───────────────────────────────────────────────────────────┤",
-      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ Verify · 1 agent ───────────────────────────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(frames.detail!)).toEqual([
-      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────┤",
-      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────────────────────────┤",
     ]);
     expect(rules(frames.log!)).toEqual([
-      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────┤",
-      "├────────────────────┴─────────────────────────────────────────────────────────────────────────────┤",
+      "├────────────────────┬ row-one ────────────────────────────────────────────────────────────────────────────────────────┤",
     ]);
+    // The band rule is the same row at every level, and it is the only line
+    // that ends the divider.
+    expect(bands(frames.phases!)).toEqual([
+      "│ ───────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────── │",
+    ]);
+    expect(bands(frames.detail!)).toEqual(bands(frames.phases!));
+    expect(bands(frames.log!)).toEqual(bands(frames.phases!));
   });
 
   it("puts the pane's right bar on the window's right border", () => {
@@ -137,13 +145,24 @@ describe("workflow dialog window alignment across levels", () => {
     }
   });
 
+  it("ends the panes at the band rule rather than the bottom edge", () => {
+    for (const [level, lines] of Object.entries(frames)) {
+      const band = lines.filter(line => line.startsWith("\u2502 \u2500"));
+      expect(band, level).toHaveLength(1);
+      // The divider's `┴` sits in the band rule, in the column the pane bars
+      // occupy, and no row below it carries the divider any more.
+      expect(band[0]!.indexOf("┴"), level).toBe(paneGeometry(RENDER_WIDTH).leftCellWidth + 1);
+      expect(lines.at(-1), level).toBe(frameEdge(RENDER_WIDTH, UNICODE_PANE_BOX, "bottom"));
+    }
+  });
+
   it("fills the host's width at each level, leaving no strip on the right", () => {
     // The frame is the overlay's whole box: its top and bottom rules run to
     // the last column the host offered, and every row's right border is that
     // column. A width basis that reserves the dialog's own chrome here would
     // end every row short and pad the rest of the overlay with blanks.
     const { instance } = boot();
-    const widths = [RENDER_WIDTH, 87];
+    const widths = [RENDER_WIDTH, NARROW_HOST];
     for (const host of widths) {
       const levels: string[][] = [instance.render(host)];
       instance.handleInput("\r");
@@ -154,7 +173,9 @@ describe("workflow dialog window alignment across levels", () => {
         // The top edge splits where the pane bars are, whichever level is up:
         // the corner, then the master cell, then the tee.
         expect(lines[0]!.indexOf("\u252c"), `w=${host}`).toBe(panes.leftCellWidth + 1);
-        expect(lines.at(-1), `w=${host}`).toBe(splitEdge(host, panes.leftCellWidth, UNICODE_PANE_BOX, "bottom"));
+        // The divider ends at the band rule's `┴`; the bottom edge below it is
+        // plain — a split bottom edge would hang a second tee under it.
+        expect(lines.at(-1), `w=${host}`).toBe(frameEdge(host, UNICODE_PANE_BOX, "bottom"));
         for (const line of lines) {
           expect(visibleWidth(line), `w=${host}: ${JSON.stringify(line)}`).toBe(host);
         }

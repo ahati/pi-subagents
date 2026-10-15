@@ -315,6 +315,20 @@ export function buildPhaseGroups(
 }
 
 /**
+ * A run's agents in run order, flattened across its phase groups.
+ *
+ * The whole list a run page walks, as opposed to one group's slice: the hub's
+ * run pages (W/WA/SAL/L) and the inspector both need the run's agents in
+ * script order, however the phases grouped them.
+ */
+export function flattenRunAgents(
+  progress: readonly WorkflowEntry[],
+  declared?: readonly WorkflowPhaseMeta[],
+): WorkflowAgentEntry[] {
+  return buildPhaseGroups(progress, declared).flatMap(group => group.agents);
+}
+
+/**
  * The phase a run is on, as an index into {@link buildPhaseGroups}' result:
  * the first group still running, else the first. A run that has not started
  * yet marks its opening phase and a finished one its last known position —

@@ -346,9 +346,11 @@ function lastDroppable(hints: readonly FooterHint[], match: (hint: FooterHint) =
 }
 
 /**
- * The rows a window draws around its panes — top and bottom edges, the header
- * rows, the rules and the footer — for a window whose body falls under
- * `viewportPct` of the terminal. The inspector's `WINDOW_CHROME_ROWS`.
+ * The frame's reference chrome count for a window whose body falls under
+ * `viewportPct` of the terminal: edges, header rows, rules and the footer.
+ * Surfaces derive their own from the rows they draw — the inspector's
+ * `dialogChromeRows`, the hub's `HUB_CHROME_ROWS` — so this is the pinned
+ * baseline {@link paneBodyHeight} is tested against, not a live basis.
  */
 export const WINDOW_CHROME_ROWS = 7;
 

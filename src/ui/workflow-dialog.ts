@@ -74,6 +74,7 @@ import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
   displayState,
+  flattenRunAgents,
   formatDuration,
   header,
   isLive,
@@ -88,14 +89,14 @@ import { copyRecordResult } from "./copy-result.js";
 import { disableTerminalMouse, enableTerminalMouse, parseMouseInput } from "./terminal-mouse.js";
 import {
   ASCII_PANE_BOX,
-  hintLine,
+  type FooterHint,
+  footerBand,
   leftPaneWidth,
   type PaneBox,
   paneBodyHeight,
   paneGeometry,
   renderWindow,
   UNICODE_PANE_BOX,
-  WINDOW_CHROME_ROWS,
   type WindowRow,
   windowInnerWidth,
   windowRange,
@@ -137,13 +138,19 @@ export const DEFAULT_PANE_BODY_ROWS = 22;
  */
 export const MIN_PANE_BODY_ROWS = 6;
 /**
- * Non-body rows the window draws around its panes: top and bottom borders, the
- * two header rows, the titled rule above the panes, the plain rule below them
- * and the footer. The shell subtracts this from the hub's 70%-of-terminal
- * ceiling to get its body height, so the whole window lands under the same cap
- * the hub's overlay clips at.
+ * The rows the window draws around its panes, counted from the rows the layout
+ * actually contributes: the top and bottom edges, the run's name row, its
+ * subtext row when the run has one, the titled rule, the band rule and the
+ * footer. The shell subtracts this from the overlay's share of the terminal to
+ * get its body height, so the whole window lands under the same cap the hub's
+ * overlay clips at — and a surface that grows a header row cannot leave the
+ * basis stale, which is what a fixed constant did.
  */
-export { leftPaneWidth, WINDOW_CHROME_ROWS };
+export function dialogChromeRows(subtext: string): number {
+  return 6 + (subtext === "" ? 0 : 1);
+}
+
+export { leftPaneWidth };
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
 /** Spinner cadence. Unlike the card's 1s header tick, this row really animates. */
@@ -174,8 +181,11 @@ export interface WorkflowDialogGlyphs {
 }
 
 export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
-  tick: UNICODE_GLYPHS.tick,
-  cross: UNICODE_GLYPHS.cross,
+  // The tick and the cross are the hub roster's `✓`/`✗` — one lifecycle
+  // vocabulary across the two windows. The spinner and `◌` stay this file's:
+  // a running row animates here and the hub has no row that draws `◌`.
+  tick: "✓",
+  cross: "✗",
   queued: "◌",
   pointer: "❯",
   focus: UNICODE_GLYPHS.pointer,
@@ -424,6 +434,8 @@ export interface ResolvedWorkflowDialog {
   clampedAgent: number;
   /** The selected phase's agents, after the state filter. */
   visibleAgents: WorkflowAgentEntry[];
+  /** The run's agents flattened across its phases, in run order. */
+  runAgents: WorkflowAgentEntry[];
   selectedEntry: WorkflowAgentEntry | undefined;
   /** False once the run stops — which is what turns live agents "interrupted". */
   workflowActive: boolean;
@@ -471,6 +483,10 @@ export function resolveWorkflowDialog(input: WorkflowDialogInput): ResolvedWorkf
     clampedPhase,
     clampedAgent,
     visibleAgents,
+    // The whole run, flattened across its phases — the list a run page walks,
+    // from the same helper the hub's run pages use, while `visibleAgents`
+    // stays the clamped phase's slice the pane's title counts.
+    runAgents: flattenRunAgents(input.progress, input.meta?.phases),
     selectedEntry: visibleAgents[clampedAgent],
     workflowActive,
     paused: input.task.status === "paused",
@@ -577,7 +593,7 @@ export function phaseListRows(options: {
           { text: " " },
           { text: group.title, color },
         ],
-        group.totalCount === 0 ? [] : [{ text: `${group.doneCount}/${group.totalCount} `, color }],
+        group.totalCount === 0 ? [{ text: "— ", color: "dim" }] : [{ text: `${group.doneCount}/${group.totalCount} `, color }],
         width,
       ),
     );
@@ -886,51 +902,61 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   for (let row = 0; row < bodyRows; row++) {
     rows.push({ kind: "split", left: leftRows[row], right: rightRows[row] });
   }
-  rows.push({ kind: "seam" });
+  // The panes end at the band rule; the divider's `┴` is in it and the bottom
+  // edge below is plain — the hub's window, to the row.
+  rows.push({ kind: "band" });
 
   // ---- Key hints ----
-  // Only the actions the run can currently take, so the footer never advertises
-  // a key that does nothing. Gated on `available` as well as run state: a caller
-  // that wires only some of the actions must not get a footer advertising keys
+  // The window's two slots, the hub's split: the actions that change the run
+  // on the left, navigation, the display handoffs and the pinned way out on
+  // the right. The fitter drops whole hints — readout first (there is none
+  // here), then left actions right-to-left, then right hints right-to-left —
+  // so each list runs most-important-first. Only the actions the run can
+  // currently take are advertised, so the footer never promises a key that
+  // does nothing. Gated on `available` as well as run state: a caller that
+  // wires only some of the actions must not get a footer advertising keys
   // that do nothing. Omitting `available` entirely keeps every hint, which is
   // what the layout tests want.
   const can = (action: keyof WorkflowDialogActions | "onOpenLog") => input.available?.[action] ?? true;
-  const hints: string[] = [];
+  const actions: string[] = [];
+  const keys: string[] = [];
   if (inPhases) {
-    hints.push(`${glyphs.upDown} select`);
-    if (view.visibleAgents.length > 0) hints.push(`${glyphs.enter} open`);
-    hints.push("f filter");
+    keys.push(`${glyphs.upDown} select`);
+    if (view.visibleAgents.length > 0) keys.push(`${glyphs.enter} open`);
+    keys.push("f filter");
   } else {
-    hints.push(`${glyphs.upDown} agent`);
+    keys.push(`${glyphs.upDown} agent`);
     if (previewLines(entry?.promptPreview).length > PROMPT_COLLAPSED_LINES) {
-      hints.push("e prompt");
+      actions.push("e prompt");
     }
-    const actions = agentActions(entry, view.workflowActive);
-    if (actions.skip && can("onSkipAgent")) hints.push("s skip");
-    if (actions.retry && can("onRetryAgent")) hints.push("r retry");
+    const agentKeys = agentActions(entry, view.workflowActive);
+    if (agentKeys.skip && can("onSkipAgent")) actions.push("s skip");
+    if (agentKeys.retry && can("onRetryAgent")) actions.push("r retry");
   }
-  if (view.paused && can("onResume")) hints.push("p resume");
-  else if (view.workflowActive && can("onPause")) hints.push("p pause");
-  if (view.workflowActive && can("onKill")) hints.push("x stop");
-  hints.push(inPhases ? "esc close" : "esc back");
+  if (view.paused && can("onResume")) actions.push("p resume");
+  else if (view.workflowActive && can("onPause")) actions.push("p pause");
+  if (view.workflowActive && can("onKill")) actions.push("x stop");
   // The hub popup's expand key — offered at the detail level, where `f` is
-  // free. Full-screen names the way back instead. It sits after the way out
-  // (a narrow terminal drops it before `esc`) and before the two display-only
-  // handoffs below, which exist to be dropped first.
-  if (!inPhases) hints.push(input.fullscreen ? "f popup" : "f expand");
-  // The two display-only hints sit AFTER the way out, because the footer is
-  // clamped rather than wrapped: an 80-column terminal drops them — first
-  // `c convo`, then `⏎ log` — before it drops the escape hatch. Both are gated
-  // on the entry having a record id, so a row whose child has not been issued
-  // one — a queued agent, a replayed one — does not promise a conversation
-  // that does not exist.
+  // free. Full-screen names the way back instead. It sits before the two
+  // display-only handoffs below, which exist to be dropped first.
+  if (!inPhases) keys.push(input.fullscreen ? "f popup" : "f expand");
+  // The two display-only hints exist to be dropped first: they are the last
+  // entries in the right slot, so the fitter gives them up before the
+  // navigation and the pinned way out. Both are gated on the entry having a
+  // record id, so a row whose child has not been issued one — a queued agent,
+  // a replayed one — does not promise a conversation that does not exist.
   if (view.selectedEntry?.recordId !== undefined && can("onOpenLog")) {
-    hints.push(`${glyphs.enter} log`);
+    keys.push(`${glyphs.enter} log`);
   }
   if (view.selectedEntry?.recordId !== undefined && can("onOpenAgent")) {
-    hints.push("c convo");
+    keys.push("c convo");
   }
-  rows.push(fullRow([{ text: hintLine(hints, windowInnerWidth(width), " · "), color: "dim" }]));
+  const left: FooterHint[] = actions.map((text): FooterHint => ({ text, group: "action" }));
+  const right: FooterHint[] = [
+    ...keys.map((text): FooterHint => ({ text, group: "hint" })),
+    { text: inPhases ? "esc close" : "esc back", group: "hint", pinned: true },
+  ];
+  rows.push(fullRow([{ text: footerBand({ width: windowInnerWidth(width), left, right }), color: "dim" }]));
 
   return renderWindow({
     width,
@@ -1239,15 +1265,24 @@ export class WorkflowDialog implements Component {
     return this.popup ? VIEWPORT_HEIGHT_PCT : 100;
   }
 
-  /** Body height for the pane window, from the hub's popup arithmetic. */
+  /** Body height for the pane window, from the overlay's share of the terminal. */
   private paneHeight(): number {
     return paneBodyHeight({
       terminalRows: this.tui.terminal?.rows,
       viewportPct: this.viewportPct(),
-      chromeRows: WINDOW_CHROME_ROWS,
+      // Counted from the header rows the run actually draws, so the window
+      // fills the overlay's box exactly and P6's identity block needs no
+      // constant bump.
+      chromeRows: dialogChromeRows(this.subtext()),
       min: MIN_PANE_BODY_ROWS,
       fallbackRows: DEFAULT_PANE_BODY_ROWS,
     });
+  }
+
+  /** The run's subtext row, when the header draws one. */
+  private subtext(): string {
+    const { task, meta } = this.source();
+    return meta?.description ?? task.description ?? task.summary ?? "";
   }
 
   invalidate(): void {
@@ -1308,7 +1343,8 @@ export class WorkflowDialog implements Component {
         maxHeightPct: () =>
           Math.max(
             20,
-            this.viewportPct() - Math.ceil((WINDOW_CHROME_ROWS * 100) / Math.max(1, this.tui.terminal.rows)),
+            this.viewportPct() -
+              Math.ceil((dialogChromeRows(this.subtext()) * 100) / Math.max(1, this.tui.terminal.rows)),
           ),
         onBack: () => this.leaveLog(),
         // ↑/↓ are the pane list's selection keys, so the viewer must not
@@ -1510,23 +1546,27 @@ export class WorkflowDialog implements Component {
       // hands them over.
       rows.push({ kind: "split", left: [{ text: leftText[i] ?? "" }], right: [{ text: chat[i] ?? "" }] });
     }
-    rows.push({ kind: "seam" });
+    rows.push({ kind: "band" });
 
-    // The level's own keys. `p` here pauses the AGENT being viewed — not the
-    // run — so it is gated on the record's lifecycle and the wiring, not on
-    // the run's. `c` and `f` sit after the way out so a narrow terminal drops
-    // them first, the display-only rule the segment footer follows.
-    const hints: string[] = [`${glyphs.upDown} agent`];
+    // The level's own keys, in the window's two slots. `p` here pauses the
+    // AGENT being viewed — not the run — so it is gated on the record's
+    // lifecycle and the wiring, not on the run's; `x stop` remains the run's.
+    // The display-only `c`/`f` sit last in the right slot, so a narrow
+    // terminal drops them before the pinned way out.
+    const left: FooterHint[] = view.workflowActive ? [{ text: "x stop", group: "action" }] : [];
+    const keys: string[] = [`${glyphs.upDown} agent`];
     const record = this.logRecord();
     if (this.log?.pauseAgent !== undefined) {
-      if (record?.status === "paused") hints.push("p resume");
-      else if (record?.status === "running" || record?.status === "queued") hints.push("p pause");
+      if (record?.status === "paused") keys.push("p resume");
+      else if (record?.status === "running" || record?.status === "queued") keys.push("p pause");
     }
-    if (view.workflowActive) hints.push("x stop");
-    hints.push("esc back");
-    hints.push("c copy");
-    hints.push(this.popup ? "f expand" : "f popup");
-    rows.push(fullRow([{ text: hintLine(hints, windowInnerWidth(contentWidth), " · "), color: "dim" }]));
+    keys.push("c copy");
+    keys.push(this.popup ? "f expand" : "f popup");
+    const right: FooterHint[] = [
+      ...keys.map((text): FooterHint => ({ text, group: "hint" })),
+      { text: "esc back", group: "hint", pinned: true },
+    ];
+    rows.push(fullRow([{ text: footerBand({ width: windowInnerWidth(contentWidth), left, right }), color: "dim" }]));
 
     // One rendering for both paths: the window's own cells carry role colours
     // and are painted here, the viewer's and the list's arrive already styled.
