@@ -3,6 +3,7 @@ import type { WorkflowMeta } from "../src/workflow/meta.js";
 import {
   buildPhaseGroups,
   collapse,
+  currentPhaseIndex,
   displayState,
   elapsedMs,
   footerPhaseLabel,
@@ -104,6 +105,29 @@ describe("isLive", () => {
     expect(isLive(agentEntry({ index: 0, state: "progress" }))).toBe(true);
     expect(isLive(agentEntry({ index: 0, state: "done" }))).toBe(false);
     expect(isLive(agentEntry({ index: 0, state: "error" }))).toBe(false);
+  });
+});
+
+describe("currentPhaseIndex", () => {
+  it("marks the first group still running", () => {
+    const groups = buildPhaseGroups([
+      agentEntry({ index: 0, state: "done" }),
+      agentEntry({ index: 1, state: "start", phaseIndex: 1 }),
+    ]);
+    expect(currentPhaseIndex(groups)).toBe(1);
+  });
+
+  it("marks a settled run's last started phase, not the first", () => {
+    const groups = buildPhaseGroups([
+      agentEntry({ index: 0, state: "done", phaseIndex: 0 }),
+      agentEntry({ index: 1, state: "done", phaseIndex: 1 }),
+      agentEntry({ index: 2, state: "done", phaseIndex: 2 }),
+    ]);
+    expect(currentPhaseIndex(groups)).toBe(2);
+  });
+
+  it("marks the opening phase before anything starts", () => {
+    expect(currentPhaseIndex(buildPhaseGroups([]))).toBe(0);
   });
 });
 

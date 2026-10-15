@@ -28,7 +28,7 @@ import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import { buildPhaseGroups, currentPhaseIndex, displayState, elapsedMs, formatDuration, type PhaseGroup, type WorkflowAgentEntry } from "../workflow/progress.js";
 import type { AgentActivity, Theme } from "./agent-widget.js";
-import { buildInvocationTags, describeActivity, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
+import { buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT, type ViewerBackgroundAction } from "./conversation-viewer.js";
 import { copyRecordResult } from "./copy-result.js";
 import type { FleetWorkflow } from "./fleet-list.js";
@@ -335,7 +335,7 @@ export function agentHeaderLines(input: {
     clampLine([
       { text: `${statusGlyph(record.status, th)} ${renderAgentRecordName(record, th, { bold: true })}${mode ? th.fg("dim", ` (${mode})`) : ""}` },
       { text: `  ${record.description}`, color: "muted" },
-      { text: ` · ${stats.join(" · ")}`, color: "dim" },
+      { text: ` · ${fgPreservingNestedStyles(th, "dim", stats.join(" · "))}` },
     ], width),
     clampLine([{ text: th.fg("dim", `  ↳ ${invocationSummary(record, parentName)}`) }], width),
   ];
@@ -1385,7 +1385,7 @@ export class AgentHub implements Component {
       body.push(...phaseListRows({
         groups,
         selectedPhase: currentPhaseIndex(groups),
-        capacity: Math.max(1, this.bodyRows(rows, true) - body.length),
+        capacity: Math.max(0, this.bodyRows(rows, true) - body.length),
         width,
         glyphs: UNICODE_DIALOG_GLYPHS,
       }));
@@ -1429,8 +1429,12 @@ export class AgentHub implements Component {
     const glyphs = UNICODE_DIALOG_GLYPHS;
     const groups = buildPhaseGroups(source.progress, source.meta?.phases);
     const lines: PaneRow[] = [clampLine([{ text: "PHASES", color: "muted", bold: true }], width)];
+    // The phase list windows into what is left beside its own header and a
+    // reserved RUN AGENTS block (blank + header + one agent row), so a long
+    // phase list can no longer push the agents off the pane's bottom.
+    const phaseCapacity = Math.max(0, capacity - 4);
     lines.push(
-      ...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: Math.max(1, groups.length), width, glyphs }),
+      ...phaseListRows({ groups, selectedPhase: this.runPhaseSel, capacity: phaseCapacity, width, glyphs }),
     );
     lines.push([]);
     lines.push(clampLine([{ text: "RUN AGENTS", color: "muted", bold: true }], width));
@@ -1532,7 +1536,7 @@ export class AgentHub implements Component {
    * An agent's event log — the compact timestamped companion to the
    * transcript, from what the record and its live activity know: spawn, turns,
    * tool calls, completion with tokens and cost. The trailing line is the live
-   * activity, which is where the removed `❞` strip's information went.
+   * activity — the same text the `❞` strip shows until its removal lands.
    */
   private agentLogLines(width: number, rows: number): PaneRow[] {
     const record = this.focusedRecord();
@@ -1885,7 +1889,9 @@ export class AgentHub implements Component {
     const name = renderAgentRecordName(record, th, selected
       ? { fallbackColor: "text", bold: true }
       : { fallbackColor: "muted" });
-    return `${marker} ${glyph} ${name}`;
+    // Clamp here rather than in the caller's clampLine overflow path, which
+    // strips the row's colors when a long collision handle overflows the cell.
+    return truncateToWidth(`${marker} ${glyph} ${name}`, width, "…");
   }
 
   private renderActivity(bodyRows: number): WindowRow[] {

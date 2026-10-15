@@ -235,9 +235,7 @@ describe("the header block every right pane opens with", () => {
       const h = pageHarness();
       h.open();
       to(h.press);
-      const rows = rightRows(h.frame());
       const [head, sub, rule] = identity(h.frame());
-      expect(rows[0], page).toBe(head);
       expect(head, page).not.toMatch(/^─/);
       expect(head, page).toMatch(/[●○‖✓✗·]/);
       expect(sub, page).toMatch(/^ {2}↳ /);
@@ -259,16 +257,20 @@ describe("the header block every right pane opens with", () => {
     expect(identity(h.frame())[1].trimEnd()).toBe("  ↳ migrate-v2 · anthropic/claude-sonnet-4-6 · worktree");
   });
 
-  it("keeps identity ahead of the body at nonzero logScroll", () => {
+  it("identity occupies the first three rows; the body starts directly under the rule", () => {
     const h = pageHarness();
     h.open();
     h.press("l"); // SL
     const before = identity(h.frame());
     for (let i = 0; i < 5; i++) h.press(DOWN);
+    // Scrolling moves the body only: the identity triple is byte-identical
+    // and still the pane's first three rows.
     expect(identity(h.frame())).toEqual(before);
-    expect(rightRows(h.frame())[0]).toBe(before[0]);
-    expect(rightRows(h.frame())[1]).toBe(before[1]);
-    expect(rightRows(h.frame())[2]).toBe(before[2]);
+    const rows = rightRows(h.frame());
+    expect(rows.slice(0, 3), "identity is the first three rows").toEqual(before);
+    expect(rows.length, "a body exists under the rule").toBeGreaterThan(3);
+    expect(rows[3], "the row under the rule is body, not another rule or blank").not.toBe(before[2]);
+    expect(rows[3].trim()).not.toBe("");
   });
 });
 

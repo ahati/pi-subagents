@@ -322,8 +322,16 @@ export function buildPhaseGroups(
  * counters are for.
  */
 export function currentPhaseIndex(groups: readonly PhaseGroup[]): number {
-  const index = groups.findIndex(group => group.status === "running");
-  return index >= 0 ? index : 0;
+  const running = groups.findIndex(group => group.status === "running");
+  if (running >= 0) return running;
+  // Nothing running: a settled run marks the last group that actually
+  // started (a cleanly finished run has no "running" group, and index 0
+  // would point at the wrong end); a run that never started marks its
+  // opening phase.
+  for (let i = groups.length - 1; i >= 0; i--) {
+    if (groups[i].status !== "not-started") return i;
+  }
+  return 0;
 }
 
 /**

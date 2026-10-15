@@ -406,8 +406,9 @@ function ruleCell(cell: RuleCell): WorkflowCardLine {
 /**
  * The window, from the rows a surface contributed.
  *
- * Draws the `╭─┬─╮` / `╰─┴─╯` edges (split and titled when `panes` is given,
- * plain otherwise), every row in between, and nothing else: the caller owns
+ * Draws the `╭─┬─╮` / `╰─┴─╯` edges (split when `panes` is given, plain
+ * otherwise — both titled: the split edge carries `title` in the master's
+ * cell, the plain edge carries it in the edge itself), every row in between, and nothing else: the caller owns
  * the content and the order, this owns the columns. That is the whole contract
  * — the hub's chat, its roster table and the workflow inspector's three levels
  * are all calls to this function with different rows.
@@ -418,7 +419,9 @@ export function renderWindow(options: {
   rows: readonly WindowRow[];
   /** Absent → a single-pane window: no split bars, no tee. */
   panes?: PaneGeometry;
-  /** The master pane's name, drawn into the top edge — the hub's ` Agents `. */
+  /** The window's name — in a split window it names the master pane's cell
+ * (the hub's constant ` Agents & Workflows `); in a single-pane window it is
+ * drawn into the top edge itself. */
   title?: string;
   ellipsis?: string;
 }): WorkflowCardLine[] {
