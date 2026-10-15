@@ -51,7 +51,9 @@ layout arithmetic in a surface module.
   its bytes are pinned: the inspector and the popup chat twin.
 - **The frame** — the top edge is `╭ Agents & Workflows ┬──…──╮`: the title
   names both kinds and exactly fills the master cell, and the `┬` is where the
-  divider lands. The bottom edge mirrors it with `┴`.
+  divider lands. The bottom edge mirrors it with `┴`. The stacked twin
+  (40–59 cols) has no tee to hang a title on, so its top edge carries the same
+  title itself: `╭ Agents & Workflows ─…─╮`.
 - **Three rules, three jobs**:
   1. the **quiet rule** `───` — exactly three dashes, dim, between transcript
      blocks; content-level, never spanning a cell;
@@ -136,6 +138,8 @@ The agent header (R preview, **T**, **SL**):
 ```
 
 `(twin)` marks append prompt mode; invocation tags list only what applies. The
+`↳` line is always drawn — an agent with no invocation tag renders `  ↳ —` —
+so the header rule and the body below it never move by a row per record. The
 run header (R preview, **W**, **L**):
 
 ```text

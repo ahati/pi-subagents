@@ -138,7 +138,10 @@ describe("fullscreen conversation observer", () => {
   it("uses Pi's single-column track and thumb glyphs", () => {
     const { render, mouse } = setup();
     const lines = render();
-    expect(lines.filter(line => line.endsWith("┃"))).toHaveLength(3);
+    // The viewport is one row shorter than it was before the header block's
+    // `↳` row became unconditional: an agent with no invocation still spends
+    // that row, so the rule and the body below it never move.
+    expect(lines.filter(line => line.endsWith("┃"))).toHaveLength(2);
     expect(lines.some(line => line.endsWith("│"))).toBe(true);
     expect(lines.some(line => /[░█]/.test(line))).toBe(false);
     expect(lines.every(line => !/[│┃]{2}$/.test(line))).toBe(true);
@@ -170,7 +173,7 @@ describe("fullscreen conversation observer", () => {
     const { render, messages, viewer } = setup(20, 100, undefined, "always");
     try {
       messages[0].content = "short";
-      expect(render().filter(line => line.endsWith("┃"))).toHaveLength(16);
+      expect(render().filter(line => line.endsWith("┃"))).toHaveLength(15);
     } finally {
       viewer.dispose();
     }

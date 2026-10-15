@@ -119,11 +119,17 @@ export function leftPaneWidth(width: number, maxLeft = 18, pad = 0): number {
   return Math.max(1, Math.min(maxLeft, Math.floor(available / 3), available - 1));
 }
 
-/** The window's top or bottom edge: `╭───╮` / `╰───╯` across the whole width. */
-export function frameEdge(width: number, box: PaneBox, side: "top" | "bottom"): string {
+/**
+ * The window's top or bottom edge: `╭───╮` / `╰───╯` across the whole width.
+ *
+ * An optional `title` names the window in it — `╭ Agents & Workflows ─╮` — the
+ * way {@link splitEdge} names the master pane. A single-pane window has no tee
+ * to hang a title on, so the edge carries it instead.
+ */
+export function frameEdge(width: number, box: PaneBox, side: "top" | "bottom", title = ""): string {
   const left = side === "top" ? box.topLeft : box.bottomLeft;
   const right = side === "top" ? box.topRight : box.bottomRight;
-  return `${left}${box.horizontal.repeat(Math.max(0, width - 2))}${right}`;
+  return `${left}${title}${box.horizontal.repeat(Math.max(0, width - 2 - visibleWidth(title)))}${right}`;
 }
 
 /**
@@ -347,12 +353,15 @@ function geometryForList(width: number, list: number, pad: number): PaneGeometry
 /**
  * One row of a window, as content: the surface says what, the window says
  * where. `full` spans the frame's inner width, `split` puts a master cell
- * beside a detail cell, `titles` is the rule that names them and `seam` the
- * closing rule (with a `┴` where the panes meet).
+ * beside a detail cell, `titles` is the rule that names them, `seam` the
+ * closing rule (with a `┴` where the panes meet) and `headerRule` the rule the
+ * detail pane opens with — `left` carries on the master cell beside it, since
+ * the panes flow independently.
  */
 export type WindowRow =
   | { kind: "full"; cells: WorkflowCardLine }
   | { kind: "split"; left?: WorkflowCardLine; right?: WorkflowCardLine }
+  | { kind: "headerRule"; left?: WorkflowCardLine }
   | { kind: "titles"; left?: string; right?: string; padding?: RuleTitlePadding }
   | { kind: "seam" };
 
@@ -369,6 +378,21 @@ function paneCell(line: WorkflowCardLine | undefined, cellWidth: number, pad: nu
   const clamped = clampLine(line ?? [], inner, ellipsis);
   const gap = Math.max(0, inner - lineWidth(clamped));
   return [{ text: " ".repeat(pad) }, ...clamped, { text: " ".repeat(gap + pad) }];
+}
+
+/**
+ * The header rule: one full cell of rule under the detail pane's identity
+ * block, the cell's pad columns kept as inset. It lives here rather than in a
+ * surface because the glyphs and the dim role are the frame's — a surface only
+ * says which row the identity block ends on.
+ */
+function headerRuleCell(cellWidth: number, pad: number, box: PaneBox): WorkflowCardLine {
+  const inner = Math.max(0, cellWidth - 2 * pad);
+  return [
+    { text: " ".repeat(pad) },
+    { text: box.horizontal.repeat(inner), color: "dim" },
+    { text: " ".repeat(pad) },
+  ];
 }
 
 /** One titled region of a rule, with the window's style roles. */
@@ -404,9 +428,10 @@ export function renderWindow(options: {
   const rightCell = panes ? width - panes.leftCellWidth - FRAME_BARS : width - 2;
   const lines: WorkflowCardLine[] = [];
 
+  const titleOf = (cellWidth: number) => stripTerminalSequences(truncateToWidth(options.title ?? "", cellWidth, ellipsis));
   lines.push([edge(panes
-    ? splitEdge(width, panes.leftCellWidth, box, "top", stripTerminalSequences(truncateToWidth(options.title ?? "", panes.leftCellWidth, ellipsis)))
-    : frameEdge(width, box, "top"))]);
+    ? splitEdge(width, panes.leftCellWidth, box, "top", titleOf(panes.leftCellWidth))
+    : frameEdge(width, box, "top", titleOf(Math.max(0, width - 2))))]);
 
   for (const item of options.rows) {
     switch (item.kind) {
@@ -427,6 +452,17 @@ export function renderWindow(options: {
               ...bar,
             ]
           : [...bar, ...paneCell(item.left ?? item.right, width - 2, 0, ellipsis), ...bar]);
+        break;
+      case "headerRule":
+        lines.push(panes
+          ? [
+              ...bar,
+              ...paneCell(item.left, panes.leftCellWidth, panes.pad, ellipsis),
+              ...bar,
+              ...headerRuleCell(rightCell, panes.pad, box),
+              ...bar,
+            ]
+          : [...bar, ...headerRuleCell(width - 2, PANE_PADDING, box), ...bar]);
         break;
       case "titles": {
         // One rule, whether there are one or two cells to title: the pane `│`

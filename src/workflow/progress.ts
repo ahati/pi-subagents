@@ -315,6 +315,18 @@ export function buildPhaseGroups(
 }
 
 /**
+ * The phase a run is on, as an index into {@link buildPhaseGroups}' result:
+ * the first group still running, else the first. A run that has not started
+ * yet marks its opening phase and a finished one its last known position —
+ * the mark names "where the run is", never "how far it got", which is what the
+ * counters are for.
+ */
+export function currentPhaseIndex(groups: readonly PhaseGroup[]): number {
+  const index = groups.findIndex(group => group.status === "running");
+  return index >= 0 ? index : 0;
+}
+
+/**
  * Aggregate counts for the header line.
  *
  * `agentCount` is the number the runtime has *scheduled*, which can exceed the
