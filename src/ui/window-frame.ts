@@ -14,9 +14,6 @@
  *   (`│` + cell + `│` + cell + `│` = width).
  * - {@link frameEdge} and {@link frameRow} are the window's edges and its
  *   padded content row.
- * - {@link hintLine} is the single-list footer rule the inspector still uses:
- *   drop hints right-to-left until the line fits, so the escape hatch always
- *   survives and no hint is ever cut in half.
  * - {@link footerBand} is the two-slot band: the readout and the page's
  *   actions on the left, navigation and keys with the escape anchor on the
  *   right, fitted whole-hint by whole-hint.
@@ -259,22 +256,6 @@ export function paneRule(options: {
 }
 
 /**
- * A footer, fitted to `width`: hints are dropped from the right until the line
- * fits, so the last hint standing is never cut in half and the essential keys
- * — the way out, above all — survive. Only when a single hint is already too
- * wide does the result get truncated.
- */
-export function hintLine(keys: readonly string[], width: number, joiner = "·"): string {
-  const kept = [...keys];
-  let line = kept.join(joiner);
-  while (kept.length > 1 && visibleWidth(line) > width) {
-    kept.pop();
-    line = kept.join(joiner);
-  }
-  return visibleWidth(line) > width ? truncateToWidth(line, width) : line;
-}
-
-/**
  * One hint of the footer band, with the tier it drops in.
  *
  * The band's left slot is the readout and the page's live actions, its right
@@ -431,19 +412,17 @@ function geometryForList(width: number, list: number, pad: number): PaneGeometry
 /**
  * One row of a window, as content: the surface says what, the window says
  * where. `full` spans the frame's inner width, `split` puts a master cell
- * beside a detail cell, `titles` is the rule that names them, `seam` the
- * closing rule (with a `┴` where the panes meet), `band` the rule above the
- * footer (whose `┴` the divider ends at), and `headerRule` the rule the
- * detail pane opens with — `left` carries on the master cell beside it, since
- * the panes flow independently.
+ * beside a detail cell, `titles` is the rule that names them, `band` the rule
+ * above the footer (whose `┴` the divider ends at), and `headerRule` the rule
+ * the detail pane opens with — `left` carries on the master cell beside it,
+ * since the panes flow independently.
  */
 export type WindowRow =
   | { kind: "full"; cells: WorkflowCardLine }
   | { kind: "split"; left?: WorkflowCardLine; right?: WorkflowCardLine }
   | { kind: "headerRule"; left?: WorkflowCardLine }
   | { kind: "titles"; left?: string; right?: string; padding?: RuleTitlePadding }
-  | { kind: "band" }
-  | { kind: "seam" };
+  | { kind: "band" };
 
 /** Measured width of a cell line. */
 const lineWidth = (line: WorkflowCardLine) => line.reduce((sum, segment) => sum + visibleWidth(segment.text), 0);
@@ -590,17 +569,6 @@ export function renderWindow(options: {
           { text: " " },
           ...bar,
         ]);
-        break;
-      case "seam":
-        lines.push(panes
-          ? [
-              edge(box.leftTee),
-              edge(box.horizontal.repeat(panes.leftCellWidth)),
-              edge(box.bottomTee),
-              edge(box.horizontal.repeat(Math.max(0, rightCell))),
-              edge(box.rightTee),
-            ]
-          : [edge(box.leftTee), edge(box.horizontal.repeat(width - 2)), edge(box.rightTee)]);
         break;
     }
   }

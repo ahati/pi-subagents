@@ -1176,13 +1176,15 @@ describe("key hints reflect the wired actions", () => {
     },
   ];
 
-  it("drops the conversation hint before the way out on a narrow terminal", () => {
-    // The footer is clamped, not wrapped, so a hint added at the end costs
-    // whatever was already there. `c convo` is last precisely so that an
-    // 80-column terminal loses it rather than `esc back` — every other key
-    // either moves the cursor, changes the run, or is the escape hatch.
+  it("drops the run-control actions before the way out on a narrow terminal", () => {
+    // The band fits whole hints only: the readout and the left actions drop
+    // right-to-left, so an 80-column terminal loses `r retry`, `p pause` and
+    // `x stop` — in that order — before `c convo`, and `esc back` is pinned.
     const narrow = dialog({ progress: everyKey, width: 80, state: { level: "agent" } }).at(-2) ?? "";
     expect(narrow).toContain("esc back");
+    expect(narrow).toContain("c convo");
+    expect(narrow).not.toContain("x stop");
+    expect(narrow).not.toContain("p pause");
   });
 
   it("shows every hint once the terminal has room", () => {

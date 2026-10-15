@@ -165,7 +165,8 @@ describe("one window for both surfaces", () => {
         const bottom = lines.at(-1)!;
         if (level === "hub") {
           // The popup chat twin still bottoms out at a split edge; it is a
-          // separate window, restyled in a later phase.
+          // separate window whose restyle is out of scope (plan D3) — it keeps
+          // its own grouping and frame.
           expect(bottom.indexOf("┴"), `${level} bottom edge`).toBe(tee);
         } else {
           // The inspector's divider terminates at the band rule: the `┴` is in
@@ -223,7 +224,7 @@ describe("one window for both surfaces", () => {
       { kind: "full", cells: [{ text: "header" }] },
       { kind: "titles", right: "detail" },
       { kind: "split", left: [{ text: "master" }], right: [{ text: "content" }] },
-      { kind: "seam" },
+      { kind: "band" },
     ];
     const panes = paneGeometry(40);
     expect(renderWindow({ width: 40, box: UNICODE_PANE_BOX, panes, title: " Master ", rows }).map(line => line.map(c => c.text).join(""))).toEqual([
@@ -231,8 +232,8 @@ describe("one window for both surfaces", () => {
       "│ header                               │",
       "├─────────────┬ detail ────────────────┤",
       "│ master      │ content                │",
-      "├─────────────┴────────────────────────┤",
-      "╰─────────────┴────────────────────────╯",
+      "│ ────────────┴─────────────────────── │",
+      "╰──────────────────────────────────────╯",
     ]);
   });
 

@@ -9,16 +9,17 @@
  * │ review-changes                         1/3 agents · 1m12s│
  * │ Review changed files across dimensions                   │
  * ├────────────────────┬ Verify · 1 agent ────────────────────┤
- * │  ❯ ✔ Review  3/3   │  ❯ ◌ verify:auth.ts · attempt 2  8s  │
+ * │  ❯ ✓ Review  3/3   │  ❯ ◌ verify:auth.ts · attempt 2  8s  │
  * │    2 Verify  1/2   │                                      │
- * ├────────────────────┴──────────────────────────────────────┤
- * │ ↑↓ select · ⏎ open · f filter · x stop · esc close        │
- * ╰────────────────────┴──────────────────────────────────────╯
+ * │ ──────────────────┴───────────────────────────────────── │
+ * │ ↑↓ select · ⏎ open · f filter · x stop      esc close    │
+ * ╰──────────────────────────────────────────────────────────╯
  * ```
  *
  * The master pane is named in the top edge, the hub's ` Agents ` placement;
  * both cells carry a padding column; the rule titles the detail pane alone and
- * the seam closes at a `┴`.
+ * the band rule carries the `┴` the divider ends at — the bottom edge below
+ * it is plain, and the footer is the shared two-slot band.
  *
  * Enter on a phase swaps the panes — that phase's agents move left and the
  * right becomes the agent's Prompt / Activity / Outcome detail. Enter on an
@@ -32,14 +33,15 @@
  * fills the same 70%-of-terminal ceiling the hub's overlay caps at, rather than
  * shrink-wrapping the content.
  *
- * A phase with no agents yet shows its number and nothing else. The single-pane
- * layout this replaced spelled that out as "Not started yet"; the left pane is
- * too narrow to hold the words, and a numbered row with no count says it.
+ * A phase with no agents yet shows its number and a dim `—` where the counts
+ * sit. The single-pane layout this replaced spelled that out as "Not started
+ * yet"; the left pane is too narrow to hold the words, and a numbered row
+ * with the dash says it as quietly.
  *
  * **The glyphs are not the card's glyphs.** `workflow-card.ts` keys off the raw
  * entry `state`; this file keys off the *derived* `displayState(entry, active)`
  * and splits cases the card cannot see — skipped, blocked, queued and
- * interrupted all render as a plain ✘ or ⟳ inline but are distinct here. `◌`
+ * interrupted all render as a plain `✗` or `⟳` inline but are distinct here. `◌`
  * (U+25CC) appears only in this file, and a running row animates a spinner where
  * the card draws a static `⟳`.
  *
@@ -74,7 +76,6 @@ import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
   displayState,
-  flattenRunAgents,
   formatDuration,
   header,
   isLive,
@@ -484,9 +485,9 @@ export function resolveWorkflowDialog(input: WorkflowDialogInput): ResolvedWorkf
     clampedAgent,
     visibleAgents,
     // The whole run, flattened across its phases — the list a run page walks,
-    // from the same helper the hub's run pages use, while `visibleAgents`
-    // stays the clamped phase's slice the pane's title counts.
-    runAgents: flattenRunAgents(input.progress, input.meta?.phases),
+    // from the groups already built above, while `visibleAgents` stays the
+    // clamped phase's slice the pane's title counts.
+    runAgents: groups.flatMap(g => g.agents),
     selectedEntry: visibleAgents[clampedAgent],
     workflowActive,
     paused: input.task.status === "paused",
@@ -1478,10 +1479,9 @@ export class WorkflowDialog implements Component {
    * ├─────────────────────┬ verify:auth.ts ────────┤
    * │  ❯ ◌ verify:auth.ts │ (live conversation)    │
    * │    ✓ plan           │                        │
-   * ├─────────────────────┴────────────────────────┤
-   * │ ↑↓ agent · p pause · x stop · esc back ·     │
-   * │   c copy · f expand                          │
-   * ╰─────────────────────┴────────────────────────╯
+   * │ ───────────────────┴─────────────────────── │
+   * │ ↑↓ agent · p pause · x stop       esc back  │
+   * ╰─────────────────────────────────────────────╯
    * ```
    */
   private renderLog(width: number, viewer: ConversationViewer): string[] {

@@ -318,8 +318,9 @@ export function buildPhaseGroups(
  * A run's agents in run order, flattened across its phase groups.
  *
  * The whole list a run page walks, as opposed to one group's slice: the hub's
- * run pages (W/WA/SAL/L) and the inspector both need the run's agents in
- * script order, however the phases grouped them.
+ * run pages (W/WA/SAL/L) walk the run's agents in script order, however the
+ * phases grouped them. The inspector builds the same list from its already-
+ * resolved groups.
  */
 export function flattenRunAgents(
   progress: readonly WorkflowEntry[],

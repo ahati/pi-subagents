@@ -20,7 +20,6 @@ import {
   footerBand,
   frameEdge,
   frameRow,
-  hintLine,
   leftPaneWidth,
   MASTER_LIST_WIDTH,
   masterPaneGeometry,
@@ -281,27 +280,6 @@ describe("pane rules", () => {
     for (const file of files) {
       expect(readFileSync(new URL(file, dir), "utf-8"), `${file} draws its own rule`).not.toMatch(ownRule);
     }
-  });
-});
-
-describe("footer hints", () => {
-  const keys = ["↑↓ select", "Enter open", "x stop", "p pause", "/ filter", "f expand", "q close"];
-
-  it("drops hints from the right, never cutting one in half", () => {
-    const line = hintLine(keys, 30);
-    expect(line).toBe("↑↓ select·Enter open·x stop");
-    for (const key of ["↑↓ select", "Enter open", "x stop"]) expect(line).toContain(key);
-    // The old clamp left a trailing separator where the cut landed.
-    expect(line.endsWith("·")).toBe(false);
-  });
-
-  it("keeps every hint when they fit, and one hint when only one does", () => {
-    expect(hintLine(keys, 200, " · ")).toBe(keys.join(" · "));
-    expect(hintLine(keys, 10)).toBe("↑↓ select");
-    // A single hint wider than the line is the one case left to truncation.
-    const only = hintLine(["a very long hint"], 6);
-    expect(stripTerminalSequences(only).startsWith("a v")).toBe(true);
-    expect(visibleWidth(only)).toBeLessThanOrEqual(6);
   });
 });
 
