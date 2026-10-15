@@ -40,6 +40,17 @@ function mockRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   } as AgentRecord;
 }
 
+function viewerFor(messages: any[]): ConversationViewer {
+  return new ConversationViewer(
+    mockTui(),
+    mockSession(messages),
+    mockRecord(),
+    undefined,
+    theme as any,
+    vi.fn(),
+  );
+}
+
 function render(messages: any[], over: Partial<AgentRecord> = {}, viewerMarkdown?: () => any): string {
   const viewer = new ConversationViewer(
     mockTui(),
@@ -351,6 +362,19 @@ describe("detailed agentic log (omp-style rendering)", () => {
       OK_RESULT,
     ], {}, () => "all");
     expect(out).toContain("file6");
+    expect(out).not.toContain("(o/ctrl+o for full)");
+  });
+
+  it("o/ctrl+o expansion reveals the text preview's full output too", () => {
+    // The hint the preview prints must be true for the block that prints it:
+    // `expanded` widens the text fallback, not just the rich renderers.
+    const viewer = viewerFor([
+      { role: "assistant", content: [CALL] },
+      OK_RESULT,
+    ]);
+    viewer.handleInput("o");
+    const out = viewer.render(80).join("\n");
+    expect(out).toContain("file5");
     expect(out).not.toContain("(o/ctrl+o for full)");
   });
 

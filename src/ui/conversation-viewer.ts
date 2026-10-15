@@ -73,12 +73,6 @@ export interface ConversationViewerOptions {
    */
   footer?: boolean;
   /**
-   * The run this agent belongs to: leads the `↳` line the way the run-agent
-   * pages read (`↳ migrate-v2 · opencode-go/… · worktree`). A function is
-   * re-read on every render. Undefined → the model alone.
-   */
-  parentName?: string | (() => string | undefined);
-  /**
    * When set, Esc/Ctrl+C/Q return to the parent surface by calling this instead
    * of resolving `done` (which would close the whole overlay). The quit keys
    * become "back" keys; the parent decides how to actually close.
@@ -1068,7 +1062,10 @@ export class ConversationViewer implements Component, Focusable {
     // approximation rather than stacking with it.
     const explicit = this.options?.viewportRows;
     const rows = typeof explicit === "function" ? explicit() : explicit;
-    if (rows !== undefined) return Math.max(1, Math.floor(rows));
+    // The host's budget covers everything the viewer emits — the composer
+    // rows included — so they come out of the window here; the percentage
+    // path already pays for them through chromeLines().
+    if (rows !== undefined) return Math.max(1, Math.floor(rows) - (this.composer ? COMPOSER_ROWS : 0));
     // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
     // more lines than the overlay shows and clip the footer. A function option
     // is re-read per render so a resizing host drags the viewport along.
@@ -1109,8 +1106,7 @@ export class ConversationViewer implements Component, Focusable {
     // models whose short names read alike.
     const { modelName, modelId, tags } = buildInvocationTags(this.record.invocation);
     const model = modelId ?? modelName;
-    const parent = typeof this.options?.parentName === "function" ? this.options.parentName() : this.options?.parentName;
-    const parts = [...(parent ? [parent] : []), ...(model ? [model] : []), ...tags];
+    const parts = [...(model ? [model] : []), ...tags];
     return this.theme.fg("dim", `  ↳ ${parts.length > 0 ? parts.join(" · ") : "—"}`);
   }
 
@@ -1300,7 +1296,7 @@ export class ConversationViewer implements Component, Focusable {
     }
 
     const mode = this.markdownMode();
-    if (mode === "all" || mode === "off") {
+    if (mode === "all" || mode === "off" || this.expanded) {
       // Full result, exactly as the legacy block rendered it.
       const { text, elided } = capResult(raw);
       if (!text) return [truncateToWidth(th.fg("dim", "  ✓ (no output)"), width)];

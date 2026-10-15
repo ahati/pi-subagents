@@ -486,6 +486,11 @@ describe("agent hub popup ↔ full-screen toggle", () => {
     expect(h.optionSets[1]?.overlayOptions).toMatchObject({ width: "100%", maxHeight: "100%" });
     // Chat carried across: still the conversation, not the roster.
     expect(h.frame().join("\n")).toContain("waiting for first message");
+    // Exactly one identity block: the page's own, drawn by the frame — the
+    // viewer `ensureViewer` builds contributes body rows only (the popup's
+    // viewer would have drawn a second one).
+    const arrows = h.frame().filter(l => l.includes("↳ "));
+    expect(arrows).toHaveLength(1);
     expect(h.settled()).toBe(false);
   });
 

@@ -1135,13 +1135,9 @@ describe("ConversationViewer embedded chrome (host-composed identity and band)",
     expect(lines.join("\n")).not.toContain("test agent");
   });
 
-  it("leads the `↳` line with the parent run name, falling back to model-only", () => {
-    const [withRun, withoutRun] = [
-      embedded({ parentName: () => "migrate-v2" }, [], { invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" } }),
-      embedded({ parentName: () => undefined }, [], { invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" } }),
-    ];
-    expect(withRun.render(60).join("\n")).toContain("↳ migrate-v2 · anthropic/claude-sonnet-4-6 · worktree");
-    expect(withoutRun.render(60).join("\n")).toContain("↳ anthropic/claude-sonnet-4-6 · worktree");
+  it("renders the `↳` line model-only — the run lead is the host identity's job", () => {
+    const viewer = embedded({}, [], { invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", isolation: "worktree" } });
+    expect(viewer.render(60).join("\n")).toContain("↳ anthropic/claude-sonnet-4-6 · worktree");
   });
 
   it("keeps the composer usable when the host owns the footer", () => {
@@ -1154,8 +1150,9 @@ describe("ConversationViewer embedded chrome (host-composed identity and band)",
     viewer.handleInput("\r"); // Enter opens the composer
     const lines = viewer.render(60);
     const out = lines.join("\n");
-    // The body keeps its budget and the composer still claims its two rows.
-    expect(lines).toHaveLength(8);
+    // The composer's two rows come out of the host's budget, so the viewer's
+    // total never exceeds viewportRows.
+    expect(lines).toHaveLength(6);
     expect(out).toContain("Enter send");
     expect(out).toContain("Esc cancel");
     expect(out).not.toContain("m md");

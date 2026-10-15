@@ -913,8 +913,14 @@ export class AgentHub implements Component {
   /** Switch to the chat view for `record`, embedding the detailed-log viewer. */
   private enterChat(record: AgentRecord): void {
     this.chatViewer?.dispose();
+    this.chatViewer = undefined;
     this.view = "chat";
     this.chatRecordId = record.id;
+    // Only the popup builds its viewer here. The full-screen chat is page T of
+    // the hub window, and its viewer is `ensureViewer`'s to build — with the
+    // identity/footer suppressed and the frame's budget — so pre-building it
+    // would leak a second identity block and the popup's keys onto the page.
+    if (!this.popup) return;
     this.chatViewer = new ConversationViewer(
       this.tui,
       record.session!,
@@ -1781,8 +1787,6 @@ export class AgentHub implements Component {
         identity: false,
         footer: false,
         viewportRows: () => this.chatViewportRows,
-        // The run the agent belongs to, as on the page's own identity block.
-        parentName: () => (this.page === "WA" || this.page === "SAL" ? this.currentRun()?.name : undefined),
         onBack: () => this.popPage(),
         backHint: () => "↑↓ scroll · esc back · f full",
         scrollHint: () => "PgUp/PgDn · Shift+↑↓ · j/k scroll",
